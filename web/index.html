@@ -239,8 +239,32 @@
       </div>
 
       <div class="drawer-panel" id="panel-fiber" aria-label="Fiber link">
+        <details class="card how" open>
+          <summary class="eyebrow">How it works</summary>
+          <ol class="how-steps">
+            <li><b>Describe</b> your link in words, or upload a photo or diagram. You can also start blank or from an example.</li>
+            <li><b>Check</b>: Netproof runs the optical power budget and marks problems in red on the bench.</li>
+            <li><b>Fix</b>: edit elements in the Link table (or describe it again) until it passes.</li>
+            <li><b>Build</b>: download the build pack PDF with parts, prices, buy links, assembly and power-meter checks.</li>
+          </ol>
+        </details>
         <section class="card">
-          <div class="card-head"><span class="eyebrow" id="fiber-examples-label"><span class="step">01</span> Examples</span></div>
+          <div class="card-head"><span class="eyebrow"><span class="step">01</span> Describe or upload</span>
+            <button type="button" class="chip-btn" id="fiber-upload-btn" aria-label="Upload a photo or diagram">
+              <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M21 15 l-3.5 -3.5 L6 23" /></svg>
+              Image<span class="file-dot" aria-hidden="true"></span>
+            </button>
+          </div>
+          <textarea id="fiber-goal" class="goal-box" rows="3" placeholder="e.g. 1310 nm laser over 10 km of single-mode fiber into a 1x8 splitter feeding receivers" aria-label="Describe your design"></textarea>
+          <p class="attached-line mono" id="fiber-file-name" hidden></p>
+          <div class="btn-row">
+            <button id="fiber-design-btn" type="button" class="dark-btn">Design it &rarr;</button>
+            <button id="fiber-blank-btn" type="button" class="ghost-btn">Start blank</button>
+          </div>
+          <input type="file" id="fiber-file-input" accept="image/*" hidden>
+        </section>
+        <section class="card">
+          <div class="card-head"><span class="eyebrow" id="fiber-examples-label"><span class="step">02</span> Or start from an example</span></div>
           <div id="fiber-examples" class="example-grid" role="group" aria-labelledby="fiber-examples-label">
             <button type="button" class="example-btn" data-fiber-example="good"><span class="vdot pass" aria-hidden="true"></span>Lab link + 1x2 tap</button>
             <button type="button" class="example-btn" data-fiber-example="overload"><span class="vdot stop" aria-hidden="true"></span>10 mW into a meter</button>
@@ -249,7 +273,7 @@
           </div>
         </section>
         <section class="card verdict-card" id="fiber-verdict-card">
-          <div class="card-head"><span class="eyebrow"><span class="step">02</span> Verdict</span></div>
+          <div class="card-head"><span class="eyebrow"><span class="step">03</span> Verdict</span></div>
           <div id="fiber-verdict" class="verdict-word" aria-live="polite"></div>
           <p class="empty" id="fiber-verdict-empty">No check yet.</p>
           <button id="fiber-pack-cta" type="button" class="cta-ghost" hidden>Ready to build &rarr; get the build pack (PDF)</button>
@@ -260,15 +284,15 @@
           </dl>
         </section>
         <section class="card">
-          <div class="card-head"><span class="eyebrow"><span class="step">03</span> Findings</span></div>
+          <div class="card-head"><span class="eyebrow"><span class="step">04</span> Findings</span></div>
           <ul id="fiber-findings" class="findings-list"><li class="empty">No findings yet. Run a check first.</li></ul>
         </section>
         <section class="card">
-          <div class="card-head"><span class="eyebrow"><span class="step">04</span> Power budget</span></div>
+          <div class="card-head"><span class="eyebrow"><span class="step">05</span> Power budget</span></div>
           <div id="fiber-chart" class="fiber-chart" role="img" aria-label="Power after each element"></div>
         </section>
         <section class="card">
-          <div class="card-head"><span class="eyebrow"><span class="step">05</span> Link, laser to detector</span></div>
+          <div class="card-head"><span class="eyebrow"><span class="step">06</span> Link, laser to detector</span></div>
           <div class="table-wrap" tabindex="0" aria-label="Fiber link elements, scrollable">
             <table class="fiber-table">
               <thead><tr><th>id</th><th>type</th><th>settings</th><th>power after</th><th></th></tr></thead>
@@ -287,8 +311,32 @@
       </div>
 
       <div class="drawer-panel" id="panel-optics" aria-label="Optics bench">
+        <details class="card how" open>
+          <summary class="eyebrow">How it works</summary>
+          <ol class="how-steps">
+            <li><b>Describe</b> your setup in words, or upload a photo or paper figure. You can also start blank or from an example.</li>
+            <li><b>Check</b>: Netproof traces every beam on the breadboard and flags stray beams, misses and overloads.</li>
+            <li><b>Fix</b>: drag parts on the 3D breadboard (they snap to the holes), rotate them in the table, or add a beam dump.</li>
+            <li><b>Build</b>: download the build pack PDF with Thorlabs parts, prices, hole positions and alignment steps.</li>
+          </ol>
+        </details>
         <section class="card">
-          <div class="card-head"><span class="eyebrow" id="optics-examples-label"><span class="step">01</span> Examples</span></div>
+          <div class="card-head"><span class="eyebrow"><span class="step">01</span> Describe or upload</span>
+            <button type="button" class="chip-btn" id="optics-upload-btn" aria-label="Upload a photo or diagram">
+              <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M21 15 l-3.5 -3.5 L6 23" /></svg>
+              Image<span class="file-dot" aria-hidden="true"></span>
+            </button>
+          </div>
+          <textarea id="optics-goal" class="goal-box" rows="3" placeholder="e.g. 532 nm laser, steer it with two mirrors, split 50:50 and measure both arms with detectors" aria-label="Describe your design"></textarea>
+          <p class="attached-line mono" id="optics-file-name" hidden></p>
+          <div class="btn-row">
+            <button id="optics-design-btn" type="button" class="dark-btn">Design it &rarr;</button>
+            <button id="optics-blank-btn" type="button" class="ghost-btn">Start blank</button>
+          </div>
+          <input type="file" id="optics-file-input" accept="image/*" hidden>
+        </section>
+        <section class="card">
+          <div class="card-head"><span class="eyebrow" id="optics-examples-label"><span class="step">02</span> Or start from an example</span></div>
           <div class="example-grid" role="group" aria-labelledby="optics-examples-label">
             <button type="button" class="example-btn" data-optics-example="good"><span class="vdot pass" aria-hidden="true"></span>Periscope to detector</button>
             <button type="button" class="example-btn" data-optics-example="stray"><span class="vdot stop" aria-hidden="true"></span>Unblocked split arm</button>
@@ -297,7 +345,7 @@
           </div>
         </section>
         <section class="card verdict-card" id="optics-verdict-card">
-          <div class="card-head"><span class="eyebrow"><span class="step">02</span> Verdict</span></div>
+          <div class="card-head"><span class="eyebrow"><span class="step">03</span> Verdict</span></div>
           <div id="optics-verdict" class="verdict-word" aria-live="polite"></div>
           <p class="empty" id="optics-verdict-empty">No check yet.</p>
           <button id="optics-pack-cta" type="button" class="cta-ghost" hidden>Ready to build &rarr; get the build pack (PDF)</button>
@@ -308,15 +356,15 @@
           </dl>
         </section>
         <section class="card">
-          <div class="card-head"><span class="eyebrow"><span class="step">03</span> Findings</span></div>
+          <div class="card-head"><span class="eyebrow"><span class="step">04</span> Findings</span></div>
           <ul id="optics-findings" class="findings-list"><li class="empty">No findings yet. Run a check first.</li></ul>
         </section>
         <section class="card">
-          <div class="card-head"><span class="eyebrow"><span class="step">04</span> Top view</span></div>
+          <div class="card-head"><span class="eyebrow"><span class="step">05</span> Top view</span></div>
           <div id="optics-plan" class="optics-plan" role="img" aria-label="Top view of the bench with traced beams"></div>
         </section>
         <section class="card">
-          <div class="card-head"><span class="eyebrow"><span class="step">05</span> Elements</span></div>
+          <div class="card-head"><span class="eyebrow"><span class="step">06</span> Elements</span></div>
           <div class="table-wrap" tabindex="0" aria-label="Optics bench elements, scrollable">
             <table class="fiber-table">
               <thead><tr><th>id</th><th>type</th><th>x mm</th><th>y mm</th><th>angle&deg;</th><th>settings</th><th></th></tr></thead>
@@ -335,6 +383,15 @@
       </div>
 
       <div class="drawer-panel active" id="panel-check" role="tabpanel" aria-labelledby="tab-check" tabindex="0">
+        <details class="card how" open>
+          <summary class="eyebrow">How it works</summary>
+          <ol class="how-steps">
+            <li><b>Describe</b> a circuit or upload a schematic (01), or pick an example (02).</li>
+            <li><b>Check</b>: Netproof simulates it with ngspice and marks problems on the 3D bench.</li>
+            <li><b>Fix</b>: edit values in the Netlist tab and Re-check, or press Repair to let the AI propose a fix that is re-simulated.</li>
+            <li><b>Build</b>: when it passes, get the build pack PDF with parts, prices, breadboard steps and PCB footprints.</li>
+          </ol>
+        </details>
         <section class="card">
           <div class="card-head"><span class="eyebrow"><span class="step">01</span> Describe</span>
             <button id="upload-btn" type="button" class="chip-btn" aria-label="Upload a schematic image">
@@ -2509,7 +2566,7 @@
       onRecheck: function (updated) { if (page.applyEdit(updated.id, updated)) { page.recheck(); } },
       onRepair: function (updated) { if (page.applyEdit(updated.id, updated)) { page.repair(); } },
       onNetlistChange: function (list) { page.applyNetlist(list); },
-      onMove: function (id, pose) { /* layout-only drag; never changes the netlist or verdict */ },
+      onMove: function (id, pose) { if (window.NetproofOptics && document.body.getAttribute('data-domain') === 'optics') window.NetproofOptics.onMove(id, pose); },
       onError: function (err) {
         var msg = err && err.message ? err.message : String(err);
         setStatus('error: ' + msg + ' Flat table still works.');

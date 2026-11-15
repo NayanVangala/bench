@@ -1,6 +1,48 @@
 // Fiber link mode: examples, element editor, power-budget chart, verdict,
 // findings, build pack, and the shared 3D bench (main3d setFiberLink).
 // Every number shown comes from POST /fiber/check; nothing is computed here.
+// Describe / upload / start-blank controls shared by the fiber and optics
+// panels: POST /<dom>/design (AI proposes, server checks) -> onResult.
+window.NetproofDesign = function (dom, onResult, onBlank) {
+  function $(id) { return document.getElementById(id); }
+  var file = null;
+  var input = $(dom + '-file-input');
+  $(dom + '-upload-btn').addEventListener('click', function () { input.click(); });
+  input.addEventListener('change', function () {
+    file = input.files && input.files[0] ? input.files[0] : null;
+    var line = $(dom + '-file-name');
+    line.hidden = !file;
+    line.textContent = file ? 'Image: ' + file.name : '';
+    $(dom + '-upload-btn').classList.toggle('has-file', !!file);
+  });
+  $(dom + '-blank-btn').addEventListener('click', onBlank);
+  $(dom + '-design-btn').addEventListener('click', async function () {
+    var goal = $(dom + '-goal').value.trim();
+    var btn = $(dom + '-design-btn');
+    var banner = $('error-banner');
+    if (!goal && !file) { banner.textContent = 'Describe the design or upload an image first.'; banner.classList.add('show'); return; }
+    var form = new FormData();
+    if (goal) form.append('goal', goal);
+    if (file) form.append('image', file);
+    btn.disabled = true;
+    btn.textContent = 'Designing\u2026';
+    try {
+      var res = await fetch('/' + dom + '/design', { method: 'POST', body: form });
+      var data = {};
+      try { data = await res.json(); } catch (e) { /* non-JSON error */ }
+      if (!res.ok) { banner.textContent = data.message || ('Design failed (' + res.status + ')'); banner.classList.add('show'); return; }
+      banner.classList.remove('show');
+      onResult(data.design, data.report);
+    } catch (e) {
+      banner.textContent = 'Network error: ' + e.message;
+      banner.classList.add('show');
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = 'Design it &rarr;';
+    }
+  });
+};
+
 (function () {
   'use strict';
   var EXAMPLES = {
@@ -397,6 +439,16 @@
     b.addEventListener('click', function () { loadExample(b.getAttribute('data-fiber-example')); });
   });
   $('fiber-check-btn').addEventListener('click', check);
+  window.NetproofDesign('fiber',
+    function (design, rep) { link = design; report = rep; renderAll(); show3d(); },
+    function () {
+      link = { title: 'New fiber link', elements: [
+        { id: 'L1', type: 'laser', wavelength_nm: 1550, power_dbm: 0 },
+        { id: 'F1', type: 'fiber', fiber_type: 'smf', length_m: 2 },
+        { id: 'D1', type: 'detector' }] };
+      report = null;
+      check();
+    });
   $('fiber-pack-cta').addEventListener('click', buildPack);
   document.body.setAttribute('data-domain', 'circuit');
 })();

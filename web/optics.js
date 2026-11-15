@@ -278,7 +278,9 @@
       }).join(' ');
       return '<tr><td class="mono">' + esc(e.id) + '</td><td>' + esc(e.type) + '</td><td>' + num(i, 'x_mm', e.x_mm, e.id + ' x') + '</td><td>' +
         num(i, 'y_mm', e.y_mm, e.id + ' y') + '</td><td>' + num(i, 'angle_deg', e.angle_deg, e.id + ' angle') + '</td><td class="settings">' +
-        (params || '<span class="empty">—</span>') + '</td><td>' +
+        (params || '<span class="empty">—</span>') +
+        ' <button type="button" class="rot" data-rot="' + i + '" data-by="45" aria-label="Rotate ' + esc(e.id) + ' 45 degrees counter-clockwise">⟲</button>' +
+        '<button type="button" class="rot" data-rot="' + i + '" data-by="-45" aria-label="Rotate ' + esc(e.id) + ' 45 degrees clockwise">⟳</button></td><td>' +
         (e.type === 'laser' ? '' : '<button type="button" class="row-del" data-del="' + i + '" aria-label="Remove ' + esc(e.id) + '">&times;</button>') + '</td></tr>';
     }).join('');
   }
@@ -305,6 +307,13 @@
     check();
   });
   $('optics-body').addEventListener('click', function (ev) {
+    var rot = ev.target.getAttribute && ev.target.getAttribute('data-rot');
+    if (rot != null) {
+      var el = bench.elements[Number(rot)];
+      el.angle_deg = (((el.angle_deg || 0) + Number(ev.target.getAttribute('data-by'))) % 360 + 360) % 360;
+      check();
+      return;
+    }
     var d = ev.target.getAttribute && ev.target.getAttribute('data-del');
     if (d == null) return;
     bench.elements.splice(Number(d), 1);
@@ -336,9 +345,35 @@
     b.addEventListener('click', function () { loadExample(b.getAttribute('data-optics-example')); });
   });
   $('optics-check-btn').addEventListener('click', check);
+  window.NetproofDesign('optics',
+    function (design, rep) { bench = design; report = rep; renderAll(); show3d(); },
+    function () {
+      bench = { title: 'New optics bench', width_mm: 600, depth_mm: 300, elements: [
+        { id: 'L1', type: 'laser', x_mm: 50, y_mm: 150, angle_deg: 0, wavelength_nm: 633, power_mw: 1, beam_mm: 1 },
+        { id: 'D1', type: 'detector', x_mm: 550, y_mm: 150, angle_deg: 0, max_mw: 10 }] };
+      report = null;
+      check();
+    });
+
+  // Drag on the 3D breadboard: scene units are 25 mm holes, scene -z is +y.
+  // Snap to the hole grid and re-trace once the drag settles.
+  var moveTimer = null;
+  function onMove(id, pose) {
+    if (!bench || !pose) return;
+    var e = bench.elements.find(function (el) { return el.id === id; });
+    if (!e) return;
+    var W = bench.width_mm || 600, D = bench.depth_mm || 300;
+    var x = Math.round((pose.x * 25 + W / 2) / 25) * 25;
+    var y = Math.round((-pose.z * 25 + D / 2) / 25) * 25;
+    e.x_mm = Math.min(W, Math.max(0, x));
+    e.y_mm = Math.min(D, Math.max(0, y));
+    clearTimeout(moveTimer);
+    moveTimer = setTimeout(check, 250);
+  }
   $('optics-pack-cta').addEventListener('click', buildPack);
 
   window.NetproofOptics = {
+    onMove: onMove,
     activate: function () { if (!bench) loadExample('good'); else { renderAll(); show3d(); } }
   };
 })();

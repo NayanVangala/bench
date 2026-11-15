@@ -919,7 +919,7 @@ app = FastAPI(title="Netproof", version="0.1.0", lifespan=_lifespan)
 # ponytail: in-memory, per instance, resets on restart; move to Redis if the
 # app ever runs on more than one instance.
 # ---------------------------------------------------------------------------
-_AI_PATHS = {"/run-goal", "/run-image", "/repair"}
+_AI_PATHS = {"/run-goal", "/run-image", "/repair", "/fiber/design", "/optics/design"}
 _AI_HITS: dict[str, deque] = defaultdict(deque)
 _AI_DAY: deque = deque()
 
@@ -1737,6 +1737,39 @@ def optics_build_pack(body: dict) -> Response:
         media_type="application/pdf",
         headers={"Content-Disposition": 'attachment; filename="netproof-optics-build-pack.pdf"'},
     )
+
+
+async def _design_with_ai(domain: str, goal: str | None, image: UploadFile | None) -> JSONResponse:
+    """AI proposes a fiber link / optics bench, then the deterministic check decides."""
+    from . import design_ai, fiber, optics
+
+    image_bytes = None
+    if image is not None:
+        image_bytes = await image.read()
+        if len(image_bytes) > MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail={"error": "upload_too_large", "message": f"image is over {MAX_UPLOAD_BYTES} bytes."})
+        if not image_bytes:
+            image_bytes = None
+    if not (goal or "").strip() and not image_bytes:
+        raise HTTPException(status_code=400, detail={"error": "empty_input", "message": "Describe the design or upload an image."})
+    try:
+        design = await asyncio.to_thread(design_ai.propose, domain, goal, image_bytes)
+    except Exception as exc:  # any LLM failure is a visible 502, never a guessed design
+        raise HTTPException(status_code=502, detail={"error": "llm_error", "message": f"AI design failed: {exc}"})
+    report = fiber.check_link(design) if domain == "fiber" else optics.trace_bench(design)
+    return JSONResponse(content={"design": design, "report": report})
+
+
+@app.post("/fiber/design")
+async def fiber_design(goal: str | None = Form(None), image: UploadFile | None = File(None)) -> JSONResponse:
+    """Describe a fiber link (and/or upload a photo / figure): AI proposes, power budget decides."""
+    return await _design_with_ai("fiber", goal, image)
+
+
+@app.post("/optics/design")
+async def optics_design(goal: str | None = Form(None), image: UploadFile | None = File(None)) -> JSONResponse:
+    """Describe an optics bench (and/or upload a figure): AI proposes, ray trace decides."""
+    return await _design_with_ai("optics", goal, image)
 
 
 @app.post("/download/bom")

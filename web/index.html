@@ -1,9 +1,30 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Netproof MVP</title>
+<meta name="color-scheme" content="light dark">
+<title>Netproof</title>
+<script>
+  // Theme before first paint: persisted choice wins, else the OS
+  // preference. No flash of the wrong theme.
+  (function () {
+    try {
+      var t = localStorage.getItem('netproof-theme');
+      if (t !== 'light' && t !== 'dark') {
+        t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+      }
+      document.documentElement.setAttribute('data-theme', t);
+    } catch (e) {
+      document.documentElement.setAttribute('data-theme', 'light');
+    }
+  })();
+</script>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%231a7f37'/%3E%3Ctext x='16' y='22' font-size='18' text-anchor='middle' fill='white' font-family='monospace'%3EN%3C/text%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&family=IBM+Plex+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
 <script type="importmap">
 {
   "imports": {
@@ -13,270 +34,235 @@
 }
 </script>
 <!--
-  Netproof MVP front end. Static page, plain HTML+JS, no build step.
-  The only CDN use is the <script type="importmap"> below, which maps
-  bare specifier 'three' for web/3d/main3d.js; the flat page never
-  loads it and works with no network beyond the same-origin API.
-  File owner: web/index.html ONLY.
+  Netproof front end. Static page, plain HTML+CSS+JS, no build step, no
+  framework, no npm. Styling lives in web/styles.css (served by the
+  server's web/ static mount). Fonts are IBM Plex Sans (UI) and IBM Plex
+  Mono (every value, node name, unit and rule ID).
+  File owner: web/index.html + web/styles.css ONLY. Do not touch web/3d/
+  (P2 owns it) or backend/.
 
-  3D wiring (web/3d/ landed AFTER this page was first written:
-  main3d.js + scene.js + components.js + interaction.js + overlay.js
-  + edit-panel.js + history.js + README-3D.md are now present):
-  - The page does NOT assume 3D works. It renders the full flat MVP
-    on its own, plus a <div id="scene3d"> container, and a guarded
-    <script type="module"> dynamically imports ./3d/main3d.js inside
-    try/catch. If the import or init throws, the page keeps working
-    flat and the 3D container shows the failure instead of an error.
-  - Import map: 'three' MUST map to the unpkg three@0.160.0 URL that
-    scene.js / components.js import directly, because OrbitControls
-    (unpkg) imports bare 'three' and must share scene.js's instance
-    (README-3D.md). main3d.js itself imports three from jsdelivr, a
-    second copy the siblings ignore; that is the 3D layer's own
-    inconsistency, not this page's.
-  - Real entry point (read from web/3d/main3d.js):
-      init3D(container, callbacks, options), also the default export.
-    callbacks used here: onSelect(id, component), onEdit(id, updatedRow,
-    netlist), onNetlistChange(netlist), onMove(id, pose) (layout-only),
-    onError(error) (writes #scene3d-status, never the red banner),
-    editOnSelect: false (the page handles selection/editing itself in
-    the table, per main3d.js's own docstring). options carries the
-    initial {netlist, report, history}.
-    Handle methods the page calls: setNetlist(netlist, report),
-    updateReport(report), renderHistory(history), select(id),
-    clearSelection(), dispose().
-  - KNOWN ISSUE (3D owner to fix, NOT this file): init3D as landed
-    throws at enableInteraction, because it calls
-    interaction.setupInteraction with ONE options object while the
-    sibling expects 5 positional args
-    (scene, camera, renderer, meshesById, callbacks); same arity
-    mismatch for components.buildCircuit(netlist) (called with
-    3 args), edit-panel.showEditPanel(component, report, callbacks)
-    (called with 2 args), overlay.updateOverlays(report, meshesById)
-    (called with 1 object arg), and history.js exports no render
-    function main3d looks for. Until that is aligned, the bootstrap
-    below shows the 3D failure text and the flat page carries the MVP.
-  - hooks passed to the 3D entry:
-      getNetlist() -> current editable netlist (ir.py shape, see below)
-      getReport()  -> last backend Report dict, or null
-      onSelect(id) -> user clicked a component in 3D; page highlights
-                      the table row and focuses its value field
-                      (click-to-select editing)
-      onEdit(id, patch) -> 3D edited a component; page applies the patch
-                      ({value, nodes, type, ...}) and re-renders the table
-  - Page side of the bridge (also exposed as window.NetproofPage for any
-    3D module that prefers it): getNetlist, getReport, selectComponent,
-    applyEdit, applyNetlist, getRepairHistory. The page calls
-    handle.setNetlist/updateReport/renderHistory on every new
-    Report so the 3D view always mirrors the table.
+  Trust model, stated on the page itself: the verdict always comes from
+  ngspice plus fixed rules, never from the LLM. The LLM only reads a
+  schematic image / designs from a goal, and proposes repairs. Re-check
+  (/check) never calls an LLM.
 
-  Same-origin endpoints (server.py not yet landed as of 2026-11-15, so
-  these follow the MVP spec + backend/tests/test_server.py):
+  Same-origin endpoints (backend/netproof/server.py):
     POST /run-image  multipart FormData {image: File, goal?: string}
                       -> SSE stream, then final JSON {verdict, findings, netlist, mock}
-    POST /run-goal   JSON {goal: string}
-                      -> SSE stream, then final JSON {verdict, findings, netlist, mock}
+    POST /run-goal   JSON {goal: string} -> SSE stream, then final JSON
     POST /check      JSON Netlist (bare ir.py shape, NO wrapper, NO goal,
-                      NO LLM on the server)
-                        {"title": string, "components": [{id, type, value,
-                         nodes: [n1, n2], rating_watts?, color?}]}
-                      -> JSON Report (see below)
-    POST /repair     JSON {netlist: <Netlist as above>, findings: [...],
-                      round: number, goal?: string}
-                      -> JSON {netlist, changes: [...], round, verdict, findings, mock}
-    Downloads: POST /download/netlist and POST /download/bom, each
-                      with the bare Netlist JSON body (per test_server.py).
-                      No GET download route, no server-side state: the
-                      server renders the file from the posted Netlist.
+                      NO LLM on the server) -> JSON Report
+    POST /repair     JSON {netlist, findings, round, goal?}
+                      -> JSON {netlist, changes, round, verdict, findings, mock}
+                      Unverified repair is HTTP 200 with verified:false,
+                      report:null, verdict:null: the UI must check
+                      "verified" before applying anything, and shows a
+                      warning instead of applying the verdict.
+    POST /download/netlist and POST /download/bom: bare Netlist JSON body
+                      -> netlist.cir / bom.csv (lowercase filename)
+    GET  /download/netlist.cir and GET /download/bom.csv: same files for
+                      the last checked netlist (no request body).
+                      There is NO GET /download/netlist or /download/bom
+                      (a GET carries no netlist to render).
+    GET  /health     {"status","ngspice","ngspice_path",...}
+                      "status" is "degraded" when a module is missing
+                      or simulation cannot run, not always "ok".
   SSE event lines are `data: {...}` JSON, one per line. Each event may carry:
     agent, message|text|detail, type|level, elapsed_s|elapsed, verdict, mock,
     error|llm_error. Any event / response with an LLM error is surfaced in
-    the red error banner and never swallowed.
+    the red error banner and never swallowed. ?mock=1 on /check, /run-image
+    and /run-goal returns a placeholder Report with mock:true; the UI shows
+    a prominent MOCK tag whenever a response has mock:true.
+    Stream end: the terminal `result` event carries done:true; closing the
+    stream is also a terminator. Progress events never carry a netlist,
+    verdict, or findings, so nothing is applied mid-stream, and an `error`
+    event is never treated as the result.
 
   Report shape (ALL numbers shown on this page come from a backend Report
   only; the page never computes a verdict, current, voltage, or power):
-  Two Report models exist in the backend and the page adapts to both:
-  - backend/netproof/ir.py Report: verdict, findings [{severity, rule_id,
+  backend/netproof/ir.py Report: verdict, findings [{severity, rule_id,
     component_ids, message}], node_voltages {node: V},
     branch_currents {componentId: A}, power {componentId: W},
     netlist_used (Netlist), uncertain [string].
-  - backend/netproof/rules.py Report.to_dict(): verdict, findings
-    [{severity, code, message, component, node, details}],
-    node_voltages, branch_currents, component_power {componentId: W},
-    netlist_used {components: [{refdes, kind, nodes, value,
-    power_rating_w}], nodes: [...]}, uncertain [string].
-  The table's read-only columns are filled ONLY from those Report dicts:
-  node voltage = node_voltages[first node of the row], current =
-  branch_currents[component id], power = component_power[component id]
-  (or power[component id]). Blank until a Report arrives. Editable
-  columns are id, type, value, nodes (plus rating_watts / color when the
-  server echoes them; they are preserved round-trip, not displayed).
+  The table's read-only columns are filled ONLY from those Report dicts.
+  The findings' "Measured / Limit" line is parsed from the Report's own
+  finding message text, never computed here.
+
+  3D wiring (web/3d/, owned by P2): the page does NOT assume 3D works.
+  It renders the full flat MVP on its own, plus a <div id="scene3d">
+  container, and a guarded <script type="module"> dynamically imports
+  ./3d/main3d.js inside try/catch. If the import or init throws, the page
+  keeps working flat and the 3D container shows the failure instead of an
+  error. Import map: 'three' maps to the unpkg three@0.160.0 URL.
+  Entry point: init3D(container, callbacks, options), also the default
+  export. Callbacks: onSelect(id, component), onEdit(id, updatedRow,
+  netlist), onNetlistChange(netlist), onMove(id, pose) (layout-only),
+  onError(error), editOnSelect: false (the page handles selection/editing
+  itself in the table). Options carries the initial {netlist, report,
+  history}. Handle methods the page calls: setNetlist(netlist, report),
+  updateReport(report), renderHistory(history), select(id),
+  clearSelection(), dispose().
+  Page side of the bridge (exposed as window.NetproofPage): getNetlist,
+  getReport, selectComponent, applyEdit, applyNetlist, getRepairHistory.
+  Accessibility split with P2: web/3d/interaction.js owns keyboard
+  handling once the 3D canvas has focus, and web/3d/edit-panel.js owns
+  the edit panel dialog (role="dialog", focus in on open, Escape to
+  close, focus return on close). This page owns the fallback hook on the
+  #scene3d container itself (focusable, role="img"): arrow keys cycle
+  the component selection, Enter focuses the selected row's value field,
+  Escape deselects. The container handler only fires when the container
+  itself is the event target, so it never fights interaction.js.
+
+  Example picker: the four fixture circuits are copied inline from
+  backend/tests/fixtures/ (good_led, led_overcurrent, resistor_warn,
+  shorted_source). Picking one loads the netlist and runs a real /check
+  against the server. No finding is asserted on its own: led_overcurrent
+  fires both LED_OVERCURRENT STOP and RESISTOR_POWER STOP, and
+  resistor_warn fires both RESISTOR_POWER WARN and LED_OVERCURRENT WARN.
+  shorted_source is a pre-sim STOP (SHORTED_SOURCE); the server does not
+  simulate it. The picker never reuses a canned sim result.
 -->
-<style>
-  * { box-sizing: border-box; }
-  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; background: #f6f7f9; color: #111; }
-  header { background: #111; color: #fff; padding: 14px 20px; }
-  header h1 { margin: 0; font-size: 20px; }
-  header p { margin: 4px 0 0; color: #bbb; font-size: 13px; }
-  main { max-width: 1100px; margin: 0 auto; padding: 16px; }
-  section { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 14px; margin-bottom: 14px; }
-  h2 { margin: 0 0 10px; font-size: 16px; }
-  label { display: block; font-weight: 600; font-size: 13px; margin-bottom: 4px; }
-  textarea { width: 100%; min-height: 64px; padding: 8px; font: inherit; border: 1px solid #bbb; border-radius: 6px; }
-  button { font: inherit; padding: 8px 14px; border-radius: 6px; border: 1px solid #111; background: #111; color: #fff; cursor: pointer; margin: 4px 6px 4px 0; }
-  button.secondary { background: #fff; color: #111; }
-  button:disabled { opacity: .45; cursor: not-allowed; }
-  #dropzone { border: 2px dashed #888; border-radius: 8px; padding: 24px; text-align: center; color: #555; cursor: pointer; margin-bottom: 10px; }
-  #dropzone.drag { border-color: #111; background: #eef; }
-  #dropzone input { display: none; }
-  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
-  .row > div { flex: 1; min-width: 220px; }
-  /* Error banner: LLM failure, never silent */
-  #error-banner { display: none; background: #b00020; color: #fff; padding: 12px 16px; border-radius: 8px; margin-bottom: 14px; font-weight: 600; }
-  #error-banner.show { display: block; }
-  #error-banner small { display: block; font-weight: 400; margin-top: 4px; }
-  /* Verdict banner */
-  #verdict { display: none; text-align: center; padding: 22px; border-radius: 8px; font-size: 34px; font-weight: 800; letter-spacing: 1px; margin-bottom: 14px; }
-  #verdict.show { display: block; }
-  #verdict.pass { background: #1a7f37; color: #fff; }
-  #verdict.warn { background: #d97706; color: #fff; }
-  #verdict.stop { background: #b00020; color: #fff; }
-  #verdict .mock-tag { display: block; font-size: 30px; font-weight: 800; margin-top: 6px; }
-  #verdict small { display: block; font-size: 14px; font-weight: 400; margin-top: 6px; }
-  /* Live console */
-  #console { background: #111; color: #eee; border-radius: 8px; padding: 10px; min-height: 140px; max-height: 320px; overflow-y: auto; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; line-height: 1.5; }
-  #console .line { white-space: pre-wrap; word-break: break-word; }
-  #console .t { color: #888; }
-  #console .agent { font-weight: 700; }
-  #console .err { color: #ff8080; }
-  .legend { font-size: 12px; color: #555; margin-top: 6px; }
-  .legend span { display: inline-block; margin-right: 12px; }
-  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
-  /* Findings */
-  #findings { margin: 0; padding-left: 20px; }
-  #findings li { margin-bottom: 6px; }
-  #findings .sev { font-weight: 700; text-transform: uppercase; font-size: 12px; }
-  #findings .code { font-family: ui-monospace, Menlo, Consolas, monospace; font-weight: 700; }
-  .empty { color: #777; }
-  /* Image + netlist split */
-  .split { display: grid; grid-template-columns: 1fr 1.4fr; gap: 14px; align-items: start; }
-  @media (max-width: 800px) { .split { grid-template-columns: 1fr; } }
-  #preview { max-width: 100%; border: 1px solid #ccc; border-radius: 6px; display: none; }
-  #preview.show { display: block; }
-  table { border-collapse: collapse; width: 100%; font-size: 13px; }
-  th, td { border: 1px solid #ccc; padding: 5px; text-align: left; }
-  th { background: #eee; }
-  td input { width: 100%; border: none; font: inherit; padding: 2px; background: transparent; }
-  td input:focus { outline: 2px solid #2684ff; background: #fff; }
-  td.readonly { background: #f4f4f4; color: #333; }
-  tr.selected td { background: #fff3cd; }
-  tr.selected td input { background: transparent; }
-  /* 3D view */
-  #scene3d { position: relative; min-height: 320px; height: 420px; border: 1px solid #ccc; border-radius: 8px; background: #111; color: #eee; overflow: hidden; }
-  #scene3d canvas { display: block; width: 100%; height: 100%; }
-  #scene3d .fallback { padding: 24px; color: #bbb; }
-  #scene3d-status { font-size: 13px; color: #555; margin-top: 6px; }
-  #selected-component { font-weight: 600; }
-  .controls-hint { font-size: 13px; color: #555; }
-  .controls-hint kbd { background: #eee; border: 1px solid #ccc; border-radius: 4px; padding: 1px 5px; font: inherit; }
-  #repair-history { margin: 0; padding-left: 20px; }
-  #repair-history li { margin-bottom: 8px; }
-  #status { font-size: 13px; color: #555; margin-top: 6px; }
-</style>
 </head>
 <body>
+<a class="skip-link" href="#main">Skip to main content</a>
 <header>
-  <h1>Netproof</h1>
-  <p>Circuit schematic checker. Upload a schematic image or describe the goal, run the agents, edit the netlist, repair, re-check.</p>
+  <h1>Netproof <span class="mono">/ bench check</span></h1>
+  <p>Describe or upload a circuit. The verdict always comes from ngspice plus fixed rules, never from the LLM.</p>
+  <button id="theme-toggle" type="button" class="secondary" aria-pressed="false">Dark theme</button>
 </header>
-<main>
+<main id="main">
+  <noscript><p><strong>Netproof needs JavaScript.</strong> The checks run on the server, but this page drives them from the browser.</p></noscript>
 
   <div id="error-banner" role="alert"></div>
 
-  <div id="verdict" aria-live="polite"></div>
+  <div class="layout">
+    <div class="col-left">
 
-  <section id="input-section">
-    <h2>1. Input</h2>
-    <div id="dropzone" tabindex="0" role="button" aria-label="Upload schematic image">
-      <strong>Drag &amp; drop a schematic image here</strong><br>
-      or click to choose a file (PNG, JPG, SVG)
-      <input type="file" id="file-input" accept="image/*">
-    </div>
-    <div class="row">
-      <div>
-        <label for="goal">Goal (text, optional if an image is uploaded)</label>
-        <textarea id="goal" placeholder="e.g. 5V regulator, 100 mA load, output ripple under 50 mV"></textarea>
-      </div>
-    </div>
-    <div>
-      <button id="run-image-btn" type="button">Run (image)</button>
-      <button id="run-goal-btn" type="button">Run (goal)</button>
-      <span id="status"></span>
-    </div>
-  </section>
-
-  <section id="console-section">
-    <h2>2. Live console</h2>
-    <div id="console" aria-live="polite"><div class="line"><span class="t">[--.--s]</span> Ready. Run an image or a goal to see agent events here.</div></div>
-    <div class="legend" id="legend">Agent colours appear here as agents speak.</div>
-  </section>
-
-  <section id="findings-section">
-    <h2>3. Findings</h2>
-    <ul id="findings"><li class="empty">No findings yet. Run a check first.</li></ul>
-    <p id="uncertain" class="empty"></p>
-  </section>
-
-  <section id="netlist-section">
-    <h2>4. Schematic &amp; netlist</h2>
-    <div class="split">
-      <div>
-        <label>Uploaded image</label>
-        <img id="preview" alt="Uploaded schematic preview">
-        <p id="no-image" class="empty">No image uploaded yet.</p>
-        <p id="file-name" class="empty"></p>
-      </div>
-      <div>
-        <label>Netlist (editable: id, type, value, nodes. Node voltage / current / power come only from the backend Report and are read-only.)</label>
-        <table>
-          <thead>
-            <tr><th>id</th><th>type</th><th>value</th><th>nodes</th><th>node voltage</th><th>current</th><th>power</th></tr>
-          </thead>
-          <tbody id="netlist-body">
-            <tr><td colspan="7" class="empty">No netlist yet. Run an image or a goal, or add a row below.</td></tr>
-          </tbody>
-        </table>
-        <div>
-          <button id="add-row-btn" type="button" class="secondary">Add row</button>
-          <button id="repair-btn" type="button">Repair</button>
-          <button id="recheck-btn" type="button">Re-check (no LLM)</button>
+      <section id="input-section">
+        <h2>Input</h2>
+        <div id="dropzone" tabindex="0" role="button" aria-label="Drag &amp; drop a schematic image here, or click to choose a file (PNG, JPG, SVG)">
+          <strong>Drag &amp; drop a schematic image here</strong><br>
+          or click to choose a file (PNG, JPG, SVG)
+          <input type="file" id="file-input" accept="image/*">
         </div>
-        <p id="recheck-note" class="empty">Re-check POSTs the edited table to /check as a bare Netlist. It does not call any LLM.</p>
-        <p class="empty">Selected component: <span id="selected-component">none</span> (click a row, or click a component in the 3D view below).</p>
-      </div>
+        <div class="row">
+          <div>
+            <label for="goal">Goal (text, optional if an image is uploaded)</label>
+            <textarea id="goal" placeholder="e.g. 5V regulator, 100 mA load, output ripple under 50 mV"></textarea>
+          </div>
+        </div>
+        <div>
+          <button id="run-image-btn" type="button">Run (image)</button>
+          <button id="run-goal-btn" type="button">Run (goal)</button>
+          <span id="status" role="status" aria-live="polite"></span>
+        </div>
+        <div class="examples">
+          <p class="examples-label" id="examples-label">Try an example</p>
+          <div id="examples" role="group" aria-labelledby="examples-label">
+            <button type="button" class="secondary example-btn" data-example="good_led">Good LED &mdash; expect PASS</button>
+            <button type="button" class="secondary example-btn" data-example="led_overcurrent">LED overcurrent &mdash; expect STOP</button>
+            <button type="button" class="secondary example-btn" data-example="resistor_warn">Resistor running hot &mdash; expect WARN</button>
+            <button type="button" class="secondary example-btn" data-example="shorted_source">Shorted source &mdash; expect STOP</button>
+          </div>
+          <p class="empty">Each example loads the fixture circuit and runs a real check. Verdicts are judged on the verdict plus the rule codes: some circuits trip more than one rule.</p>
+        </div>
+      </section>
+
+      <section id="netlist-section">
+        <h2>Netlist</h2>
+        <div class="split">
+          <div>
+            <label>Uploaded image</label>
+            <img id="preview" alt="Uploaded schematic preview">
+            <p id="no-image" class="empty">No image uploaded yet.</p>
+            <p id="file-name" class="empty"></p>
+          </div>
+          <div>
+            <label>Netlist (editable: id, type, value, nodes, rating, color. Node voltage / current / power come only from the backend Report and are read-only.)</label>
+            <div class="table-wrap" tabindex="0" aria-label="Netlist table, scrollable">
+              <table>
+                <thead>
+                  <tr><th>id</th><th>type</th><th>value</th><th>nodes</th><th>rating (W)</th><th>color</th><th>node voltage</th><th>current</th><th>power</th></tr>
+                </thead>
+                <tbody id="netlist-body">
+                  <tr><td colspan="9" class="empty">No netlist yet. Run an image or a goal, pick an example, or add a row below.</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div>
+              <button id="add-row-btn" type="button" class="secondary">Add row</button>
+              <button id="repair-btn" type="button">Repair</button>
+              <button id="recheck-btn" type="button">Re-check (no LLM)</button>
+            </div>
+            <p id="recheck-note" class="empty">Re-check POSTs the edited table to /check as a bare Netlist. It does not call any LLM.</p>
+            <p class="empty">Selected component: <span id="selected-component">none</span> (click a row, or click a component in the 3D view).</p>
+          </div>
+        </div>
+      </section>
+
     </div>
+    <div class="col-right">
+
+      <section id="verdict-section" aria-label="Verdict">
+        <h2>Verdict</h2>
+        <div id="verdict" aria-live="polite"></div>
+        <p class="verdict-empty" id="verdict-empty">No check yet. Load an example or run a goal to see the verdict here.</p>
+        <dl id="key-readings" aria-label="Key measured values">
+          <div class="reading"><dt>LED current</dt><dd id="key-led">&mdash;</dd></div>
+          <div class="reading"><dt>Resistor power</dt><dd id="key-power">&mdash;</dd></div>
+          <div class="reading"><dt>Supply rail</dt><dd id="key-rail">&mdash;</dd></div>
+        </dl>
+        <ol id="pipeline" aria-label="Check pipeline">
+          <li data-step="simulate"><span class="dot" aria-hidden="true"></span><span>Simulate</span></li>
+          <li data-step="rules"><span class="dot" aria-hidden="true"></span><span>Rules</span></li>
+          <li data-step="repair"><span class="dot" aria-hidden="true"></span><span>Repair</span></li>
+          <li data-step="resimulate"><span class="dot" aria-hidden="true"></span><span>Re-simulate</span></li>
+        </ol>
+        <p class="empty" id="pipeline-note">Idle. Run a check to see each step.</p>
+      </section>
+
+      <section id="findings-section">
+        <h2>Findings</h2>
+        <ul id="findings" aria-live="polite" aria-label="Findings"><li class="empty">No findings yet. Run a check first.</li></ul>
+        <p id="uncertain" class="empty"></p>
+      </section>
+
+      <section id="scene3d-section">
+        <h2>3D view</h2>
+        <div id="scene3d" tabindex="0" role="img" aria-label="3D circuit view. Focus and use arrow keys to move between components, Enter to edit the selected component, Escape to deselect."><div class="fallback">3D view loading&hellip; If web/3d/main3d.js is not present yet, this panel stays as a placeholder and the flat table still works.</div></div>
+        <p class="controls-hint">Orbit: drag with the left mouse button &middot; Zoom: scroll wheel &middot; Pan: drag with the right mouse button (or two-finger drag on trackpad). Click a component in 3D to select it and edit it in the netlist table. Keyboard: focus this panel, arrow keys move between components, Enter edits, Escape deselects.</p>
+        <p id="scene3d-status">3D status: waiting for web/3d/main3d.js&hellip;</p>
+      </section>
+
+      <section id="repair-section">
+        <h2>Repair history</h2>
+        <ol id="repair-history"><li class="empty">No repairs yet. Repair runs at most 3 rounds.</li></ol>
+        <p id="repair-round-label" class="empty">Round: 0 / 3</p>
+      </section>
+
+    </div>
+  </div>
+
+  <section id="console-section" class="full">
+    <h2>Live console</h2>
+    <div class="console-wrap">
+      <div id="console" role="log" aria-live="off" aria-label="Agent console log"><div class="line"><span class="t">[--.--s]</span> Ready. Run an image or a goal to see agent events here.</div></div>
+      <div class="legend" id="legend">Agent colours appear here as agents speak.</div>
+    </div>
+    <p class="empty">The console log is not announced line by line; run status is announced in the status line next to the Run buttons.</p>
   </section>
 
-  <section id="scene3d-section">
-    <h2>5. 3D view</h2>
-    <div id="scene3d" aria-label="3D circuit view"><div class="fallback">3D view loading&hellip; If web/3d/main3d.js is not present yet, this panel stays as a placeholder and the flat table above still works.</div></div>
-    <p class="controls-hint">Orbit: drag with the left mouse button &middot; Zoom: scroll wheel &middot; Pan: drag with the right mouse button (or two-finger drag on trackpad). Click a component in 3D to select it and edit it in the netlist table above.</p>
-    <p id="scene3d-status">3D status: waiting for web/3d/main3d.js&hellip;</p>
-  </section>
-
-  <section id="repair-section">
-    <h2>6. Repair history</h2>
-    <ol id="repair-history"><li class="empty">No repairs yet. Repair runs at most 3 rounds.</li></ol>
-    <p id="repair-round-label" class="empty">Round: 0 / 3</p>
-  </section>
-
-  <section id="download-section">
-    <h2>7. Downloads</h2>
+  <section id="download-section" class="full">
+    <h2>Downloads</h2>
     <button id="dl-cir-btn" type="button" class="secondary">Download netlist.cir</button>
-    <button id="dl-bom-btn" type="button" class="secondary">Download BOM.csv</button>
-    <p class="empty">Downloads POST the current netlist to /download/netlist (netlist.cir) and /download/bom (BOM.csv). No GET download route and no server-side state: the file is rendered from the posted Netlist. BOM header: id,type,value,rating,qty.</p>
+    <button id="dl-bom-btn" type="button" class="secondary">Download bom.csv</button>
+    <p class="empty">POST /download/netlist (netlist.cir) and POST /download/bom (bom.csv) render from the netlist in the table above. GET /download/netlist.cir and GET /download/bom.csv return the same files for the last checked netlist: one value shared across tabs, lost on restart, so POST is the reliable path. BOM header: id,type,value,rating,qty.</p>
   </section>
 
 </main>
+<footer>
+  <p>Trust model: ngspice simulates, fixed rules judge. The LLM reads schematics and proposes repairs; it never decides the verdict. <span class="mono">MOCK</span> means the result is simulated, not checked.</p>
+</footer>
 <script>
 (function () {
   'use strict';
@@ -295,6 +281,7 @@
   var busy = false;
   var threeD = null;         // handle returned by the 3D module, if any
   var threeDModule = null;   // module namespace from ./3d/main3d.js, if loaded
+  var currentPipelineStep = null; // step currently running, for failure marking
 
   var $ = function (id) { return document.getElementById(id); };
   var consoleEl = $('console');
@@ -334,6 +321,59 @@
     var n = Number(v);
     return isFinite(n) ? String(n) : escapeHtml(v);
   }
+  // Unit formatting for Report numbers. "—" when a value is missing.
+  // These only format numbers the backend already reported.
+  function fmtCurrent(a) {
+    if (a == null || !isFinite(Number(a))) return '—';
+    var amps = Math.abs(Number(a));
+    if (amps >= 1) return amps.toFixed(2) + ' A';
+    return (amps * 1000).toFixed(1) + ' mA';
+  }
+  function fmtPower(w) {
+    if (w == null || !isFinite(Number(w))) return '—';
+    var watts = Number(w);
+    if (Math.abs(watts) >= 1) return watts.toFixed(2) + ' W';
+    return (watts * 1000).toFixed(0) + ' mW';
+  }
+  function fmtVolts(v) {
+    if (v == null || !isFinite(Number(v))) return '—';
+    return Number(v).toFixed(2) + ' V';
+  }
+  function fmtResistance(ohms) {
+    if (ohms == null || !isFinite(Number(ohms))) return '—';
+    var r = Number(ohms);
+    if (r >= 1e6) return (r / 1e6).toFixed(2).replace(/\.?0+$/, '') + ' MΩ';
+    if (r >= 1e3) return (r / 1e3).toFixed(2).replace(/\.?0+$/, '') + ' kΩ';
+    return String(r) + ' Ω';
+  }
+  // A component value with its unit, for repair diffs and labels.
+  function fmtValueForType(type, value) {
+    var n = parseSIValue(value);
+    if (n == null) return String(value == null ? '' : value);
+    var t = String(type || '').toLowerCase();
+    if (t.indexOf('resistor') === 0) return fmtResistance(n);
+    if (t.indexOf('voltage') === 0) return String(n) + ' V';
+    if (t.indexOf('current') === 0) return fmtCurrent(n);
+    if (t.indexOf('led') === 0 || t.indexOf('diode') === 0) return n.toFixed(1) + ' V';
+    if (t.indexOf('capacitor') === 0) {
+      if (n >= 1e-3) return (n * 1e3).toFixed(2).replace(/\.?0+$/, '') + ' mF';
+      if (n >= 1e-6) return (n * 1e6).toFixed(2).replace(/\.?0+$/, '') + ' µF';
+      if (n >= 1e-9) return (n * 1e9).toFixed(2).replace(/\.?0+$/, '') + ' nF';
+      return String(n) + ' F';
+    }
+    return String(value);
+  }
+  // Case-insensitive map lookup: ngspice keys may differ in case from ids.
+  function lookupCI(map, key) {
+    if (!map || key == null) return undefined;
+    if (map[key] != null) return map[key];
+    var want = String(key).toLowerCase();
+    var ks = Object.keys(map);
+    for (var i = 0; i < ks.length; i++) {
+      if (ks[i].toLowerCase() === want) return map[ks[i]];
+    }
+    return undefined;
+  }
 
   function showError(title, detail) {
     errorBanner.innerHTML = escapeHtml(title) +
@@ -362,9 +402,65 @@
     else if (v === 'STOP' || v === 'FAIL' || v === 'ERROR') verdictEl.classList.add('stop');
     else verdictEl.classList.add('warn');
     var label = v === 'WARN' || v === 'WARNING' ? 'WARN' : (v || 'UNKNOWN');
+    // STOP is announced assertively; anything else stays polite.
+    verdictEl.setAttribute('aria-live', (v === 'STOP' || v === 'FAIL' || v === 'ERROR') ? 'assertive' : 'polite');
     verdictEl.innerHTML = escapeHtml(label) +
       (mock ? '<span class="mock-tag">MOCK</span>' : '') +
       (note ? '<small>' + escapeHtml(note) + '</small>' : '');
+    var empty = $('verdict-empty');
+    if (empty) empty.style.display = 'none';
+  }
+
+  // ---- Pipeline progress: simulate -> rules -> repair -> re-simulate ----
+  function pipelineSet(step, state) {
+    var li = document.querySelector('#pipeline li[data-step="' + step + '"]');
+    if (!li) return;
+    li.classList.remove('done', 'running', 'failed');
+    if (state) li.classList.add(state);
+    if (state === 'running') currentPipelineStep = step;
+    else if (currentPipelineStep === step) currentPipelineStep = null;
+  }
+  function pipelineReset() {
+    ['simulate', 'rules', 'repair', 'resimulate'].forEach(function (s) { pipelineSet(s, null); });
+    $('pipeline-note').textContent = 'Running…';
+  }
+  function pipelineFailCurrent() {
+    if (currentPipelineStep) pipelineSet(currentPipelineStep, 'failed');
+    $('pipeline-note').textContent = 'Failed at the marked step. See the error banner.';
+  }
+  function pipelineDone(note) {
+    ['simulate', 'rules'].forEach(function (s) { pipelineSet(s, 'done'); });
+    $('pipeline-note').textContent = note || 'Simulate and rules done.';
+  }
+  // SSE stage names from server.py -> pipeline steps.
+  function pipelineFromStage(stage) {
+    if (!stage) return;
+    if (stage === 'spice_render' || stage === 'simulate') {
+      pipelineSet('simulate', 'running');
+    } else if (stage === 'rules_check') {
+      pipelineSet('simulate', 'done');
+      pipelineSet('rules', 'running');
+    }
+  }
+
+  // Parse the "measured vs threshold" pair out of a finding's own message
+  // text (the Report already states both). Returns null when the message
+  // carries no such pair; the message itself is always shown in full.
+  function parseMeasured(msg) {
+    var m;
+    m = /current ([\d.]+)\s*mA .*?(?:exceeds|over) the ([\d.]+)\s*mA limit/.exec(msg);
+    if (m) return { measured: m[1] + ' mA', limit: m[2] + ' mA' };
+    m = /current ([\d.]+)\s*mA is in the ([\d.]+)-([\d.]+) mA warning range/.exec(msg);
+    if (m) return { measured: m[1] + ' mA', limit: m[2] + '–' + m[3] + ' mA range' };
+    m = /current ([\d.]+)\s*mA is below ([\d.]+)\s*mA/.exec(msg);
+    if (m) return { measured: m[1] + ' mA', limit: m[2] + ' mA minimum' };
+    m = /dissipates ([\d.]+)\s*W, over its ([\d.]+)\s*W rating/.exec(msg);
+    if (m) return { measured: m[1] + ' W', limit: m[2] + ' W rating' };
+    m = /dissipates ([\d.]+)\s*W, over 70% of its ([\d.]+)\s*W rating/.exec(msg);
+    if (m) return { measured: m[1] + ' W', limit: '70% of ' + m[2] + ' W' };
+    m = /supplies ([\d.]+)\s*A, over the ([\d.]+)\s*A limit/.exec(msg);
+    if (m) return { measured: m[1] + ' A', limit: m[2] + ' A' };
+    return null;
   }
 
   function renderFindings() {
@@ -374,17 +470,66 @@
     } else {
       ul.innerHTML = findings.map(function (f) {
         if (typeof f === 'string') return '<li>' + escapeHtml(f) + '</li>';
-        var sev = f.severity || f.level || f.type || '';
+        var sev = String(f.severity || f.level || f.type || 'INFO').toUpperCase();
+        var sevClass = sev === 'STOP' ? 'sev-stop' : sev === 'WARN' ? 'sev-warn' : sev === 'PASS' ? 'sev-pass' : 'sev-info';
         var code = f.rule_id || f.code || f.rule || '';
         var msg = f.message || f.text || f.detail || JSON.stringify(f);
         var where = f.component || (f.component_ids && f.component_ids.join(', ')) || f.id || f.node || '';
-        return '<li><span class="code">' + escapeHtml(code) + '</span> ' +
-          '<span class="sev">' + escapeHtml(sev) + '</span> ' + escapeHtml(msg) +
-          (where ? ' (' + escapeHtml(where) + ')' : '') + '</li>';
+        var measured = parseMeasured(String(msg));
+        return '<li class="' + sevClass + '">' +
+          '<div class="findings-head"><span class="sev ' + sevClass + '">' + escapeHtml(sev) + '</span> ' +
+          '<span class="findings-code">' + escapeHtml(code) + '</span>' +
+          (where ? '<span>' + escapeHtml(where) + '</span>' : '') + '</div>' +
+          '<p class="findings-msg">' + escapeHtml(msg) + '</p>' +
+          (measured ? '<span class="measured">Measured <b>' + escapeHtml(measured.measured) + '</b> &middot; Limit <b>' + escapeHtml(measured.limit) + '</b></span>' : '') +
+          '</li>';
       }).join('');
     }
     var unc = lastReport && Array.isArray(lastReport.uncertain) ? lastReport.uncertain : [];
     $('uncertain').textContent = unc.length ? 'Uncertain (from Report): ' + unc.join('; ') : '';
+    renderKeyReadings();
+  }
+
+  // Key measured numbers for the verdict panel, pulled from the Report
+  // only: LED current (branch current, else the LED finding's message),
+  // first resistor power, supply-rail node voltage.
+  function renderKeyReadings() {
+    var ledEl = $('key-led'), powEl = $('key-power'), railEl = $('key-rail');
+    if (!ledEl || !powEl || !railEl) return;
+    if (!lastReport) { ledEl.textContent = '—'; powEl.textContent = '—'; railEl.textContent = '—'; return; }
+    var currents = lastReport.branch_currents || {};
+    var powers = lastReport.component_power || lastReport.power || {};
+    var voltages = lastReport.node_voltages || {};
+    var ledCurrent = null, resistorPower = null;
+    netlist.forEach(function (r) {
+      var t = String(r.type || '').toLowerCase();
+      if (ledCurrent == null && (t.indexOf('led') === 0 || t.indexOf('diode') === 0)) {
+        var c = lookupCI(currents, r.id);
+        if (c != null) ledCurrent = c;
+      }
+      if (resistorPower == null && t.indexOf('resistor') === 0) {
+        var p = lookupCI(powers, r.id);
+        if (p != null) resistorPower = p;
+      }
+    });
+    if (ledCurrent == null) {
+      // Fall back to the LED finding's own message text, e.g.
+      // "LED D1 current 70.0 mA exceeds the 30 mA limit."
+      for (var i = 0; i < findings.length; i++) {
+        var f = findings[i];
+        var msg = String((f && f.message) || '');
+        var m = /current ([\d.]+)\s*mA/.exec(msg);
+        if (m && /LED/i.test(msg)) { ledCurrent = Number(m[1]) / 1000; break; }
+      }
+    }
+    ledEl.textContent = fmtCurrent(ledCurrent);
+    powEl.textContent = fmtPower(resistorPower);
+    var rail = voltages.vcc != null ? voltages.vcc : (voltages['0'] != null ? voltages['0'] : null);
+    if (rail == null) {
+      var keys = Object.keys(voltages);
+      rail = keys.length ? voltages[keys[0]] : null;
+    }
+    railEl.textContent = fmtVolts(rail);
   }
 
   // Normalise one component to ir.py shape. Accepts ir.py
@@ -412,36 +557,46 @@
     return [];
   }
 
-  // Read-only numbers, ONLY from the last backend Report.
+  // Read-only numbers, ONLY from the last backend Report, formatted
+  // with units. Missing values show "—", never a blank or a guess.
   function reportNumbers(row) {
-    if (!lastReport) return { voltage: '', current: '', power: '' };
+    if (!lastReport) return { voltage: '—', current: '—', power: '—' };
     var voltages = lastReport.node_voltages || {};
     var currents = lastReport.branch_currents || {};
     var powers = lastReport.component_power || lastReport.power || {};
     var firstNode = row.nodes && row.nodes[0];
+    // Case-insensitive everywhere: ngspice lowercases node names and
+    // branch-current keys ("v1" for "V1", "n1" for "N1"), so a row id
+    // or node typed in upper case must still find the Report value.
     return {
-      voltage: firstNode != null && voltages[firstNode] != null ? fmtNum(voltages[firstNode]) : '',
-      current: currents[row.id] != null ? fmtNum(currents[row.id]) : '',
-      power: powers[row.id] != null ? fmtNum(powers[row.id]) : ''
+      voltage: firstNode != null && lookupCI(voltages, firstNode) != null ? fmtVolts(lookupCI(voltages, firstNode)) : '—',
+      current: lookupCI(currents, row.id) != null ? fmtCurrent(lookupCI(currents, row.id)) : '—',
+      power: lookupCI(powers, row.id) != null ? fmtPower(lookupCI(powers, row.id)) : '—'
     };
   }
 
   function renderNetlist() {
     var body = $('netlist-body');
     if (!netlist.length) {
-      body.innerHTML = '<tr><td colspan="7" class="empty">No netlist yet. Run an image or a goal, or add a row below.</td></tr>';
+      body.innerHTML = '<tr><td colspan="9" class="empty">No netlist yet. Run an image or a goal, pick an example, or add a row below.</td></tr>';
     } else {
       body.innerHTML = netlist.map(function (r, i) {
         var row = normRow(r);
         var nums = reportNumbers(row);
+        // Every input gets a label: "<id> <column>", or "Row N <column>"
+        // when the row has no id yet, so screen readers can name it.
+        var lab = row.id ? row.id + ' ' : 'Row ' + (i + 1) + ' ';
         return '<tr data-row="' + i + '" data-id="' + escapeHtml(row.id) + '"' +
           (row.rating_watts != null ? ' data-rating-watts="' + escapeHtml(row.rating_watts) + '"' : '') +
           (row.color ? ' data-color="' + escapeHtml(row.color) + '"' : '') +
-          (selectedId && row.id === selectedId ? ' class="selected"' : '') + '>' +
-          '<td><input data-field="id" value="' + escapeHtml(row.id) + '"></td>' +
-          '<td><input data-field="type" value="' + escapeHtml(row.type) + '"></td>' +
-          '<td><input data-field="value" value="' + escapeHtml(row.value) + '"></td>' +
-          '<td><input data-field="nodes" value="' + escapeHtml(row.nodes.join(' ')) + '"></td>' +
+          (selectedId && row.id === selectedId ? ' class="selected"' : '') +
+          ' tabindex="0" aria-label="' + escapeHtml(lab + 'component row. Press Enter to select.') + '">' +
+          '<td><input data-field="id" value="' + escapeHtml(row.id) + '" aria-label="' + escapeHtml(lab + 'id') + '"></td>' +
+          '<td><input data-field="type" value="' + escapeHtml(row.type) + '" aria-label="' + escapeHtml(lab + 'type') + '"></td>' +
+          '<td><input data-field="value" value="' + escapeHtml(row.value) + '" aria-label="' + escapeHtml(lab + 'value') + '"></td>' +
+          '<td><input data-field="nodes" value="' + escapeHtml(row.nodes.join(' ')) + '" aria-label="' + escapeHtml(lab + 'nodes') + '"></td>' +
+          '<td><input data-field="rating_watts" value="' + escapeHtml(row.rating_watts != null ? row.rating_watts : '') + '" aria-label="' + escapeHtml(lab + 'rating in watts') + '" placeholder="0.25"></td>' +
+          '<td><input data-field="color" value="' + escapeHtml(row.color || '') + '" aria-label="' + escapeHtml(lab + 'color') + '"></td>' +
           '<td class="readonly">' + escapeHtml(nums.voltage) + '</td>' +
           '<td class="readonly">' + escapeHtml(nums.current) + '</td>' +
           '<td class="readonly">' + escapeHtml(nums.power) + '</td></tr>';
@@ -454,13 +609,13 @@
   // may type in the table ("1k" -> 1000, "2.2M" -> 2200000, "10m" ->
   // 0.01, "100n" -> 1e-7, "10u" -> 1e-5). A trailing unit letter
   // ("V", "ohm", "F") is ignored. Returns null when unparseable.
-  var SI_MULTIPLIERS = { '': 1, k: 1e3, K: 1e3, M: 1e6, G: 1e9, m: 1e-3, u: 1e-6, '\u00b5': 1e-6, '\u03bc': 1e-6, n: 1e-9, p: 1e-12 };
+  var SI_MULTIPLIERS = { '': 1, k: 1e3, K: 1e3, M: 1e6, G: 1e9, m: 1e-3, u: 1e-6, 'µ': 1e-6, 'μ': 1e-6, n: 1e-9, p: 1e-12 };
   function parseSIValue(raw) {
     if (typeof raw === 'number') return isFinite(raw) ? raw : null;
     if (raw == null) return null;
     var text = String(raw).trim();
     if (text === '') return null;
-    var m = /^([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*([kKMGmunp\u00b5\u03bc]?)\s*(?:[a-zA-Z\u03a9]*)\s*$/.exec(text);
+    var m = /^([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*([kKMGmunpµμ]?)\s*(?:[a-zA-ZΩ]*)\s*$/.exec(text);
     if (!m) return null;
     var mult = SI_MULTIPLIERS[m[2]];
     if (mult == null) return null;
@@ -472,8 +627,8 @@
   // value is ALWAYS sent as a number when it parses (plain numbers and
   // SI strings like "1k" alike); only an unparseable value is sent
   // as-is, for the server to reject with a 422. rating_watts / color
-  // are preserved per row from the row's data attributes (set by
-  // (per-row rating_watts / color, otherwise from state).
+  // are read from their inputs when present, else preserved per row
+  // from the row's data attributes / state.
   function collectNetlist() {
     var rows = [];
     var trs = document.querySelectorAll('#netlist-body tr[data-row]');
@@ -490,13 +645,16 @@
         value: valueNum != null ? valueNum : valueRaw,
         nodes: nodesRaw ? nodesRaw.split(/[\s,]+/).filter(Boolean) : []
       };
+      var ratingInput = get('rating_watts');
       var ratingAttr = tr.getAttribute('data-rating-watts');
+      var colorInput = get('color');
       var colorAttr = tr.getAttribute('data-color');
       var orig = netlist[Number(tr.getAttribute('data-row'))] || {};
-      var rating = ratingAttr != null && ratingAttr !== '' ? Number(ratingAttr)
-        : (orig.rating_watts != null ? orig.rating_watts : undefined);
+      var rating = ratingInput !== '' ? Number(ratingInput)
+        : (ratingAttr != null && ratingAttr !== '' ? Number(ratingAttr)
+        : (orig.rating_watts != null ? orig.rating_watts : undefined));
       if (rating != null && isFinite(rating)) comp.rating_watts = rating;
-      var color = colorAttr || orig.color;
+      var color = colorInput || colorAttr || orig.color;
       if (color) comp.color = color;
       rows.push(comp);
     });
@@ -511,6 +669,29 @@
     if (rows.length || netlist.length) netlist = rows.map(normRow);
   }
 
+  // Before/after diff of a repair, as plain strings like
+  // "R1 100 Ω → 470 Ω". Compared by component id.
+  function diffNetlists(before, after) {
+    var beforeById = {}, afterById = {};
+    (before || []).forEach(function (r) { if (r.id) beforeById[r.id] = normRow(r); });
+    (after || []).forEach(function (r) { if (r.id) afterById[r.id] = normRow(r); });
+    var diffs = [];
+    Object.keys(afterById).forEach(function (id) {
+      var a = afterById[id], b = beforeById[id];
+      if (!b) { diffs.push(id + ' added (' + fmtValueForType(a.type, a.value) + ')'); return; }
+      var parts = [];
+      if (String(a.value) !== String(b.value)) parts.push(fmtValueForType(b.type, b.value) + ' → ' + fmtValueForType(a.type, a.value));
+      if (String(a.type) !== String(b.type)) parts.push('type ' + b.type + ' → ' + a.type);
+      if (a.nodes.join(' ') !== b.nodes.join(' ')) parts.push('nodes ' + b.nodes.join(' ') + ' → ' + a.nodes.join(' '));
+      if (String(a.rating_watts) !== String(b.rating_watts) && (a.rating_watts != null || b.rating_watts != null)) parts.push('rating ' + (b.rating_watts != null ? b.rating_watts + ' W' : '—') + ' → ' + (a.rating_watts != null ? a.rating_watts + ' W' : '—'));
+      if (parts.length) diffs.push(id + ' ' + parts.join(', '));
+    });
+    Object.keys(beforeById).forEach(function (id) {
+      if (!afterById[id]) diffs.push(id + ' removed');
+    });
+    return diffs;
+  }
+
   function renderRepairHistory(history) {
     var ol = $('repair-history');
     if (!history.length) {
@@ -521,7 +702,12 @@
         var changeText = Array.isArray(changes)
           ? changes.map(function (c) { return typeof c === 'string' ? c : (c.description || c.message || JSON.stringify(c)); }).join('; ')
           : String(changes);
-        return '<li><strong>Round ' + escapeHtml(h.round) + ':</strong> ' + escapeHtml(changeText || 'no changes reported') + '</li>';
+        var diffHtml = (h.diffs && h.diffs.length)
+          ? '<span class="diff">' + h.diffs.map(function (d) { return escapeHtml(d); }).join('<br>') + '</span>'
+          : '';
+        return '<li><strong>Round ' + escapeHtml(h.round) + ':</strong> ' +
+          (h.unverified ? '<span class="unverified">UNVERIFIED</span> ' : '') +
+          escapeHtml(changeText || 'no changes reported') + diffHtml + '</li>';
       }).join('');
     }
     $('repair-round-label').textContent = 'Round: ' + repairRound + ' / ' + MAX_REPAIR_ROUNDS;
@@ -538,10 +724,14 @@
     var incoming = data.netlist || data.netlist_used || report.netlist_used || report.netlist;
     if (incoming) { netlist = normNetlist(incoming); }
     if (data.findings || report.findings) { findings = data.findings || report.findings; renderFindings(); }
-    if (data.verdict || report.verdict) setVerdict(data.verdict || report.verdict, !!(data.mock || report.mock), data.verdict_note || data.note || report.verdict_note || '');
+    if (data.verdict || report.verdict) {
+      setVerdict(data.verdict || report.verdict, !!(data.mock || report.mock), data.verdict_note || data.note || report.verdict_note || '');
+      pipelineDone();
+    }
     if (data.round != null) { repairRound = data.round; }
     renderNetlist();
     renderRepairHistory(repairHistory);
+    renderKeyReadings();
     sync3D();
   }
 
@@ -553,19 +743,35 @@
   }
 
   function handleErrorPayload(data, fallback) {
-    var msg = (data && (data.error || data.message)) || fallback || 'Unknown error';
-    var detail = (data && (data.detail || data.llm_error)) || '';
+    // message first: "error" is a machine code ("validation_error",
+    // "llm_error"), "message" is the human text. Fall back to the
+    // code when there is no message (e.g. SSE error events, whose
+    // human text lives in "detail").
+    var msg = (data && (data.message || data.error)) || fallback || 'Unknown error';
+    // detail may be a string (most errors) or a list (request
+    // validation: {"error": "validation_error", "detail": [...]}).
+    // A raw list stringifies as "[object Object]"; pull the messages out.
+    var rawDetail = (data && (data.detail || data.llm_error)) || '';
+    var detail = Array.isArray(rawDetail)
+      ? rawDetail.map(function (d) { return (d && (d.msg || d.message)) || String(d); }).join('; ')
+      : (typeof rawDetail === 'object' ? JSON.stringify(rawDetail) : String(rawDetail));
     // Neutral title unless the payload is actually an LLM failure:
     // download / network / HTTP errors must never be labelled "LLM failed".
     var title = isLlmError(data) ? 'LLM failed' : 'Run failed';
     showError(title + ': ' + msg, detail);
     logLine('system', 'ERROR: ' + msg + (detail ? ' ' + detail : ''), 'error');
+    pipelineFailCurrent();
   }
 
   // Parse one SSE `data:` payload. Returns false when the stream is done.
   // A done event that carries the final result (verdict / findings /
   // netlist / report) is applied BEFORE returning false: the done event
   // IS the result, not a signal to drop it and keep the previous event.
+  // Terminator contract (server.py): the terminal `result` event
+  // carries `done: true`; stream close is also a terminator, and
+  // streamResponse returns the last result-bearing event in that case.
+  // Progress events never carry a result (see the guard at the end of
+  // this function), and `error` events never become the result.
   function handleSseData(raw) {
     if (!raw) return true;
     var data;
@@ -576,11 +782,27 @@
       return false;
     }
     if (data.error || data.llm_error || isLlmError(data)) { handleErrorPayload(data, 'LLM call failed'); return true; }
+    if (data.stage) pipelineFromStage(data.stage);
     var agent = data.agent || data.source || 'agent';
     var msg = data.message || data.text || data.detail || data.event || JSON.stringify(data);
     logLine(agent, msg, data.level || data.type);
-    if (data.verdict || data.findings || data.netlist || data.report) applyResult(data);
+    // Progress events never apply a result: a bare netlist (or
+    // netlist_used) in a progress event is not a verdict. Only a
+    // verdict / findings / report applies one; the done branch above
+    // is the only place a netlist alone is applied, because done IS
+    // the terminal result.
+    if (data.verdict || data.findings || data.report) applyResult(data);
     return true;
+  }
+
+  // Only a result-bearing event is ever the "last" event: progress
+  // events and `error` events must never become it, or runImage /
+  // runGoal would apply an error payload (or a progress event) as if
+  // it were the final Report. A done event is result-bearing by
+  // definition, but handleSseData already returns it above, so this
+  // guard only matters for stream-close termination.
+  function isResultEvent(parsed) {
+    return !!parsed && (parsed.verdict || parsed.findings || parsed.report || parsed.done === true);
   }
 
   async function streamResponse(res) {
@@ -613,7 +835,7 @@
           // handleSseData applies a done event's result itself; return
           // THAT event (parsed), not the previous one.
           if (handleSseData(raw) === false) return parsed || last;
-          if (parsed) last = parsed;
+          if (isResultEvent(parsed)) last = parsed;
         } else if (line.indexOf('event:') === 0) {
           logLine('system', line, 'info');
         }
@@ -625,7 +847,7 @@
       var tailParsed = null;
       try { tailParsed = JSON.parse(tailRaw); } catch (e) { /* non-JSON line already logged */ }
       if (handleSseData(tailRaw) === false) return tailParsed || last;
-      if (tailParsed) last = tailParsed;
+      if (isResultEvent(tailParsed)) last = tailParsed;
     }
     return last;
   }
@@ -644,6 +866,7 @@
     if (!selectedFile) { showError('No image selected', 'Drop or choose a schematic image first, or use Run (goal) instead.'); return; }
     clearError();
     startTime = Date.now();
+    pipelineReset();
     setBusy(true, 'Running agents on image...');
     logLine('system', 'Uploading ' + selectedFile.name + ' and starting run...', 'info');
     try {
@@ -653,7 +876,11 @@
       var res = await fetch('/run-image', { method: 'POST', body: form });
       var finalData = await streamResponse(res);
       if (finalData) { applyResult(finalData); logLine('system', 'Run finished.', 'info'); }
-      else if (res.ok) { showError('Run finished with no result', 'The server returned no verdict, findings, or netlist.'); }
+      // No result AND no error already shown: only then is this a
+      // "finished with nothing" failure. An SSE error event already
+      // put its own banner up via handleErrorPayload; overwriting it
+      // with this generic message would hide the real cause.
+      else if (res.ok && !errorBanner.classList.contains('show')) { showError('Run finished with no result', 'The server returned no verdict, findings, or netlist.'); }
     } catch (e) {
       handleErrorPayload(null, 'Network error calling /run-image: ' + e.message);
     } finally { setBusy(false); }
@@ -665,6 +892,7 @@
     if (!goal) { showError('No goal entered', 'Type a goal first, or upload an image and use Run (image).'); return; }
     clearError();
     startTime = Date.now();
+    pipelineReset();
     setBusy(true, 'Running agents on goal...');
     logLine('system', 'Starting run for goal: ' + goal, 'info');
     try {
@@ -674,7 +902,9 @@
       });
       var finalData = await streamResponse(res);
       if (finalData) { applyResult(finalData); logLine('system', 'Run finished.', 'info'); }
-      else if (res.ok) { showError('Run finished with no result', 'The server returned no verdict, findings, or netlist.'); }
+      // See runImage: do not overwrite an SSE error banner that is
+      // already showing the real cause.
+      else if (res.ok && !errorBanner.classList.contains('show')) { showError('Run finished with no result', 'The server returned no verdict, findings, or netlist.'); }
     } catch (e) {
       handleErrorPayload(null, 'Network error calling /run-goal: ' + e.message);
     } finally { setBusy(false); }
@@ -688,6 +918,8 @@
     if (!payload.components.length) { showError('Netlist is empty', 'Add at least one netlist row before re-checking.'); return; }
     clearError();
     startTime = Date.now();
+    pipelineReset();
+    pipelineSet('simulate', 'running');
     setBusy(true, 'Re-checking (no LLM)...');
     logLine('system', 'Re-check: POST /check with ' + payload.components.length + ' edited rows (no LLM).', 'info');
     try {
@@ -698,6 +930,7 @@
       var data = await res.json().catch(function () { return null; });
       if (!res.ok || !data) { handleErrorPayload(data, 'Re-check failed (' + res.status + ')'); return; }
       if (data.error || isLlmError(data)) { handleErrorPayload(data, 'Re-check failed'); return; }
+      pipelineSet('simulate', 'done');
       applyResult(data);
       logLine('system', 'Re-check done. Verdict: ' + (data.verdict || (data.report && data.report.verdict) || 'unknown'), 'info');
     } catch (e) {
@@ -712,8 +945,11 @@
     if (!payload.components.length) { showError('Netlist is empty', 'Add at least one netlist row before repairing.'); return; }
     clearError();
     startTime = Date.now();
+    pipelineReset();
+    pipelineSet('repair', 'running');
     setBusy(true, 'Repairing (round ' + (repairRound + 1) + ')...');
     logLine('system', 'Repair: POST /repair, round ' + (repairRound + 1) + ' of 3.', 'info');
+    var beforeRows = collectNetlist();
     try {
       var res = await fetch('/repair', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -722,24 +958,51 @@
       var data = await res.json().catch(function () { return null; });
       if (!res.ok || !data) { handleErrorPayload(data, 'Repair failed (' + res.status + ')'); return; }
       if (data.error || isLlmError(data)) { handleErrorPayload(data, 'Repair failed'); return; }
+      // Unverified repair (HTTP 200, verified:false, report:null,
+      // verdict:null): the LLM's repair came back but its re-check
+      // failed, so NOTHING here may be applied. Do not apply the
+      // netlist, verdict, or findings, and do not clear the previous
+      // verdict: show the warning, record the round as spent (with an
+      // UNVERIFIED mark in the history), and leave the old state
+      // standing for a manual edit + Re-check or another Repair.
+      if (data.verified === false) {
+        repairRound = data.round != null ? data.round : repairRound + 1;
+        var changes = data.changes || data.reasons || data.what_changed || [];
+        repairHistory.push({ round: repairRound, changes: changes, diffs: [], unverified: true });
+        renderRepairHistory(repairHistory);
+        pipelineSet('repair', 'failed');
+        showError('Repair not verified',
+          'The repair came back but its re-check failed, so it was NOT applied: ' +
+          (data.verification_error || 'unknown verification error') +
+          '. The previous verdict still stands. Edit the table and Re-check, or try Repair again.');
+        logLine('system', 'Repair round ' + repairRound + ' UNVERIFIED: ' + (data.verification_error || 'unknown verification error'), 'error');
+        return;
+      }
       repairRound = data.round != null ? data.round : repairRound + 1;
       var changes = data.changes || data.what_changed || [];
-      repairHistory.push({ round: repairRound, changes: changes });
+      var afterRows = normNetlist(data.netlist || (data.report && (data.report.netlist || data.report.netlist_used)) || []);
+      var diffs = diffNetlists(beforeRows, afterRows);
+      repairHistory.push({ round: repairRound, changes: changes, diffs: diffs });
       renderRepairHistory(repairHistory);
+      pipelineSet('repair', 'done');
+      pipelineSet('resimulate', 'running');
       applyResult(data);
+      pipelineSet('resimulate', 'done');
+      $('pipeline-note').textContent = 'Repair round ' + repairRound + ' done and re-simulated.';
       logLine('system', 'Repair round ' + repairRound + ' done. ' + (Array.isArray(changes) ? changes.length + ' change(s).' : ''), 'info');
     } catch (e) {
       handleErrorPayload(null, 'Network error calling /repair: ' + e.message);
     } finally { setBusy(false); }
   }
 
-  // Downloads: POST ONLY. The Netlist itself is the request body
-  // (test_server.py contract); there is no GET route and no
-  // server-side state, so no GET /download/*.cir|csv is used.
+  // Downloads: POST ONLY from this page (the server also offers GET
+  // /download/netlist.cir and GET /download/bom.csv for the last checked
+  // netlist, served from server-side state). The Netlist itself is the
+  // POST request body; no GET with a body is used here.
   async function download(kind) {
     var isCir = kind === 'cir';
     var url = isCir ? '/download/netlist' : '/download/bom';
-    var filename = isCir ? 'netlist.cir' : 'BOM.csv';
+    var filename = isCir ? 'netlist.cir' : 'bom.csv';
     clearError();
     var payload = collectNetlistPayload();
     if (!payload.components.length) { showError('Netlist is empty', 'Add at least one netlist row before downloading.'); return; }
@@ -781,6 +1044,45 @@
     logLine('system', 'Image selected: ' + file.name, 'info');
   }
 
+  // ---- Example picker: inline copies of backend/tests/fixtures/*.json.
+  // Picking one loads the netlist and runs a REAL /check per fixture.
+  // Never a canned sim result, and no single-finding assertion: see the
+  // header comment for which fixtures trip more than one rule.
+  var EXAMPLES = {
+    good_led: {"title": "good LED 9V", "components": [
+      {"id": "V1", "type": "voltage_source", "value": 9.0, "nodes": ["vcc", "0"]},
+      {"id": "R1", "type": "resistor", "value": 470.0, "nodes": ["vcc", "led"], "rating_watts": 0.25},
+      {"id": "D1", "type": "led", "value": 2.0, "nodes": ["led", "0"], "color": "red"}]},
+    led_overcurrent: {"title": "led_overcurrent", "components": [
+      {"id": "V1", "type": "voltage_source", "value": 9.0, "nodes": ["vcc", "0"]},
+      {"id": "R1", "type": "resistor", "value": 100.0, "nodes": ["vcc", "led"], "rating_watts": 0.25},
+      {"id": "D1", "type": "led", "value": 2.0, "nodes": ["led", "0"], "color": "red"}]},
+    resistor_warn: {"title": "resistor_warn", "components": [
+      {"id": "V1", "type": "voltage_source", "value": 9.0, "nodes": ["vcc", "0"]},
+      {"id": "R1", "type": "resistor", "value": 270.0, "nodes": ["vcc", "led"], "rating_watts": 0.25},
+      {"id": "D1", "type": "led", "value": 2.0, "nodes": ["led", "0"], "color": "red"}]},
+    shorted_source: {"title": "Shorted voltage source", "components": [
+      {"id": "V1", "type": "voltage_source", "value": 9.0, "nodes": ["0", "0"]}]}
+  };
+
+  async function loadExample(key) {
+    var ex = EXAMPLES[key];
+    if (!ex || busy) return;
+    clearError();
+    netlist = normNetlist(ex);
+    findings = [];
+    lastReport = null;
+    selectedId = null;
+    renderNetlist();
+    renderFindings();
+    renderKeyReadings();
+    $('verdict-empty').style.display = '';
+    verdictEl.className = '';
+    verdictEl.textContent = '';
+    logLine('system', 'Example loaded: ' + (ex.title || key) + '. Running a real check…', 'info');
+    await recheck();
+  }
+
   // ---- Selection: shared by the table and the 3D view -----------------
   // Click-to-select editing: selecting a component highlights its table
   // row and, when the selection came from 3D, focuses its value field
@@ -793,7 +1095,8 @@
     renderNetlist();
     var tr = selectedId ? document.querySelector('#netlist-body tr[data-id="' + selectedId + '"]') : null;
     if (tr) {
-      tr.scrollIntoView({ block: 'nearest' });
+      var reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      tr.scrollIntoView({ block: 'nearest', behavior: reduceMotion ? 'auto' : 'smooth' });
       if (opts.from3D) {
         var input = tr.querySelector('input[data-field="value"]');
         if (input) { input.focus(); input.select(); }
@@ -805,6 +1108,21 @@
       try { threeDModule.select(selectedId); } catch (e) { /* best-effort */ }
     }
     if (selectedId) logLine('system', 'Selected component: ' + selectedId, 'info');
+  }
+  // Cycle the selection through the netlist (3D-container keyboard hook).
+  function cycleSelection(dir) {
+    syncNetlistFromTable();
+    if (!netlist.length) return;
+    var idx = -1;
+    for (var i = 0; i < netlist.length; i++) { if (netlist[i].id === selectedId) { idx = i; break; } }
+    idx = (idx + dir + netlist.length) % netlist.length;
+    selectComponent(netlist[idx].id);
+  }
+  function focusSelectedValueInput() {
+    if (!selectedId) return;
+    var tr = document.querySelector('#netlist-body tr[data-id="' + selectedId + '"]');
+    var input = tr && tr.querySelector('input[data-field="value"]');
+    if (input) { input.focus(); input.select(); }
   }
 
   // Patch from the 3D view, e.g. {value: 470, nodes: ["vcc", "led"]}.
@@ -877,13 +1195,53 @@
     applyNetlist: applyNetlist
   };
 
+  // ---- Theme toggle (persisted) ----
+  var themeToggle = $('theme-toggle');
+  function syncThemeToggle() {
+    var dark = document.documentElement.getAttribute('data-theme') === 'dark';
+    themeToggle.setAttribute('aria-pressed', dark ? 'true' : 'false');
+    themeToggle.textContent = dark ? 'Light theme' : 'Dark theme';
+  }
+  themeToggle.addEventListener('click', function () {
+    var next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    try { localStorage.setItem('netproof-theme', next); } catch (e) { /* private mode: theme just doesn't persist */ }
+    syncThemeToggle();
+  });
+  syncThemeToggle();
+
   // Wiring: table row click selects (and tells 3D to highlight).
   $('netlist-body').addEventListener('click', function (e) {
     var tr = e.target && e.target.closest ? e.target.closest('tr[data-id]') : null;
     if (tr && tr.getAttribute('data-id')) selectComponent(tr.getAttribute('data-id'), { fromTable: true });
   });
+  // Row selection is keyboard-operable: Enter/Space on a focused row
+  // selects it (inputs keep their own keys; this only fires on the row).
+  // Escape anywhere in the table deselects and returns focus to the row.
+  $('netlist-body').addEventListener('keydown', function (e) {
+    if (e.target && e.target.tagName === 'TR' && (e.key === 'Enter' || e.key === ' ')) {
+      e.preventDefault();
+      var id = e.target.getAttribute('data-id');
+      if (id) selectComponent(id, { fromTable: true });
+    } else if (e.key === 'Escape' && e.target && e.target.tagName === 'INPUT') {
+      e.target.blur();
+      selectComponent(null);
+    }
+  });
   // Keep state in sync when a row is edited by hand, so 3D reads fresh data.
   $('netlist-body').addEventListener('change', function () { syncNetlistFromTable(); sync3D(); });
+
+  // 3D container keyboard hook (fallback; interaction.js owns the canvas
+  // once it has focus — this handler only fires when the container
+  // itself is the target, so it never fights P2's handler).
+  var scene3dEl = $('scene3d');
+  scene3dEl.addEventListener('keydown', function (e) {
+    if (e.target !== scene3dEl) return;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); cycleSelection(1); }
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); cycleSelection(-1); }
+    else if (e.key === 'Enter') { e.preventDefault(); focusSelectedValueInput(); }
+    else if (e.key === 'Escape') { e.preventDefault(); selectComponent(null); }
+  });
 
   // Wiring
   var dz = $('dropzone');
@@ -908,11 +1266,19 @@
   $('repair-btn').addEventListener('click', repair);
   $('dl-cir-btn').addEventListener('click', function () { download('cir'); });
   $('dl-bom-btn').addEventListener('click', function () { download('bom'); });
+  document.querySelectorAll('[data-example]').forEach(function (btn) {
+    btn.addEventListener('click', function () { loadExample(btn.getAttribute('data-example')); });
+  });
   $('add-row-btn').addEventListener('click', function () {
     syncNetlistFromTable();
     netlist.push({ id: '', type: '', value: '', nodes: [] });
     renderNetlist();
     sync3D();
+    // Move focus to the new row's first input so it can be typed into.
+    var rows = document.querySelectorAll('#netlist-body tr[data-row]');
+    var last = rows[rows.length - 1];
+    var input = last && last.querySelector('input[data-field="id"]');
+    if (input) input.focus();
   });
 
   renderNetlist();

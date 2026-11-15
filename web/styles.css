@@ -1,0 +1,464 @@
+/* Netproof bench-instrument theme.
+   Light paper first (arena verdict B); dark theme via [data-theme="dark"]
+   on <html>, toggled by #theme-toggle and persisted in localStorage.
+   All colours are CSS custom properties. The ONLY saturated colours on
+   the page are the verdict colours (PASS #1a7f37, WARN #b45309,
+   STOP #b00020, same in both themes, white text: 5.0:1 or better).
+   Agent colours live ONLY inside the dark console, never on light
+   surfaces. Muted text is #595959 on paper (7.0:1) and #b3aea1 on the
+   dark panel (6.6:1): AA in both themes. */
+
+:root,
+[data-theme="light"] {
+  color-scheme: light;
+  --paper: #faf9f5;
+  --panel: #ffffff;
+  --panel-2: #f3f1ea;
+  --ink: #1c1a17;
+  --muted: #595959;
+  --line: #d9d5cc;
+  --line-strong: #b9b4a8;
+  --focus: #1d4ed8;
+  --btn-bg: #1c1a17;
+  --btn-ink: #faf9f5;
+  --row-selected: #fdf3d7;
+  --readonly-bg: #f3f1ea;
+  --scene-bg: #e9e7e1;
+  --scene-ink: #595959;
+  --pass: #1a7f37;
+  --warn: #b45309;
+  --stop: #b00020;
+  --on-verdict: #ffffff;
+  --sev-pass: #1a7f37;
+  --sev-warn: #b45309;
+  --sev-stop: #b00020;
+  --sev-info: #595959;
+  --chip-line: #b9b4a8;
+  --input-bg: #ffffff;
+  --console-bg: #141412;
+  --console-ink: #e8e6e0;
+  --console-dim: #9a968c;
+  --mock-chip-bg: #141412;
+  --mock-chip-ink: #ffe600;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --paper: #191917;
+  --panel: #232320;
+  --panel-2: #2c2c28;
+  --ink: #edeae2;
+  --muted: #b3aea1;
+  --line: #3d3d37;
+  --line-strong: #57574f;
+  --focus: #8ab4ff;
+  --btn-bg: #edeae2;
+  --btn-ink: #191917;
+  --row-selected: #3a3220;
+  --readonly-bg: #2c2c28;
+  --scene-bg: #141412;
+  --scene-ink: #b3aea1;
+  --pass: #1a7f37;
+  --warn: #b45309;
+  --stop: #b00020;
+  --on-verdict: #ffffff;
+  --sev-pass: #4ade80;
+  --sev-warn: #fbbf24;
+  --sev-stop: #f87171;
+  --sev-info: #b3aea1;
+  --chip-line: #57574f;
+  --input-bg: #232320;
+  --console-bg: #141412;
+  --console-ink: #e8e6e0;
+  --console-dim: #9a968c;
+  --mock-chip-bg: #000000;
+  --mock-chip-ink: #ffe600;
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  font-family: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+/* Every value, node name, unit and rule ID is monospace. */
+.mono,
+code,
+kbd,
+#console,
+#verdict,
+.reading dd,
+.measured,
+.findings-code,
+td.readonly,
+td input,
+#scene3d-status,
+#repair-history .diff {
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* Skip link: first tab stop, visible on focus. */
+.skip-link {
+  position: absolute;
+  left: 16px;
+  top: -48px;
+  background: var(--btn-bg);
+  color: var(--btn-ink);
+  padding: 8px 14px;
+  border-radius: 6px;
+  z-index: 10;
+  transition: top 0.15s ease;
+}
+.skip-link:focus { top: 8px; }
+
+header {
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  padding: 12px 16px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 16px;
+}
+header h1 {
+  margin: 0;
+  font-size: 22px;
+  letter-spacing: 0.02em;
+}
+header h1 .mono { font-size: 0.62em; color: var(--muted); letter-spacing: 0; }
+header p { margin: 0; color: var(--muted); font-size: 14px; flex: 1 1 280px; }
+#theme-toggle { margin-left: auto; }
+
+main { max-width: 1280px; margin: 0 auto; padding: 16px; }
+
+/* Two-column bench layout on desktop; single column below 900px. */
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
+  gap: 16px;
+  align-items: start;
+}
+.col-left, .col-right { display: grid; gap: 16px; align-content: start; min-width: 0; }
+@media (max-width: 900px) {
+  .layout { grid-template-columns: 1fr; }
+}
+
+section {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px;
+  min-width: 0;
+}
+section.full { margin-top: 16px; }
+h2 { margin: 0 0 10px; font-size: 17px; }
+h2 .step-no {
+  font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--muted);
+  margin-right: 8px;
+}
+
+label { display: block; font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+textarea, input[type="text"] {
+  width: 100%;
+  padding: 8px;
+  font: inherit;
+  color: var(--ink);
+  background: var(--input-bg);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+}
+textarea { min-height: 64px; resize: vertical; }
+
+button {
+  font: inherit;
+  padding: 8px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--btn-bg);
+  background: var(--btn-bg);
+  color: var(--btn-ink);
+  cursor: pointer;
+  margin: 4px 6px 4px 0;
+  min-height: 40px;
+}
+button.secondary { background: transparent; color: var(--ink); border-color: var(--line-strong); }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* Visible keyboard focus on EVERY control, not just table inputs. */
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+tr:focus-visible { outline-offset: -3px; }
+
+#dropzone {
+  border: 2px dashed var(--line-strong);
+  border-radius: 8px;
+  padding: 24px;
+  text-align: center;
+  color: var(--muted);
+  cursor: pointer;
+  margin-bottom: 10px;
+}
+#dropzone.drag { border-color: var(--focus); background: var(--panel-2); }
+#dropzone input { display: none; }
+#dropzone strong { color: var(--ink); }
+
+.row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
+.row > div { flex: 1; min-width: 220px; }
+
+/* Examples picker. */
+.examples { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
+.examples-label { font-weight: 600; font-size: 13px; margin: 0 0 6px; }
+.example-btn { margin: 4px 6px 4px 0; }
+
+/* Error banner: LLM/backend failures are never silent. */
+#error-banner {
+  display: none;
+  background: var(--stop);
+  color: #fff;
+  padding: 12px 16px;
+  border-radius: 8px;
+  margin-bottom: 16px;
+  font-weight: 600;
+}
+#error-banner.show { display: block; }
+#error-banner small { display: block; font-weight: 400; margin-top: 4px; }
+
+/* Verdict readout: multimeter / scope style, the hero. */
+#verdict {
+  display: none;
+  text-align: center;
+  padding: 20px 12px 16px;
+  border-radius: 8px;
+  font-size: clamp(40px, 6vw, 64px);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1.1;
+  margin-bottom: 12px;
+  color: var(--on-verdict);
+}
+#verdict.show { display: block; }
+#verdict.pass { background: var(--pass); }
+#verdict.warn { background: var(--warn); }
+#verdict.stop { background: var(--stop); }
+#verdict .mock-tag {
+  display: inline-block;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  background: var(--mock-chip-bg);
+  color: var(--mock-chip-ink);
+  border: 2px solid var(--mock-chip-ink);
+  border-radius: 4px;
+  padding: 2px 10px;
+  margin-top: 10px;
+  vertical-align: middle;
+}
+#verdict small {
+  display: block;
+  font-size: 14px;
+  font-weight: 400;
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
+  margin-top: 8px;
+  letter-spacing: 0;
+}
+.verdict-empty {
+  text-align: center;
+  padding: 20px 12px;
+  border: 2px dashed var(--line-strong);
+  border-radius: 8px;
+  color: var(--muted);
+  margin-bottom: 12px;
+}
+
+/* Key measured numbers, pulled from the Report only. */
+#key-readings {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0 0 12px;
+}
+.reading {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  min-width: 0;
+}
+.reading dt { font-size: 12px; color: var(--muted); font-weight: 600; }
+.reading dd { margin: 2px 0 0; font-size: 20px; font-weight: 600; overflow-wrap: anywhere; }
+@media (max-width: 560px) { #key-readings { grid-template-columns: 1fr; } }
+
+/* Pipeline progress: simulate -> rules -> repair -> re-simulate. */
+#pipeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 0;
+}
+#pipeline li {
+  flex: 1 1 120px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+  padding: 4px 6px 4px 0;
+  border-top: 3px solid var(--line);
+}
+#pipeline li .dot {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--line-strong);
+  background: transparent;
+}
+#pipeline li.done { color: var(--ink); border-top-color: var(--pass); }
+#pipeline li.done .dot { background: var(--pass); border-color: var(--pass); }
+#pipeline li.running { color: var(--ink); border-top-color: var(--warn); }
+#pipeline li.running .dot { background: var(--warn); border-color: var(--warn); }
+#pipeline li.failed { color: var(--sev-stop); border-top-color: var(--stop); }
+#pipeline li.failed .dot { background: var(--stop); border-color: var(--stop); }
+
+/* Findings. */
+#findings { margin: 0; padding: 0; list-style: none; }
+#findings li { color: var(--ink); }
+#findings li {
+  border: 1px solid var(--line);
+  border-left-width: 4px;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+#findings li.sev-stop { border-left-color: var(--stop); }
+#findings li.sev-warn { border-left-color: var(--warn); }
+#findings li.sev-pass, #findings li.sev-info { border-left-color: var(--chip-line); }
+.findings-head { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; }
+.sev {
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  padding: 0 6px;
+}
+.sev-stop { color: var(--sev-stop); }
+.sev-warn { color: var(--sev-warn); }
+.sev-pass { color: var(--sev-pass); }
+.sev-info { color: var(--sev-info); }
+.findings-code { font-weight: 700; font-size: 13px; }
+.findings-msg { margin: 4px 0 0; }
+.measured { display: block; margin-top: 4px; font-size: 13px; color: var(--muted); }
+.measured b { color: var(--ink); font-weight: 600; }
+.empty { color: var(--muted); }
+
+/* Netlist table: horizontal scroll lives INSIDE this wrapper so a
+   390px viewport never gets page-level horizontal scroll. */
+.table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin-bottom: 10px;
+}
+.table-wrap:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; min-width: 680px; }
+th, td { border-bottom: 1px solid var(--line); padding: 5px 6px; text-align: left; }
+th { background: var(--panel-2); font-size: 12px; color: var(--muted); font-weight: 600; }
+td input {
+  width: 100%;
+  min-width: 52px;
+  border: none;
+  font: inherit;
+  padding: 2px;
+  background: transparent;
+  color: var(--ink);
+}
+td input:focus-visible { outline-offset: -1px; }
+td.readonly { background: var(--readonly-bg); color: var(--ink); white-space: nowrap; }
+tr.selected td { background: var(--row-selected); }
+tr.selected td input { background: transparent; }
+tr[data-id] { cursor: pointer; }
+
+#preview { max-width: 100%; border: 1px solid var(--line); border-radius: 6px; display: none; }
+#preview.show { display: block; }
+.layout > *, .col-left > *, .col-right > *, .split > * { min-width: 0; }
+.split { display: grid; grid-template-columns: 1fr 2fr; gap: 14px; align-items: start; }
+@media (max-width: 1100px) { .split { grid-template-columns: 1fr; } }
+
+/* Live console: stays dark in both themes; agent colours live here only. */
+.console-wrap {
+  background: var(--console-bg);
+  color: var(--console-ink);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+#console {
+  min-height: 140px;
+  max-height: 320px;
+  overflow-y: auto;
+  font-size: 13px;
+  line-height: 1.5;
+}
+#console .line { white-space: pre-wrap; overflow-wrap: break-word; }
+#console .t { color: var(--console-dim); }
+#console .agent { font-weight: 700; }
+#console .err { color: #ff8080; }
+.legend { font-size: 12px; color: var(--console-dim); margin-top: 8px; border-top: 1px solid #33332e; padding-top: 8px; }
+.legend span { display: inline-block; margin-right: 12px; color: var(--console-ink); }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+
+/* 3D view. */
+#scene3d {
+  position: relative;
+  min-height: 320px;
+  height: 420px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--scene-bg);
+  color: var(--scene-ink);
+  overflow: hidden;
+}
+#scene3d canvas { display: block; width: 100%; height: 100%; }
+#scene3d .fallback { padding: 24px; color: var(--scene-ink); }
+#scene3d-status { font-size: 13px; color: var(--muted); margin-top: 6px; }
+#selected-component { font-weight: 600; }
+.controls-hint { font-size: 13px; color: var(--muted); }
+.controls-hint kbd {
+  background: var(--panel-2);
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font: inherit;
+  font-size: 12px;
+}
+
+#repair-history { margin: 0; padding-left: 20px; }
+#repair-history li { margin-bottom: 10px; }
+#repair-history .diff { display: block; font-size: 13px; margin-top: 2px; overflow-wrap: anywhere; }
+#repair-history .diff .arrow { color: var(--muted); }
+#status { font-size: 13px; color: var(--muted); margin-top: 6px; }
+#repair-round-label { font-size: 13px; }
+
+footer { max-width: 1280px; margin: 0 auto; padding: 0 16px 24px; color: var(--muted); font-size: 13px; }
+footer .mono { font-size: 12px; }
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}

@@ -174,6 +174,27 @@ def test_led_overcurrent(led_overcurrent):
     assert report.verdict is Verdict.STOP
 
 
+def test_led_overcurrent_exactly_30ma_is_warn_not_stop(good_led):
+    """LED_OVERCURRENT boundary: exactly 30.0 mA is WARN, not STOP.
+
+    The STOP check is strict ``i > 0.030`` and WARN is ``i >= 0.020``,
+    so 0.030 A lands in the [20 mA, 30 mA] WARN band. Resistor power
+    7^2 / 470 = 0.104 W stays under the 70% warn level, so the only
+    finding is LED_OVERCURRENT WARN and the verdict is WARN.
+    """
+    sim = _sim(
+        node_voltages={"vcc": 9.0, "led": 2.0, "0": 0.0},
+        branch_currents={"V1": -0.030, "R1": 0.030, "D1": 0.030},
+    )
+    report = verify(good_led, sim)
+    _assert_finding(report.findings, "LED_OVERCURRENT", Severity.WARN, "D1")
+    assert not any(
+        f.severity is Severity.STOP
+        for f in _for_rule(report.findings, "LED_OVERCURRENT")
+    )
+    assert report.verdict is Verdict.WARN
+
+
 def test_led_undercurrent(led_undercurrent):
     """LED_UNDERCURRENT INFO: 70 uA through a red LED (min 1 mA).
 

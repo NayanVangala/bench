@@ -398,6 +398,18 @@ tr[data-id] { cursor: pointer; }
 .split { display: grid; grid-template-columns: 1fr 2fr; gap: 14px; align-items: start; }
 @media (max-width: 1100px) { .split { grid-template-columns: 1fr; } }
 
+/* Resistor sweep (P5.2): two inline-SVG charts side by side, stacked
+   under 800 px. Chart colours match the verdict palette. */
+.sweep-charts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+@media (max-width: 800px) { .sweep-charts { grid-template-columns: 1fr; } }
+.sweep-charts svg { width: 100%; height: auto; display: block; }
+.sweep-charts svg text { font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace; fill: var(--muted); }
+#sweep-resistor { width: 100%; padding: 6px; font: inherit; }
+.sweep-verdict { font-weight: 700; }
+.sweep-verdict.pass { color: var(--sev-pass); }
+.sweep-verdict.warn { color: var(--sev-warn); }
+.sweep-verdict.stop { color: var(--sev-stop); }
+
 /* Live console: stays dark in both themes; agent colours live here only. */
 .console-wrap {
   background: var(--console-bg);

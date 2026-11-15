@@ -52,6 +52,15 @@
     POST /run-goal   JSON {goal: string} -> SSE stream, then final JSON
     POST /check      JSON Netlist (bare ir.py shape, NO wrapper, NO goal,
                       NO LLM on the server) -> JSON Report
+    GET  /rules      rule inventory: 12 rows with thresholds from
+                      rules.py constants (no ngspice, no mock). The
+                      sweep charts draw their WARN/STOP lines from
+                      here, never from hardcoded numbers.
+    POST /sweep      JSON {netlist, resistor_id, values?, led_id?,
+                      include_findings?} -> per-value verification
+                      points (same pipeline as /check per point).
+                      Never updates the last-checked netlist, so
+                      downloads keep serving the checked circuit.
     POST /repair     JSON {netlist, findings, round, goal?}
                       -> JSON {netlist, changes, round, verdict, findings, mock}
                       Unverified repair is HTTP 200 with verified:false,
@@ -264,6 +273,51 @@
     <p id="share-status" class="empty" role="status" aria-live="polite"></p>
     <p class="empty">Shares the netlist only (no title, no result). Opening the link re-checks the circuit on the server; no result is stored in the link. Anyone with the link can see the circuit, so do not put secrets in node names.</p>
     <p class="empty">POST /download/netlist (netlist.cir) and POST /download/bom (bom.csv) render from the netlist in the table above. GET /download/netlist.cir and GET /download/bom.csv return the same files for the last checked netlist: one value shared across tabs, lost on restart, so POST is the reliable path. BOM header: id,type,value,rating,qty.</p>
+  <section id="sweep-section" class="full">
+    <h2>Resistor sweep</h2>
+    <div class="row">
+      <div>
+        <label for="sweep-resistor">Resistor</label>
+        <select id="sweep-resistor"></select>
+      </div>
+      <div>
+        <label>LED</label>
+        <p class="empty" id="sweep-led">&mdash;</p>
+      </div>
+      <div>
+        <label>Values</label>
+        <p class="empty mono" id="sweep-values">&mdash;</p>
+      </div>
+      <div>
+        <button id="sweep-btn" type="button">Run sweep</button>
+        <span id="sweep-status" role="status" aria-live="polite"></span>
+      </div>
+    </div>
+    <p id="sweep-hint" class="empty">Pick an example or run a check first, then choose a resistor. Each point is a real /check-equivalent verification (ngspice + rules); the sweep never changes the netlist or the 3D view.</p>
+    <div id="sweep-results" hidden>
+      <div class="sweep-charts">
+        <div>
+          <label>LED current vs R</label>
+          <div id="sweep-chart-current"></div>
+          <p id="sweep-legend-current" class="empty"></p>
+          <p id="sweep-safe-band" class="empty"></p>
+        </div>
+        <div>
+          <label>Resistor power vs R</label>
+          <div id="sweep-chart-power"></div>
+          <p id="sweep-legend-power" class="empty"></p>
+        </div>
+      </div>
+      <div class="table-wrap" tabindex="0" aria-label="Sweep points table, scrollable">
+        <table>
+          <thead>
+            <tr><th>R</th><th>LED current</th><th>Resistor power</th><th>Verdict</th></tr>
+          </thead>
+          <tbody id="sweep-body"></tbody>
+        </table>
+      </div>
+      <p id="sweep-mock" class="empty"></p>
+    </div>
   </section>
 
 </main>
@@ -618,6 +672,7 @@
       }).join('');
     }
     $('selected-component').textContent = selectedId || 'none';
+    refreshSweepControls();
   }
 
   // Parse a value string to a number, accepting SI suffixes the user
@@ -1009,6 +1064,256 @@
     } catch (e) {
       handleErrorPayload(null, 'Network error calling /repair: ' + e.message);
     } finally { setBusy(false); }
+  }
+
+  // ---- Resistor sweep (P5.2) -----------------------------------------
+  // POST /sweep re-verifies the netlist at each of 10 E12 resistor
+  // values (ngspice + rules per point, same pipeline as /check).
+  // Threshold lines come ONLY from GET /rules (cached in sweepRules)
+  // and the /sweep thresholds echo; the page never hardcodes a
+  // threshold. DEFAULT_SWEEP_VALUES is a request default, not a
+  // threshold. Charts are inline SVG (no chart library); the only
+  // frontend math is chart geometry (pixel scaling), display-only
+  // like fmtNum. After a sweep sync3D() is NOT called: the sweep
+  // does not change the canonical netlist.
+  var DEFAULT_SWEEP_VALUES = [100, 120, 180, 270, 390, 560, 820, 1200, 1800, 2200];
+  var sweepRules = null;   // cached GET /rules response
+  var sweepResult = null;  // last POST /sweep response
+  var sweepBusy = false;
+
+  function sweepRuleRow(ruleId, band) {
+    if (!sweepRules || !Array.isArray(sweepRules.rules)) return null;
+    for (var i = 0; i < sweepRules.rules.length; i++) {
+      var r = sweepRules.rules[i];
+      if (r.rule_id === ruleId && (r.band || null) === (band || null)) return r;
+    }
+    return null;
+  }
+
+  // Resistor <select> + LED/values readouts, from the current netlist.
+  // Preserves the selected resistor when it is still present.
+  function refreshSweepControls() {
+    var sel = $('sweep-resistor');
+    if (!sel) return;
+    var prev = sel.value;
+    var resistors = netlist.filter(function (r) {
+      return String(r.type || '').toLowerCase().indexOf('resistor') === 0;
+    });
+    var leds = netlist.filter(function (r) {
+      var t = String(r.type || '').toLowerCase();
+      return t.indexOf('led') === 0 || t.indexOf('diode') === 0;
+    });
+    sel.innerHTML = resistors.map(function (r) {
+      return '<option value="' + escapeHtml(r.id) + '">' + escapeHtml(r.id) + '</option>';
+    }).join('');
+    if (prev && resistors.some(function (r) { return r.id === prev; })) sel.value = prev;
+    var hasResistor = resistors.length > 0;
+    sel.disabled = !hasResistor || sweepBusy;
+    $('sweep-btn').disabled = !hasResistor || sweepBusy;
+    $('sweep-led').textContent = leds.length ? leds[0].id : '—';
+    $('sweep-values').textContent = DEFAULT_SWEEP_VALUES.join(', ') + ' Ω';
+    $('sweep-hint').textContent = hasResistor
+      ? 'Each point is a real /check-equivalent verification (ngspice + rules); the sweep never changes the netlist or the 3D view. Pick a PASS value from the table, edit the resistor row, then Re-check.'
+      : 'No resistor in the netlist yet. Pick an example or run a check first, then choose a resistor.';
+  }
+
+  async function runSweep() {
+    if (sweepBusy || busy) return;
+    var payload = collectNetlistPayload();
+    if (!payload.components.length) { showError('Netlist is empty', 'Add at least one netlist row before sweeping.'); return; }
+    var resistorId = $('sweep-resistor').value;
+    if (!resistorId) { showError('No resistor to sweep', 'The netlist has no resistor.'); return; }
+    clearError();
+    sweepBusy = true;
+    refreshSweepControls();
+    $('sweep-status').textContent = 'Sweeping ' + resistorId + '…';
+    logLine('system', 'Sweep: POST /sweep for ' + resistorId + ' at ' + DEFAULT_SWEEP_VALUES.length + ' values.', 'info');
+    try {
+      if (!sweepRules) {
+        var rulesRes = await fetch('/rules');
+        if (!rulesRes.ok) { handleErrorPayload(null, 'Could not load /rules (' + rulesRes.status + ')'); return; }
+        sweepRules = await rulesRes.json().catch(function () { return null; });
+        if (!sweepRules || !Array.isArray(sweepRules.rules)) { handleErrorPayload(null, 'Could not load /rules: bad response.'); return; }
+      }
+      var res = await fetch('/sweep', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ netlist: payload, resistor_id: resistorId, values: DEFAULT_SWEEP_VALUES })
+      });
+      var data = await res.json().catch(function () { return null; });
+      if (!res.ok || !data) { handleErrorPayload(data, 'Sweep failed (' + res.status + ')'); return; }
+      if (data.error) { handleErrorPayload(data, 'Sweep failed'); return; }
+      sweepResult = data;
+      renderSweepTable();
+      renderSweepCharts();
+      $('sweep-results').hidden = false;
+      $('sweep-mock').textContent = data.mock ? 'MOCK: these points were not simulated.' : '';
+      $('sweep-status').textContent = 'Sweep done: ' + data.points.length + ' points.';
+      logLine('system', 'Sweep done for ' + resistorId + ' (' + data.points.length + ' points).', 'info');
+    } catch (e) {
+      handleErrorPayload(null, 'Network error calling /sweep: ' + e.message);
+    } finally { sweepBusy = false; $('sweep-status').textContent = ''; refreshSweepControls(); }
+  }
+
+  function renderSweepTable() {
+    var body = $('sweep-body');
+    if (!sweepResult || !sweepResult.points) { body.innerHTML = ''; return; }
+    body.innerHTML = sweepResult.points.map(function (p) {
+      var v = String(p.verdict || '').toUpperCase();
+      var vClass = v === 'PASS' ? 'pass' : v === 'WARN' ? 'warn' : 'stop';
+      var unc = Array.isArray(p.uncertain) && p.uncertain.length
+        ? '<br><small>' + escapeHtml(p.uncertain.join('; ')) + '</small>' : '';
+      return '<tr><td>' + escapeHtml(fmtResistance(p.r_ohms)) + '</td>' +
+        '<td>' + escapeHtml(fmtCurrent(p.led_current_a)) + '</td>' +
+        '<td>' + escapeHtml(fmtPower(p.resistor_power_w)) + '</td>' +
+        '<td><span class="sweep-verdict ' + vClass + '">' + escapeHtml(v) + '</span>' + unc + '</td></tr>';
+    }).join('');
+  }
+
+  // Inline-SVG chart: log-x over the swept values, linear y from 0.
+  // Points with a null value are omitted, breaking the polyline (a
+  // gap, never a zero). Threshold lines are horizontal dashed lines
+  // from the backend thresholds passed in cfg.lines.
+  function buildSweepChart(el, cfg) {
+    var W = 520, H = 260, ML = 58, MR = 14, MT = 12, MB = 36;
+    var xs = cfg.points.map(function (p) { return p.x; });
+    var xMin = Math.min.apply(null, xs), xMax = Math.max.apply(null, xs);
+    var logMin = Math.log10(xMin), logMax = Math.log10(xMax);
+    function X(v) { return ML + (Math.log10(v) - logMin) / (logMax - logMin) * (W - ML - MR); }
+    function Y(v) { return H - MB - (v / cfg.yMax) * (H - MT - MB); }
+    var VERDICT_COLOR = { PASS: '#1a7f37', WARN: '#d97706', STOP: '#b00020' };
+    var s = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' + escapeHtml(cfg.ariaLabel) + '">';
+    var i, j;
+    for (i = 0; i <= 4; i++) {
+      var gy = cfg.yMax * i / 4;
+      s += '<line x1="' + ML + '" y1="' + Y(gy) + '" x2="' + (W - MR) + '" y2="' + Y(gy) + '" stroke="#ddd" stroke-width="1"/>' +
+        '<text x="' + (ML - 6) + '" y="' + (Y(gy) + 3) + '" font-size="10" text-anchor="end">' + escapeHtml(cfg.yFormat(gy)) + '</text>';
+    }
+    // X ticks: the actual swept values only (no interpolated labels).
+    // Label every other value plus the last, so 10 log-spaced ticks
+    // do not collide at the crowded end of the axis.
+    xs.forEach(function (v, idx) {
+      var showLabel = idx % 2 === 0 || idx === xs.length - 1;
+      s += '<line x1="' + X(v) + '" y1="' + (H - MB) + '" x2="' + X(v) + '" y2="' + (H - MB + 4) + '" stroke="#999" stroke-width="1"/>' +
+        (showLabel ? '<text x="' + X(v) + '" y="' + (H - MB + 16) + '" font-size="10" text-anchor="middle">' + escapeHtml(cfg.xFormat(v)) + '</text>' : '');
+    });
+    s += '<line x1="' + ML + '" y1="' + (H - MB) + '" x2="' + (W - MR) + '" y2="' + (H - MB) + '" stroke="#999" stroke-width="1"/>';
+    (cfg.lines || []).forEach(function (ln) {
+      if (ln.y == null || ln.y < 0 || ln.y > cfg.yMax) return;
+      s += '<line x1="' + ML + '" y1="' + Y(ln.y) + '" x2="' + (W - MR) + '" y2="' + Y(ln.y) +
+        '" stroke="' + ln.color + '" stroke-width="1.5" stroke-dasharray="' + ln.dash + '"/>' +
+        '<text x="' + (ML + 4) + '" y="' + (Y(ln.y) - 4) + '" font-size="10" fill="' + ln.color + '">' + escapeHtml(ln.label) + '</text>';
+    });
+    // Polyline in runs of consecutive non-null points (null = gap).
+    var run = [];
+    function flushRun() {
+      if (run.length > 1) {
+        s += '<polyline fill="none" stroke="#595959" stroke-width="1.5" points="' +
+          run.map(function (p) { return X(p.x).toFixed(1) + ',' + Y(p.y).toFixed(1); }).join(' ') + '"/>';
+      }
+      run = [];
+    }
+    cfg.points.forEach(function (p) {
+      if (p.y == null || !isFinite(Number(p.y))) { flushRun(); return; }
+      run.push(p);
+    });
+    flushRun();
+    cfg.points.forEach(function (p) {
+      if (p.y == null || !isFinite(Number(p.y))) return;
+      var color = VERDICT_COLOR[String(p.verdict || '').toUpperCase()] || '#595959';
+      s += '<circle cx="' + X(p.x).toFixed(1) + '" cy="' + Y(p.y).toFixed(1) + '" r="4" fill="' + color + '">' +
+        '<title>' + escapeHtml(p.title) + '</title></circle>';
+    });
+    s += '</svg>';
+    el.innerHTML = s;
+  }
+
+  // Safe-band caption, derived from the backend point verdicts only:
+  // the R range(s) whose points are PASS.
+  function safeBandCaption() {
+    var pass = sweepResult.points.filter(function (p) { return String(p.verdict || '').toUpperCase() === 'PASS'; });
+    if (!pass.length) return 'No PASS points in this sweep.';
+    var ranges = [];
+    var start = pass[0].r_ohms, prev = pass[0].r_ohms;
+    for (var i = 1; i < pass.length; i++) {
+      var r = pass[i].r_ohms;
+      if (sweepResult.points.indexOf(pass[i]) === sweepResult.points.indexOf(pass[i - 1]) + 1) { prev = r; continue; }
+      ranges.push([start, prev]);
+      start = r; prev = r;
+    }
+    ranges.push([start, prev]);
+    var text = ranges.map(function (rg) {
+      return rg[0] === rg[1]
+        ? 'R = ' + fmtResistance(rg[0])
+        : 'R ' + fmtResistance(rg[0]) + '–' + fmtResistance(rg[1]);
+    }).join(', ');
+    return 'PASS for ' + text + ' in this sweep.';
+  }
+
+  function renderSweepCharts() {
+    if (!sweepResult || !sweepResult.points) return;
+    var t = sweepResult.thresholds || {};
+    var ledStop = sweepRuleRow('LED_OVERCURRENT', 'stop');
+    var ledWarn = sweepRuleRow('LED_OVERCURRENT', 'warn');
+    var ledUnder = sweepRuleRow('LED_UNDERCURRENT', null);
+    var resStop = sweepRuleRow('RESISTOR_POWER', 'stop');
+    var resWarn = sweepRuleRow('RESISTOR_POWER', 'warn');
+
+    var currentPts = sweepResult.points.map(function (p) {
+      return {
+        x: p.r_ohms, y: p.led_current_a, verdict: p.verdict,
+        title: fmtResistance(p.r_ohms) + ': ' + fmtCurrent(p.led_current_a) +
+          ', ' + fmtPower(p.resistor_power_w) + ', ' + (p.verdict || '')
+      };
+    });
+    var maxCurrent = 0;
+    currentPts.forEach(function (p) { if (p.y != null) maxCurrent = Math.max(maxCurrent, Number(p.y)); });
+    var yMaxCurrent = Math.max(0.035, 1.1 * maxCurrent);
+    var currentLines = [];
+    if (ledStop) currentLines.push({ y: ledStop.threshold, color: '#b00020', dash: '6 3', label: 'STOP ' + ledStop.comparator + ' ' + ledStop.threshold_display });
+    if (ledWarn) currentLines.push({ y: ledWarn.threshold, color: '#d97706', dash: '6 3', label: 'WARN ' + ledWarn.comparator + ' ' + ledWarn.threshold_display });
+    var minCurrent = null;
+    currentPts.forEach(function (p) { if (p.y != null) minCurrent = minCurrent == null ? Number(p.y) : Math.min(minCurrent, Number(p.y)); });
+    if (ledUnder && minCurrent != null && minCurrent < 0.002)
+      currentLines.push({ y: ledUnder.threshold, color: '#888888', dash: '2 3', label: 'undercurrent ' + ledUnder.comparator + ' ' + ledUnder.threshold_display });
+    buildSweepChart($('sweep-chart-current'), {
+      points: currentPts, yMax: yMaxCurrent,
+      yFormat: function (v) { return (v * 1000).toFixed(0) + ' mA'; },
+      xFormat: fmtResistance,
+      lines: currentLines,
+      ariaLabel: 'LED current versus resistance, with warn and stop threshold lines'
+    });
+    $('sweep-legend-current').textContent =
+      (ledWarn ? 'WARN ' + ledWarn.comparator + ' ' + ledWarn.threshold_display + '. ' : '') +
+      (ledStop ? 'STOP ' + ledStop.comparator + ' ' + ledStop.threshold_display + '. ' : '') +
+      'Thresholds from GET /rules.';
+    $('sweep-safe-band').textContent = safeBandCaption();
+
+    var powerPts = sweepResult.points.map(function (p) {
+      return {
+        x: p.r_ohms, y: p.resistor_power_w, verdict: p.verdict,
+        title: fmtResistance(p.r_ohms) + ': ' + fmtCurrent(p.led_current_a) +
+          ', ' + fmtPower(p.resistor_power_w) + ', ' + (p.verdict || '')
+      };
+    });
+    var maxPower = 0;
+    powerPts.forEach(function (p) { if (p.y != null) maxPower = Math.max(maxPower, Number(p.y)); });
+    var yMaxPower = Math.max(1.1 * (sweepResult.rating_w || 0.25), 1.1 * maxPower);
+    var powerLines = [];
+    if (resStop && t.resistor_stop_w != null)
+      powerLines.push({ y: t.resistor_stop_w, color: '#b00020', dash: '6 3', label: 'STOP > ' + resStop.threshold_display + ' (' + fmtPower(t.resistor_stop_w) + ')' });
+    if (resWarn && t.resistor_warn_w != null)
+      powerLines.push({ y: t.resistor_warn_w, color: '#d97706', dash: '6 3', label: 'WARN > ' + resWarn.threshold_display + ' (' + fmtPower(t.resistor_warn_w) + ')' });
+    buildSweepChart($('sweep-chart-power'), {
+      points: powerPts, yMax: yMaxPower,
+      yFormat: function (v) { return (v * 1000).toFixed(0) + ' mW'; },
+      xFormat: fmtResistance,
+      lines: powerLines,
+      ariaLabel: 'Resistor power versus resistance, with warn and stop threshold lines'
+    });
+    $('sweep-legend-power').textContent =
+      (resWarn ? 'WARN > ' + resWarn.threshold_display + ' (' + fmtPower(t.resistor_warn_w) + '). ' : '') +
+      (resStop ? 'STOP > ' + resStop.threshold_display + ' (' + fmtPower(t.resistor_stop_w) + '). ' : '') +
+      'Rating ' + fmtPower(sweepResult.rating_w) + '; thresholds from GET /rules and the /sweep echo.';
   }
 
   // Downloads: POST ONLY from this page (the server also offers GET
@@ -1513,6 +1818,7 @@
   $('run-goal-btn').addEventListener('click', runGoal);
   $('recheck-btn').addEventListener('click', recheck);
   $('repair-btn').addEventListener('click', repair);
+  $('sweep-btn').addEventListener('click', runSweep);
   $('dl-cir-btn').addEventListener('click', function () { download('cir'); });
   $('dl-bom-btn').addEventListener('click', function () { download('bom'); });
   $('share-btn').addEventListener('click', shareLink);

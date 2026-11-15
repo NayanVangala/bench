@@ -89,6 +89,7 @@ __all__ = [
     "RESISTOR_WARN_FRACTION",
     "RESISTOR_STOP_FRACTION",
     "DEFAULT_RESISTOR_RATING_W",
+    "led_current",
     "check_rules",
     "pre_sim_checks",
     "post_sim_checks",
@@ -269,6 +270,24 @@ def _known_current(
     if _is_current_source(c):
         return c.value
     return None
+
+
+def led_current(
+    led: Component,
+    components: list[Component],
+    node_voltages: dict[str, float],
+    branch_currents: dict[str, float],
+) -> float | None:
+    """Public LED-current lookup (anode -> cathode): branch current
+    first, else KCL at the LED's nodes. ``None`` if underdetermined.
+
+    This is the same derivation ``verify`` uses for its findings, so
+    a caller (e.g. the sweep endpoint) reading it off a ``Report``
+    cannot disagree with the verdict. Real ngspice OP output never
+    carries an LED branch current (only voltage sources get one), so
+    the KCL path is the one that fires on real runs.
+    """
+    return _led_current(led, components, node_voltages, branch_currents)
 
 
 def _led_current(

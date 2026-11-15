@@ -60,6 +60,12 @@ Endpoints::
                               "simulator_override","modules"}
     POST /check               JSON Netlist -> report dict {verdict,
                               findings, netlist, mock} (NO LLM, ever)
+    GET  /rules               rule inventory (12 rows, thresholds from
+                              rules.py constants, no ngspice, no mock)
+    POST /sweep               JSON {netlist, resistor_id, values?,
+                              led_id?, include_findings?} -> per-value
+                              verification points (same pipeline as
+                              /check per point; never updates downloads)
     POST /run-image           multipart image -> SSE events, then Report
     POST /run-goal            JSON {"goal": str} -> SSE events, then Report
     POST /repair              JSON {"netlist","findings","round"} ->
@@ -324,6 +330,21 @@ class RepairIn(BaseModel):
     round: int = 1
 
 
+class SweepIn(BaseModel):
+    netlist: IRNetlist
+    resistor_id: str
+    values: list[float] | None = None
+    led_id: str | None = None
+    include_findings: bool = True
+
+
+# Default sweep values (ohms): 10 E12 values, 100 ohm to 2.2 kohm.
+DEFAULT_SWEEP_VALUES: list[float] = [
+    100, 120, 180, 270, 390, 560, 820, 1200, 1800, 2200,
+]
+MAX_SWEEP_POINTS = 25
+
+
 class RepairOut(BaseModel):
     """Repair result, in the shape web/index.html consumes.
 
@@ -459,17 +480,24 @@ def _run_simulation(netlist: Any) -> Any:
         ) from exc
 
 
-def _verify_netlist(netlist: Any) -> Any:
+def _verify_netlist(netlist: Any, *, record: bool = True) -> Any:
     """Full check of a netlist: ERC, then simulate + rules, -> ir.Report.
 
     If pre-simulation checks already contain a STOP finding, simulation
     is skipped (a degenerate deck must not burn a 30 s ngspice timeout)
     and the report is built from the ERC findings alone. No LLM is
     involved on this path, ever.
+
+    ``record=False`` skips updating ``_LAST_NETLIST``: the sweep
+    endpoint checks 10 variants, not one canonical netlist, so it
+    must not corrupt the downloads served from the last checked
+    netlist. /check, repair verification and the streaming runs keep
+    the default ``record=True``.
     """
     rules = _require_module("rules")
     global _LAST_NETLIST
-    _LAST_NETLIST = netlist
+    if record:
+        _LAST_NETLIST = netlist
     pre_findings = rules.pre_sim_checks(netlist)
     if any(getattr(f, "severity", None) and str(f.severity) == "STOP" for f in pre_findings):
         return rules.verify(netlist, None)
@@ -910,6 +938,177 @@ async def health() -> dict:
     }
 
 
+@app.get("/rules")
+async def rules_table() -> dict:
+    """Rule inventory: one row per (rule_id, severity) pair, 12 rows.
+
+    Thresholds are read live from the ``rules`` module constants
+    (which mirror ``parts.py``); no threshold is hardcoded here, so
+    if a constant changes in ``rules.py``, ``/rules`` follows it.
+    Shared rule_ids (LED_OVERCURRENT, RESISTOR_POWER) span two
+    severity tiers, distinguished by the ``band`` field ("warn" /
+    "stop"); clients must key on (rule_id, band), not rule_id alone.
+    Row order is STOP-first within a shared rule_id, matching
+    ``rules.py`` check order and ``SEVERITY_RANK``. Read-only: no
+    body, no ngspice, no ``?mock=1``.
+    """
+    rules = _require_module("rules")
+    rows = [
+        {
+            "rule_id": "NO_GROUND",
+            "severity": "STOP",
+            "band": None,
+            "applies_to": "circuit",
+            "quantity": None,
+            "comparator": None,
+            "threshold": None,
+            "threshold_unit": None,
+            "threshold_display": None,
+            "source": "rules.py: pre_sim_checks (NO_GROUND)",
+        },
+        {
+            "rule_id": "FLOATING_NODE",
+            "severity": "STOP",
+            "band": None,
+            "applies_to": "circuit",
+            "quantity": None,
+            "comparator": None,
+            "threshold": None,
+            "threshold_unit": None,
+            "threshold_display": None,
+            "source": "rules.py: pre_sim_checks (FLOATING_NODE)",
+        },
+        {
+            "rule_id": "SHORTED_SOURCE",
+            "severity": "STOP",
+            "band": None,
+            "applies_to": "source",
+            "quantity": None,
+            "comparator": None,
+            "threshold": None,
+            "threshold_unit": None,
+            "threshold_display": None,
+            "source": "rules.py: pre_sim_checks (SHORTED_SOURCE)",
+        },
+        {
+            "rule_id": "SHORTED_COMPONENT",
+            "severity": "WARN",
+            "band": None,
+            "applies_to": "component",
+            "quantity": None,
+            "comparator": None,
+            "threshold": None,
+            "threshold_unit": None,
+            "threshold_display": None,
+            "source": "rules.py: pre_sim_checks (SHORTED_COMPONENT)",
+        },
+        {
+            "rule_id": "NO_SOURCE",
+            "severity": "INFO",
+            "band": None,
+            "applies_to": "circuit",
+            "quantity": None,
+            "comparator": None,
+            "threshold": None,
+            "threshold_unit": None,
+            "threshold_display": None,
+            "source": "rules.py: pre_sim_checks (NO_SOURCE)",
+        },
+        {
+            "rule_id": "REVERSED_LED",
+            "severity": "INFO",
+            "band": None,
+            "applies_to": "led",
+            "quantity": "anode_minus_cathode_v",
+            "comparator": "<",
+            "threshold": -1e-9,
+            "threshold_unit": "V",
+            "threshold_display": "anode 1 nV below cathode",
+            "source": "rules.py: post_sim_checks (REVERSED_LED)",
+        },
+        {
+            "rule_id": "LED_OVERCURRENT",
+            "severity": "STOP",
+            "band": "stop",
+            "applies_to": "led",
+            "quantity": "current_a",
+            "comparator": ">",
+            "threshold": rules.LED_STOP_A,
+            "threshold_unit": "A",
+            "threshold_display": "30 mA",
+            "source": "parts.py: _LED_IF_MAX (via rules.py LED_STOP_A)",
+        },
+        {
+            "rule_id": "LED_OVERCURRENT",
+            "severity": "WARN",
+            "band": "warn",
+            "applies_to": "led",
+            "quantity": "current_a",
+            "comparator": ">=",
+            "threshold": rules.LED_WARN_A,
+            "threshold_unit": "A",
+            "threshold_display": "20 mA",
+            "source": "parts.py: _LED_IF_WARN (via rules.py LED_WARN_A)",
+        },
+        {
+            "rule_id": "LED_UNDERCURRENT",
+            "severity": "INFO",
+            "band": None,
+            "applies_to": "led",
+            "quantity": "current_a",
+            "comparator": "<",
+            "threshold": rules.LED_UNDER_A,
+            "threshold_unit": "A",
+            "threshold_display": "1 mA",
+            "source": "parts.py: _LED_IF_MIN (via rules.py LED_UNDER_A)",
+        },
+        {
+            "rule_id": "RESISTOR_POWER",
+            "severity": "STOP",
+            "band": "stop",
+            "applies_to": "resistor",
+            "quantity": "power_fraction_of_rating",
+            "comparator": ">",
+            "threshold": rules.RESISTOR_STOP_FRACTION,
+            "threshold_unit": "fraction",
+            "threshold_display": "100% of rating",
+            "source": "rules.py: RESISTOR_STOP_FRACTION",
+        },
+        {
+            "rule_id": "RESISTOR_POWER",
+            "severity": "WARN",
+            "band": "warn",
+            "applies_to": "resistor",
+            "quantity": "power_fraction_of_rating",
+            "comparator": ">",
+            "threshold": rules.RESISTOR_WARN_FRACTION,
+            "threshold_unit": "fraction",
+            "threshold_display": "70% of rating",
+            "source": "rules.py: RESISTOR_WARN_FRACTION",
+        },
+        {
+            "rule_id": "SOURCE_OVERCURRENT",
+            "severity": "WARN",
+            "band": None,
+            "applies_to": "source",
+            "quantity": "current_a",
+            "comparator": ">",
+            "threshold": rules.SOURCE_OVERCURRENT_A,
+            "threshold_unit": "A",
+            "threshold_display": "1 A",
+            "source": "rules.py: SOURCE_OVERCURRENT_A",
+        },
+    ]
+    return {
+        "rules": rows,
+        "defaults": {"resistor_rating_w": rules.DEFAULT_RESISTOR_RATING_W},
+        "notes": [
+            "LED current limits are identical for all colours; only Vf differs per colour.",
+            "Resistor power thresholds are fractions of each resistor's own rating_watts.",
+        ],
+    }
+
+
 @app.post("/check")
 def check(netlist: IRNetlist, mock: bool = Query(False)) -> Any:
     """Check a netlist JSON -> report dict. NO LLM is ever called here.
@@ -930,6 +1129,212 @@ def check(netlist: IRNetlist, mock: bool = Query(False)) -> Any:
         report["netlist"] = _netlist_rows(netlist, {}, {}, {})
         return JSONResponse(content=report)
     return JSONResponse(content=_report_response(_verify_netlist(netlist), netlist))
+
+
+def _sweep_error(code: str, message: str, **extra: Any) -> HTTPException:
+    detail: dict[str, Any] = {"error": code, "message": message}
+    detail.update(extra)
+    return HTTPException(status_code=422, detail=detail)
+
+
+@app.post("/sweep")
+def sweep(body: SweepIn, mock: bool = Query(False)) -> Any:
+    """Sweep one resistor across a list of values, re-verifying at
+    each point with the same pipeline as /check (ERC -> simulate ->
+    rules.verify). Sync ``def`` so the blocking ngspice runs land in
+    the threadpool, as /check does.
+
+    Every point's verdict/findings come from ``rules.verify``; LED
+    current is read via the public ``rules.led_current`` helper (the
+    same KCL derivation ``verify`` used), never recomputed here.
+    A per-point sim failure yields a null-valued point (a gap in the
+    chart), never an aborted sweep. The sweep never updates
+    ``_LAST_NETLIST`` (``record=False``), so downloads keep serving
+    the last checked netlist.
+    """
+    import math
+
+    rules = _require_module("rules")
+    parts = _load_sibling("parts")
+    netlist = body.netlist
+    components = list(netlist.components)
+
+    def _type_of(comp: Any) -> str:
+        raw = getattr(comp, "type", None)
+        return str(getattr(raw, "value", raw) or "").lower()
+
+    # resistor_id must name a resistor.
+    resistor = next(
+        (c for c in components if c.id == body.resistor_id), None
+    )
+    if resistor is None:
+        raise _sweep_error(
+            "unknown_resistor",
+            f"no component with id {body.resistor_id!r} in the netlist.",
+        )
+    if _type_of(resistor) != "resistor":
+        raise _sweep_error(
+            "invalid_resistor",
+            f"component {body.resistor_id!r} is a {_type_of(resistor)}, "
+            "not a resistor.",
+        )
+
+    # led_id: explicit must name an LED; default is the first LED.
+    led = None
+    if body.led_id is not None:
+        led = next((c for c in components if c.id == body.led_id), None)
+        if led is None:
+            raise _sweep_error(
+                "unknown_led",
+                f"no component with id {body.led_id!r} in the netlist.",
+            )
+        if _type_of(led) != "led":
+            raise _sweep_error(
+                "invalid_led",
+                f"component {body.led_id!r} is a {_type_of(led)}, "
+                "not an LED.",
+            )
+    else:
+        led = next((c for c in components if _type_of(c) == "led"), None)
+    if led is None:
+        raise _sweep_error(
+            "no_led",
+            "netlist has no LED to plot; a sweep needs an LED.",
+        )
+
+    # Values: defaults when omitted; explicit lists are validated.
+    values = list(DEFAULT_SWEEP_VALUES) if body.values is None else list(body.values)
+    if not values:
+        raise _sweep_error("invalid_values", "values must not be empty.")
+    if len(values) > MAX_SWEEP_POINTS:
+        raise _sweep_error(
+            "invalid_values",
+            f"at most {MAX_SWEEP_POINTS} sweep points, got {len(values)}.",
+        )
+    if any(not math.isfinite(v) or v <= 0 for v in values):
+        raise _sweep_error(
+            "invalid_values",
+            "every sweep value must be a positive finite resistance in ohms.",
+        )
+    if len(set(values)) != len(values):
+        raise _sweep_error(
+            "invalid_values", "sweep values must not contain duplicates."
+        )
+
+    if parts is not None:
+        rating_w = parts.resistor_rating_w(resistor)
+    else:  # pragma: no cover - parts.py is present in the repo
+        rating_w = getattr(resistor, "rating_watts", None) or 0.25
+    thresholds = {
+        "led_warn_a": rules.LED_WARN_A,
+        "led_stop_a": rules.LED_STOP_A,
+        "led_under_a": rules.LED_UNDER_A,
+        "resistor_warn_w": rules.RESISTOR_WARN_FRACTION * rating_w,
+        "resistor_stop_w": rules.RESISTOR_STOP_FRACTION * rating_w,
+    }
+
+    if mock:
+        # Placeholder points, clearly flagged mock: no ngspice, no
+        # ERC gate, no invented numbers (nulls show as gaps).
+        points = [
+            {
+                "r_ohms": v,
+                "led_current_a": None,
+                "resistor_power_w": None,
+                "verdict": "PASS",
+                "findings": [],
+                "uncertain": ["Mock mode: no simulation ran."],
+            }
+            for v in values
+        ]
+        return JSONResponse(
+            content={
+                "resistor_id": body.resistor_id,
+                "led_id": led.id,
+                "rating_w": rating_w,
+                "values": values,
+                "points": points,
+                "thresholds": thresholds,
+                "mock": True,
+            }
+        )
+
+    # Pre-flight ERC gate: a STOP finding means zero ngspice runs.
+    pre_findings = rules.pre_sim_checks(netlist)
+    if any(str(getattr(f, "severity", "")) == "STOP" for f in pre_findings):
+        detail_findings = [
+            f.model_dump(mode="json") if hasattr(f, "model_dump") else dict(f)
+            for f in pre_findings
+        ]
+        raise _sweep_error(
+            "erc_failed",
+            "base netlist fails ERC with a STOP finding; sweep not run.",
+            findings=detail_findings,
+        )
+
+    points: list[dict[str, Any]] = []
+    for r_ohms in values:
+        # Deep-copy the netlist with ONLY the swept resistor's value
+        # replaced (Component is frozen, so model_copy(update=...)).
+        # The posted netlist is never mutated.
+        new_components = [
+            c.model_copy(update={"value": r_ohms})
+            if c.id == body.resistor_id
+            else c
+            for c in components
+        ]
+        point_netlist = netlist.model_copy(update={"components": new_components})
+        report = _verify_netlist(point_netlist, record=False)
+        voltages = dict(getattr(report, "node_voltages", None) or {})
+        currents = dict(getattr(report, "branch_currents", None) or {})
+        powers = {
+            str(k).lower(): v
+            for k, v in (getattr(report, "power", None) or {}).items()
+        }
+        uncertain = list(getattr(report, "uncertain", None) or [])
+        sim_failed = any(
+            "Simulation did not succeed" in str(u) for u in uncertain
+        )
+        if sim_failed:
+            led_current_a = None
+            resistor_power_w = None
+        else:
+            led_current_a = rules.led_current(
+                led, new_components, voltages, currents
+            )
+            resistor_power_w = powers.get(str(body.resistor_id).lower())
+        if hasattr(report, "model_dump"):
+            finding_dicts = [
+                {
+                    "severity": str(f.get("severity", "")),
+                    "rule_id": f.get("rule_id", ""),
+                    "message": f.get("message", ""),
+                }
+                for f in report.model_dump(mode="json").get("findings", [])
+            ]
+        else:  # pragma: no cover - Report is a pydantic model
+            finding_dicts = []
+        points.append(
+            {
+                "r_ohms": r_ohms,
+                "led_current_a": led_current_a,
+                "resistor_power_w": resistor_power_w,
+                "verdict": str(getattr(report, "verdict", "PASS")),
+                "findings": finding_dicts if body.include_findings else [],
+                "uncertain": uncertain,
+            }
+        )
+    return JSONResponse(
+        content={
+            "resistor_id": body.resistor_id,
+            "led_id": led.id,
+            "rating_w": rating_w,
+            "values": values,
+            "points": points,
+            "thresholds": thresholds,
+            "mock": False,
+        }
+    )
 
 
 @app.post("/run-image")

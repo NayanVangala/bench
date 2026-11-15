@@ -268,6 +268,54 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .btn-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
 .btn-row .dark-btn { margin-left: auto; }
 .btn-col { display: grid; gap: 8px; }
+
+/* ---- Domain switch: circuit / fiber link / optics bench ---------------- */
+.domain-switch {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; padding: 4px; margin-bottom: 12px;
+  background: var(--card-2); border-radius: 12px;
+}
+.domain-switch button {
+  border: 0; background: transparent; border-radius: 9px; padding: 8px 6px; font-size: 13px; font-weight: 600; color: var(--muted);
+}
+.domain-switch button[aria-pressed="true"] { background: var(--card); color: var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,0.12); }
+body[data-domain="circuit"] #panel-fiber, body[data-domain="circuit"] #fiber-check-btn { display: none; }
+body[data-domain="fiber"] .drawer-panel:not(#panel-fiber),
+body[data-domain="fiber"] .drawer-tabs,
+body[data-domain="fiber"] #check-btn,
+body[data-domain="fiber"] #empty-state { display: none !important; }
+body[data-domain="fiber"] #panel-fiber { display: block; }
+
+.verdict-word { font-size: 34px; line-height: 1; font-weight: 700; margin: 2px 0 12px; }
+.verdict-word:empty { display: none; }
+.verdict-word.pass { color: var(--pass); }
+.verdict-word.warn { color: var(--warn); }
+.verdict-word.stop { color: var(--stop); }
+
+.fiber-chart svg { display: block; }
+.fiber-chart .grid { stroke: var(--line); stroke-width: 1; }
+.fiber-chart .axis { font: 9px "JetBrains Mono", monospace; fill: var(--muted); }
+.fiber-chart .axis.stop { fill: var(--stop); }
+.fiber-chart .axis.warn { fill: var(--warn); }
+.fiber-chart .ref { stroke-width: 1; stroke-dasharray: 4 3; }
+.fiber-chart .ref.stop { stroke: var(--stop); }
+.fiber-chart .ref.warn { stroke: var(--warn); }
+.fiber-chart .trace { fill: none; stroke: var(--accent); stroke-width: 2.5; stroke-linejoin: round; }
+
+.fiber-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.fiber-table th, .fiber-table td { padding: 6px 6px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; white-space: nowrap; }
+.fiber-table th { font-size: 11px; color: var(--muted); font-weight: 500; }
+.fiber-table .settings { display: flex; gap: 6px; flex-wrap: wrap; white-space: normal; }
+.fiber-table .fld { display: inline-flex; align-items: center; gap: 3px; }
+.fiber-table input, .fiber-table select, #fiber-add-type {
+  border: 1px solid var(--line-strong); border-radius: 7px; background: var(--input-bg); padding: 3px 5px; font-size: 12px;
+}
+.fiber-table input { width: 64px; font-family: "JetBrains Mono", monospace; }
+.fiber-table .fld span { font-size: 11px; color: var(--muted); }
+.row-del { border: 0; background: transparent; color: var(--muted); font-size: 16px; padding: 0 4px; }
+.row-del:hover { color: var(--stop); }
+#fiber-verdict-card[data-verdict="PASS"] { border-color: var(--pass); background: var(--pass-bg); }
+#fiber-verdict-card[data-verdict="WARN"] { border-color: var(--warn); background: var(--warn-bg); }
+#fiber-verdict-card[data-verdict="STOP"] { border-color: var(--stop); background: var(--stop-bg); }
 .cta-ghost {
   display: block; width: 100%; margin: 0 0 10px; padding: 9px 12px; border-radius: 10px;
   border: 1px solid var(--accent); background: var(--card); color: var(--ink);
@@ -294,7 +342,7 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 #image-col .empty { display: none; }
 #canvas.drag #scene3d { box-shadow: inset 0 0 0 3px var(--accent); }
 
-#examples { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+#examples, .example-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .example-btn {
   display: flex; align-items: center; gap: 8px; text-align: left;
   background: var(--card-2); border: 1px solid transparent; border-radius: 10px;
@@ -318,17 +366,17 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
   background: var(--mock-chip-bg); color: var(--mock-chip-ink); font: 700 12px "JetBrains Mono", monospace;
 }
 .verdict-empty { margin: 0 0 10px; }
-#key-readings { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 0; }
-#key-readings .reading { background: var(--card); border: 1px solid var(--line); border-radius: 9px; padding: 7px 9px; min-width: 0; }
-#key-readings dt { font-size: 11px; color: var(--muted); }
-#key-readings dd { margin: 2px 0 0; font: 600 15px "JetBrains Mono", monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#key-readings, .readings { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 0; }
+#key-readings .reading, .readings .reading { background: var(--card); border: 1px solid var(--line); border-radius: 9px; padding: 7px 9px; min-width: 0; }
+#key-readings dt, .readings dt { font-size: 11px; color: var(--muted); }
+#key-readings dd, .readings dd { margin: 2px 0 0; font: 600 15px "JetBrains Mono", monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* Findings list (rendered by renderSheet) */
-#sheet-findings { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
-#sheet-findings li { border: 1px solid var(--line); border-left: 3px solid var(--info); border-radius: 9px; padding: 8px 10px; background: var(--card); }
-#sheet-findings li.empty { border-left-color: var(--line); color: var(--muted); }
-#sheet-findings li.sev-stop { border-left-color: var(--stop); }
-#sheet-findings li.sev-warn { border-left-color: var(--warn); }
+#sheet-findings, .findings-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+#sheet-findings li, .findings-list li { border: 1px solid var(--line); border-left: 3px solid var(--info); border-radius: 9px; padding: 8px 10px; background: var(--card); }
+#sheet-findings li.empty, .findings-list li.empty { border-left-color: var(--line); color: var(--muted); }
+#sheet-findings li.sev-stop, .findings-list li.sev-stop { border-left-color: var(--stop); }
+#sheet-findings li.sev-warn, .findings-list li.sev-warn { border-left-color: var(--warn); }
 #sheet-findings li.sev-pass { border-left-color: var(--pass); }
 .findings-head { display: flex; align-items: center; gap: 8px; }
 .sev { font: 700 10.5px "JetBrains Mono", monospace; padding: 2px 6px; border-radius: 5px; background: var(--card-2); color: var(--info); }

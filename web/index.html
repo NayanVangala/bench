@@ -232,6 +232,60 @@
 
   <aside id="drawer" role="complementary" aria-label="Controls">
     <div class="drawer-scroll">
+      <div class="domain-switch" role="group" aria-label="What are you building?">
+        <button type="button" data-domain="circuit" aria-pressed="true">Circuit</button>
+        <button type="button" data-domain="fiber" aria-pressed="false">Fiber link</button>
+        <button type="button" data-domain="optics" aria-pressed="false" disabled title="Free-space optics bench: coming next">Optics bench</button>
+      </div>
+
+      <div class="drawer-panel" id="panel-fiber" aria-label="Fiber link">
+        <section class="card">
+          <div class="card-head"><span class="eyebrow" id="fiber-examples-label"><span class="step">01</span> Examples</span></div>
+          <div id="fiber-examples" class="example-grid" role="group" aria-labelledby="fiber-examples-label">
+            <button type="button" class="example-btn" data-fiber-example="good"><span class="vdot pass" aria-hidden="true"></span>Lab link + 1x2 tap</button>
+            <button type="button" class="example-btn" data-fiber-example="overload"><span class="vdot stop" aria-hidden="true"></span>10 mW into a meter</button>
+            <button type="button" class="example-btn" data-fiber-example="deep_split"><span class="vdot stop" aria-hidden="true"></span>20 km, 1x64 split</button>
+            <button type="button" class="example-btn" data-fiber-example="apc"><span class="vdot stop" aria-hidden="true"></span>APC into PC</button>
+          </div>
+        </section>
+        <section class="card verdict-card" id="fiber-verdict-card">
+          <div class="card-head"><span class="eyebrow"><span class="step">02</span> Verdict</span></div>
+          <div id="fiber-verdict" class="verdict-word" aria-live="polite"></div>
+          <p class="empty" id="fiber-verdict-empty">No check yet.</p>
+          <button id="fiber-pack-cta" type="button" class="cta-ghost" hidden>Ready to build &rarr; get the build pack (PDF)</button>
+          <dl class="readings" aria-label="Link budget">
+            <div class="reading"><dt>Received</dt><dd id="fiber-rx">&mdash;</dd></div>
+            <div class="reading"><dt>Total loss</dt><dd id="fiber-loss">&mdash;</dd></div>
+            <div class="reading"><dt>Margin</dt><dd id="fiber-margin">&mdash;</dd></div>
+          </dl>
+        </section>
+        <section class="card">
+          <div class="card-head"><span class="eyebrow"><span class="step">03</span> Findings</span></div>
+          <ul id="fiber-findings" class="findings-list"><li class="empty">No findings yet. Run a check first.</li></ul>
+        </section>
+        <section class="card">
+          <div class="card-head"><span class="eyebrow"><span class="step">04</span> Power budget</span></div>
+          <div id="fiber-chart" class="fiber-chart" role="img" aria-label="Power after each element"></div>
+        </section>
+        <section class="card">
+          <div class="card-head"><span class="eyebrow"><span class="step">05</span> Link, laser to detector</span></div>
+          <div class="table-wrap" tabindex="0" aria-label="Fiber link elements, scrollable">
+            <table class="fiber-table">
+              <thead><tr><th>id</th><th>type</th><th>settings</th><th>power after</th><th></th></tr></thead>
+              <tbody id="fiber-body"><tr><td colspan="5" class="empty">Pick an example or add elements.</td></tr></tbody>
+            </table>
+          </div>
+          <div class="btn-row">
+            <select id="fiber-add-type" aria-label="Element type to add">
+              <option value="fiber">fiber</option><option value="connector">connector</option><option value="splice">splice</option>
+              <option value="splitter">splitter</option><option value="attenuator">attenuator</option><option value="isolator">isolator</option>
+            </select>
+            <button id="fiber-add-btn" type="button" class="ghost-btn">Add before detector</button>
+          </div>
+          <p class="empty">Losses use typical values; set a loss in dB on any element to override. The verdict comes from the power budget, never the AI.</p>
+        </section>
+      </div>
+
       <div class="drawer-panel active" id="panel-check" role="tabpanel" aria-labelledby="tab-check" tabindex="0">
         <section class="card">
           <div class="card-head"><span class="eyebrow"><span class="step">01</span> Describe</span>
@@ -398,7 +452,8 @@
     </div>
     <div class="drawer-foot">
       <button id="check-btn" type="button" class="cta">Check circuit &rarr;</button>
-      <p class="canvas-trust">Verdicts come from ngspice + fixed rules, never the AI.</p>
+      <button id="fiber-check-btn" type="button" class="cta">Check link &rarr;</button>
+      <p class="canvas-trust" id="trust-line">Verdicts come from ngspice + fixed rules, never the AI.</p>
     </div>
   </aside>
   <div id="drawer-backdrop" aria-hidden="true"></div>
@@ -1953,7 +2008,8 @@
     applyEdit: applyEdit,
     applyNetlist: applyNetlist,
     recheck: recheck,
-    repair: repair
+    repair: repair,
+    updateStatusStrip: updateStatusStrip
   };
 
   // ---- Theme toggle (persisted) ----
@@ -2447,5 +2503,6 @@
     } catch (err) { /* first sync is best-effort */ }
   })();
 </script>
+<script src="fiber.js" defer></script>
 </body>
 </html>

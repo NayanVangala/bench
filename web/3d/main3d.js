@@ -203,6 +203,7 @@ import * as THREE from 'three';
 import { createScene, frameCamera } from './scene.js';
 import { buildCircuit } from './components.js';
 import { partModelsReady } from './models.js';
+import { buildFiberLink } from './fiber3d.js';
 import { setupInteraction } from './interaction.js';
 import {
   initOverlays,
@@ -878,6 +879,8 @@ export function init3D(container, callbacks = {}, options = {}) {
     circuit = null;
   }
 
+  let displayedBuilder = null; // set by setFiberLink; null = circuit
+
   function buildDisplayed() {
     // A rebuild is a new drawing: never carry an exploded state across
     // it (spec §8). Cancels any mid-tween and resets aria-pressed, and
@@ -887,7 +890,7 @@ export function init3D(container, callbacks = {}, options = {}) {
       try { view.resetExplode(); } catch (error) { onError(error); }
     }
     clearCircuit();
-    if (!displayedNetlist.length) {
+    if (!displayedBuilder && !displayedNetlist.length) {
       if (interactionHandle && typeof interactionHandle.setMeshes === 'function') {
         interactionHandle.setMeshes(new Map());
       }
@@ -901,7 +904,7 @@ export function init3D(container, callbacks = {}, options = {}) {
     }
     let built;
     try {
-      built = buildCircuit(displayedNetlist);
+      built = displayedBuilder ? displayedBuilder() : buildCircuit(displayedNetlist);
     } catch (error) {
       onError(error);
       return;
@@ -1283,8 +1286,25 @@ export function init3D(container, callbacks = {}, options = {}) {
     },
 
     /** Replace the working netlist (any accepted shape) and rebuild. */
+    /**
+     * Show a fiber link on the bench instead of a circuit (same picking,
+     * callouts, severity tints and framing). setNetlist returns to circuits.
+     */
+    setFiberLink(link, report) {
+      if (disposed) return handle;
+      displayedBuilder = () => buildFiberLink(link);
+      currentNetlist = [];
+      displayedNetlist = [];
+      viewingHistory = false;
+      currentReport = report ? normalizeReport(report) : null;
+      displayedReport = currentReport;
+      buildDisplayed();
+      return handle;
+    },
+
     setNetlist(netlist, report) {
       if (disposed) return handle;
+      displayedBuilder = null; // back to the circuit bench
       currentNetlist = normalizeNetlist(netlist);
       displayedNetlist = currentNetlist;
       viewingHistory = false;

@@ -379,6 +379,121 @@ def test_download_bom_has_header_and_rows(client: TestClient):
 
 
 # ---------------------------------------------------------------------------
+# GET /parts (P5.3 parts picker; need the server, no simulation).
+# ---------------------------------------------------------------------------
+PARTS_PATH = "/parts"
+
+
+@needs_server
+def test_parts_returns_full_catalog(client: TestClient):
+    resp = client.get(PARTS_PATH)
+    assert resp.status_code == 200
+    assert "application/json" in resp.headers["content-type"]
+    assert "max-age=86400" in resp.headers.get("cache-control", "")
+    catalog = resp.json()
+    assert catalog["version"] == 1
+    assert set(catalog) == {
+        "version", "resistor", "capacitor", "led",
+        "diode", "voltage_source", "current_source",
+    }
+    resistor = catalog["resistor"]
+    assert resistor["unit"] == "ohm"
+    assert resistor["series"] == "E12"
+    assert len(resistor["values"]) == 84
+    assert resistor["ratings_w"] == [0.125, 0.25, 0.5, 1, 2, 5]
+    assert resistor["default_rating_w"] == 0.25
+    rvalues = [e["value"] for e in resistor["values"]]
+    assert 470 in rvalues
+    assert 1000 in rvalues
+    rlabels = {e["value"]: e["label"] for e in resistor["values"]}
+    assert rlabels[470] == "470 \u03a9"
+    assert rlabels[1000] == "1 k\u03a9"
+
+    capacitor = catalog["capacitor"]
+    assert capacitor["unit"] == "farad"
+    assert capacitor["series"] == "E12"
+    assert len(capacitor["values"]) == 120
+    cvalues = [e["value"] for e in capacitor["values"]]
+    assert 1e-6 in cvalues
+    clabels = {e["value"]: e["label"] for e in capacitor["values"]}
+    assert clabels[1e-6] == "1 \u00b5F"
+    assert clabels[100e-9] == "100 nF"
+
+    colors = catalog["led"]["colors"]
+    assert [c["color"] for c in colors] == [
+        "red", "green", "blue", "white", "yellow",
+    ]
+    red = colors[0]
+    assert red["vf_v"] == 2.0
+    assert red["if_warn_a"] == 0.02
+    assert red["if_max_a"] == 0.03
+    assert red["if_min_a"] == 0.001
+    assert red["model"] == "DRED"
+
+    assert catalog["diode"]["values"] == [
+        {"value": 0.7, "label": "0.7 V (Si)"},
+        {"value": 0.3, "label": "0.3 V (Schottky)"},
+    ]
+    assert [e["value"] for e in catalog["voltage_source"]["values"]] == [
+        1.5, 3.3, 5, 9, 12, 15, 24,
+    ]
+    assert [e["value"] for e in catalog["current_source"]["values"]] == [
+        0.001, 0.01, 0.02, 0.1, 0.5, 1,
+    ]
+
+
+@needs_server
+def test_parts_type_filter_resistor(client: TestClient):
+    resp = client.get(PARTS_PATH, params={"type": "resistor"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert set(data) == {"version", "resistor"}
+    assert data["version"] == 1
+    assert len(data["resistor"]["values"]) == 84
+
+
+@needs_server
+def test_parts_type_filter_led(client: TestClient):
+    resp = client.get(PARTS_PATH, params={"type": "led"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert set(data) == {"version", "led"}
+    assert [c["color"] for c in data["led"]["colors"]] == [
+        "red", "green", "blue", "white", "yellow",
+    ]
+
+
+@needs_server
+def test_parts_type_filter_capacitor(client: TestClient):
+    resp = client.get(PARTS_PATH, params={"type": "capacitor"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert set(data) == {"version", "capacitor"}
+    assert len(data["capacitor"]["values"]) == 120
+
+
+@needs_server
+def test_parts_unknown_type_is_422(client: TestClient):
+    resp = client.get(PARTS_PATH, params={"type": "bogus"})
+    assert resp.status_code == 422
+
+
+@needs_server
+def test_parts_values_match_parts_module(client: TestClient):
+    """Every endpoint value is a number present in parts.py (no
+    JS-side table to drift, no string values)."""
+    from netproof import parts as parts_mod
+
+    catalog = client.get(PARTS_PATH).json()
+    assert {e["value"] for e in catalog["resistor"]["values"]} == set(
+        parts_mod.standard_resistor_values()
+    )
+    assert {e["value"] for e in catalog["capacitor"]["values"]} == set(
+        parts_mod.standard_capacitor_values()
+    )
+
+
+# ---------------------------------------------------------------------------
 # Fixture validity (run today: need only ir.py, no server, no ngspice).
 # ---------------------------------------------------------------------------
 def test_good_fixture_is_valid_netlist():

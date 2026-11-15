@@ -62,6 +62,10 @@ Endpoints::
                               findings, netlist, mock} (NO LLM, ever)
     GET  /rules               rule inventory (12 rows, thresholds from
                               rules.py constants, no ngspice, no mock)
+    GET  /parts               standard-value catalog from parts.py
+                              (E12 resistors/capacitors, LED colours,
+                              diode Vf, source values; optional
+                              ?type= filter; no ngspice, no mock)
     POST /sweep               JSON {netlist, resistor_id, values?,
                               led_id?, include_findings?} -> per-value
                               verification points (same pipeline as
@@ -154,6 +158,7 @@ import queue
 import shutil
 import threading
 from contextlib import asynccontextmanager
+from enum import Enum
 from pathlib import Path
 from typing import Any, AsyncIterator, Optional
 
@@ -1107,6 +1112,43 @@ async def rules_table() -> dict:
             "Resistor power thresholds are fractions of each resistor's own rating_watts.",
         ],
     }
+
+
+class _PartsType(str, Enum):
+    """Filter for GET /parts. Unknown values 422 via FastAPI enum validation."""
+
+    resistor = "resistor"
+    capacitor = "capacitor"
+    led = "led"
+    diode = "diode"
+    voltage_source = "voltage_source"
+    current_source = "current_source"
+
+
+@app.get("/parts")
+async def parts_catalog_endpoint(
+    type: _PartsType | None = Query(None),
+) -> Any:
+    """Standard-value catalog from parts.py (the parts picker data).
+
+    No body, no auth, no LLM, no ngspice, no server-side state: the
+    catalog is static data, identical in mock and real runs, so there
+    is no ``?mock=1``. ``?type=<one type>`` returns only that block
+    (plus ``version``); no param returns the whole catalog in one
+    round trip. ``Cache-Control: public, max-age=86400``: the catalog
+    only changes when parts.py changes (bump ``version`` then).
+    Returns 501 ``module_unavailable`` if parts.py cannot be loaded.
+    """
+    parts = _require_module("parts")
+    catalog = parts.parts_catalog()
+    if type is None:
+        payload: dict[str, Any] = catalog
+    else:
+        payload = {"version": catalog["version"], type.value: catalog[type.value]}
+    return JSONResponse(
+        content=payload,
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 @app.post("/check")

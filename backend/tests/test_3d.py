@@ -210,3 +210,27 @@ def test_3d_report_lookups_are_case_insensitive() -> None:
     assert "lookupCI(report.branch_currents, component.id)" in panel
     assert "lookupCI(report.power, component.id)" in panel
     assert "lookupCI(report.node_voltages, component.nodes[0])" in panel
+
+
+def test_edit_panel_parts_picker_present() -> None:
+    """P5.3: the edit panel fetches the standard-value catalog from
+    GET /parts (cached, deduped) and offers a value picker with a
+    Custom fallback, a rating picker, and an LED colour -> Vf hint
+    with a "Use Vf" button that never silently overwrites the value.
+    String checks only (see module docstring); live behaviour is
+    verified in the browser, not here."""
+    panel = _read(THREE_D_DIR / "edit-panel.js")
+    assert "fetchPartsCatalog" in panel
+    assert "fetch('/parts')" in panel
+    assert "catalogCache" in panel
+    assert "catalogPromise" in panel
+    assert "value-pick" in panel
+    assert "Custom" in panel
+    assert "rating-pick" in panel
+    assert "nearestStandard" in panel
+    assert "led-hint" in panel
+    assert "use-vf" in panel
+    assert "Typical Vf for" in panel
+    # Picker writes into the number input; validation reads it.
+    assert "readEditedComponent" in panel
+    assert "showEditPanel(component, report, callbacks)" in panel

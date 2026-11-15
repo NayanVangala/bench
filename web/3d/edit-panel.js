@@ -1,7 +1,12 @@
 /**
  * Netproof 3D edit panel — web/3d/edit-panel.js
  *
- * Plain JS module (no build step, no CDN, no LLM calls, no fetch).
+ * Plain JS module (no build step, no CDN, no LLM calls, no ngspice).
+ * One same-origin GET /parts for the standard-value catalog (see
+ * fetchPartsCatalog); no POST, no LLM, no ngspice. The picker suggests
+ * standard values from backend/netproof/parts.py; it never computes a
+ * verdict, current, voltage, or power, and it never silently rewrites
+ * a non-standard value — Custom… always keeps free-text entry.
  * Shows an edit panel for the component selected in the 3D view.
  *
  * Usage (from the page, e.g. web/index.html):
@@ -73,6 +78,102 @@ var SEVERITY_ORDER = { STOP: 0, WARN: 1, INFO: 2 };
 var currentComponent = null; // original component object passed to showEditPanel
 var currentReport = null;
 var currentCallbacks = {};
+
+// Parts catalog (GET /parts) — fetched lazily on first showEditPanel,
+// never at import time (this module never touches the DOM at import).
+var catalogCache = null;    // parsed catalog, or null when unavailable
+var catalogPromise = null;  // in-flight fetch (dedupes double-open)
+var valueCustomMode = false;  // user chose Custom… / typed a custom value
+var ratingCustomMode = false; // same, for the power-rating picker
+var ledHintVf = null;         // Vf (V) behind the "Use Vf" button, if shown
+
+/* ------------------------------------------------------------------ */
+/* Parts catalog (GET /parts)                                         */
+/* ------------------------------------------------------------------ */
+
+// Fetch the standard-value catalog once; concurrent callers share the
+// one in-flight promise. Any failure (network, non-200, bad JSON)
+// resolves to null and clears the promise so a later open retries.
+// Never throws to the caller: the panel degrades to free-text entry.
+function fetchPartsCatalog() {
+  if (catalogCache) return Promise.resolve(catalogCache);
+  if (catalogPromise) return catalogPromise;
+  if (typeof fetch !== 'function') return Promise.resolve(null);
+  catalogPromise = fetch('/parts')
+    .then(function (resp) {
+      if (!resp || !resp.ok) return null;
+      return resp.json();
+    })
+    .then(function (data) {
+      if (!data || typeof data !== 'object' || !data.resistor) return null;
+      catalogCache = data;
+      return data;
+    })
+    .catch(function () { return null; })
+    .then(function (data) {
+      catalogPromise = null;
+      return data;
+    });
+  return catalogPromise;
+}
+
+// Nearest catalog value to `current`, by log-distance. Null when the
+// list is empty or the current value is not a positive finite number.
+function nearestStandard(values, current) {
+  if (!Array.isArray(values) || !values.length) return null;
+  if (!isFiniteNumber(current) || !(current > 0)) return null;
+  var best = values[0];
+  var bestD = Math.abs(Math.log(current / values[0]));
+  for (var i = 1; i < values.length; i++) {
+    var d = Math.abs(Math.log(current / values[i]));
+    if (d < bestD) { bestD = d; best = values[i]; }
+  }
+  return best;
+}
+
+// [{ value, label }] entries the picker offers for a type, or null
+// when the catalog is unavailable. LED entries are the per-colour Vf
+// values (deduplicated: red and yellow share 2.0 V), never resistances.
+function valuesForType(catalog, type) {
+  if (!catalog) return null;
+  var block = catalog[type] || null;
+  if (type === 'led') {
+    var colors = (catalog.led && catalog.led.colors) || [];
+    var seen = {};
+    var out = [];
+    colors.forEach(function (c) {
+      if (c && isFiniteNumber(c.vf_v) && !seen[c.vf_v]) {
+        seen[c.vf_v] = true;
+        out.push({ value: c.vf_v, label: fmtVf(c.vf_v) });
+      }
+    });
+    out.sort(function (a, b) { return a.value - b.value; });
+    return out.length ? out : null;
+  }
+  if (!block || !Array.isArray(block.values) || !block.values.length) return null;
+  return block.values;
+}
+
+function labelForValue(entries, value) {
+  for (var i = 0; i < entries.length; i++) {
+    if (entries[i].value === value) return entries[i].label;
+  }
+  return null;
+}
+
+// "3.0 V" for a Vf value (all catalog Vf values carry one decimal).
+function fmtVf(v) {
+  return (Math.round(Number(v) * 10) / 10).toFixed(1) + ' V';
+}
+
+function ledEntryForColor(color) {
+  var colors = catalogCache && catalogCache.led && catalogCache.led.colors;
+  if (!Array.isArray(colors)) return null;
+  for (var i = 0; i < colors.length; i++) {
+    if (colors[i] && colors[i].color === color) return colors[i];
+  }
+  return null;
+}
 
 /* ------------------------------------------------------------------ */
 /* Small helpers                                                       */
@@ -254,6 +355,8 @@ function injectStyle() {
     '#' + PANEL_ID + ' button:disabled { opacity: .45; cursor: not-allowed; }',
     '#' + PANEL_ID + ' .ep-status { min-height: 18px; margin-top: 8px; font-size: 12px; color: #555; }',
     '#' + PANEL_ID + ' .ep-status.ep-error { color: #b00020; font-weight: 600; }',
+    '#' + PANEL_ID + ' .ep-led-hint { margin-top: 6px; }',
+    '#' + PANEL_ID + ' .ep-led-hint button { padding: 4px 8px; font-size: 12px; margin: 4px 0 0 6px; }',
     '#' + PANEL_ID + ' .ep-close { float: right; background: #fff; color: #111; border: 1px solid #bbb; padding: 2px 8px; margin: 0; }',
   ].join('\n');
   document.head.appendChild(style);
@@ -280,12 +383,15 @@ function buildPanel() {
     }).join(''),
     '</select></div>',
     '<div><label for="' + PANEL_ID + '-value">Value <span class="ep-hint" id="' + PANEL_ID + '-unit"></span></label>',
-    '<input id="' + PANEL_ID + '-value" type="number" step="any" inputmode="decimal"></div>',
+    '<select id="' + PANEL_ID + '-value-pick" style="display:none" aria-label="Standard value"></select>',
+    '<input id="' + PANEL_ID + '-value" type="number" step="any" inputmode="decimal">',
+    '<div class="ep-hint" id="' + PANEL_ID + '-value-hint"></div></div>',
     '<div><label>Nodes</label><div class="ep-nodes">',
     '<div><input id="' + PANEL_ID + '-node0" type="text" aria-label="First node" placeholder="node 1"></div>',
     '<div><input id="' + PANEL_ID + '-node1" type="text" aria-label="Second node" placeholder="node 2"></div>',
     '</div></div>',
     '<div><label for="' + PANEL_ID + '-rating">Power rating (W) <span class="ep-hint">resistors default 0.25 W</span></label>',
+    '<select id="' + PANEL_ID + '-rating-pick" style="display:none" aria-label="Standard power rating"></select>',
     '<input id="' + PANEL_ID + '-rating" type="number" step="any" min="0" inputmode="decimal" placeholder="0.25"></div>',
     '<div><label for="' + PANEL_ID + '-color">Colour <span class="ep-hint">LEDs only</span></label>',
     '<select id="' + PANEL_ID + '-color">',
@@ -293,7 +399,11 @@ function buildPanel() {
     LED_COLORS.map(function (c) {
       return '<option value="' + c + '">' + c + '</option>';
     }).join(''),
-    '</select></div>',
+    '</select>',
+    '<div class="ep-led-hint" id="' + PANEL_ID + '-led-hint" style="display:none">' +
+    '<span class="ep-hint" id="' + PANEL_ID + '-led-hint-text"></span>' +
+    '<button type="button" class="secondary" data-action="use-vf" id="' + PANEL_ID + '-led-use-vf">Use Vf</button>' +
+    '</div></div>',
     '<h3>Latest simulation</h3>',
     '<div id="' + PANEL_ID + '-measure"></div>',
     '<h3>Findings for this component</h3>',
@@ -314,6 +424,7 @@ function buildPanel() {
     else if (action === 'save') onSaveClick();
     else if (action === 'recheck') onButtonClick('onRecheck');
     else if (action === 'repair') onButtonClick('onRepair');
+    else if (action === 'use-vf') onUseVfClick();
   });
 
   document.body.appendChild(panel);
@@ -393,6 +504,210 @@ function renderFindings(component, report) {
   }).join('') + '</ul>';
 }
 
+function valueUnitSymbol(type) {
+  switch (type) {
+    case 'resistor': return '\u03a9';
+    case 'capacitor': return 'F';
+    case 'led':
+    case 'diode':
+    case 'voltage_source': return 'V';
+    case 'current_source': return 'A';
+    default: return '';
+  }
+}
+
+// Fill the colour <select> from the catalog (fallback: LED_COLORS
+// when the catalog is unavailable). Preserves the current selection.
+function populateColorSelect() {
+  var sel = el(PANEL_ID + '-color');
+  if (!sel) return;
+  var colors = catalogCache && catalogCache.led && catalogCache.led.colors;
+  var names = colors
+    ? colors.map(function (c) { return c.color; })
+    : LED_COLORS;
+  var current = sel.value;
+  sel.innerHTML = '<option value="">—</option>' + names.map(function (c) {
+    return '<option value="' + escapeHtml(c) + '">' + escapeHtml(c) + '</option>';
+  }).join('');
+  sel.value = names.indexOf(current) !== -1 ? current : '';
+}
+
+// Fill the value picker for the current type and preselect the entry
+// nearest (log-distance) to the number input's value. The number input
+// stays the source of truth for readEditedComponent(): a non-standard
+// value is preserved (nearest shown + hint, value untouched), and a
+// value orders of magnitude from anything standard for the new type
+// falls back to Custom… with the number preserved, never rewritten.
+function populateValuePicker() {
+  var pick = el(PANEL_ID + '-value-pick');
+  var input = el(PANEL_ID + '-value');
+  var hint = el(PANEL_ID + '-value-hint');
+  if (!pick || !input) return;
+  var type = el(PANEL_ID + '-type').value;
+  var entries = valuesForType(catalogCache, type);
+  if (!entries) {
+    // Catalog unavailable: free-text only, exactly as before.
+    pick.style.display = 'none';
+    input.style.display = '';
+    if (hint) hint.textContent = '';
+    return;
+  }
+  pick.innerHTML = '';
+  entries.forEach(function (e) {
+    var opt = document.createElement('option');
+    opt.value = String(e.value);
+    opt.textContent = e.label;
+    pick.appendChild(opt);
+  });
+  var customOpt = document.createElement('option');
+  customOpt.value = 'custom';
+  customOpt.textContent = 'Custom\u2026';
+  pick.appendChild(customOpt);
+  pick.style.display = '';
+
+  var current = Number(input.value);
+  var haveCurrent = input.value.trim() !== '' && isFiniteNumber(current);
+  if (valueCustomMode) {
+    pick.value = 'custom';
+    input.style.display = '';
+    if (hint) hint.textContent = '';
+    return;
+  }
+  if (!haveCurrent) {
+    pick.selectedIndex = 0;
+    input.style.display = 'none';
+    if (hint) hint.textContent = '';
+    return;
+  }
+  var values = entries.map(function (e) { return e.value; });
+  var nearest = nearestStandard(values, current);
+  var exact = entries.some(function (e) { return e.value === current; });
+  if (nearest != null && Math.abs(Math.log(current / nearest)) > Math.log(1000)) {
+    pick.value = 'custom';
+    valueCustomMode = true;
+    input.style.display = '';
+    if (hint) hint.textContent = '';
+    return;
+  }
+  pick.value = String(nearest);
+  input.style.display = 'none';
+  if (hint) {
+    if (!exact && nearest != null) {
+      var series = (type === 'resistor' || type === 'capacitor')
+        ? 'standard E12 value' : 'standard value';
+      hint.textContent = 'Current value ' + fmt(current) + ' ' +
+        valueUnitSymbol(type) + ' is not a ' + series +
+        ' \u2014 nearest is ' + labelForValue(entries, nearest) + '.';
+    } else {
+      hint.textContent = '';
+    }
+  }
+}
+
+// Fill the rating picker from catalog.resistor.ratings_w. A blank
+// rating stays blank (blank falls back to the component's original
+// rating / backend 0.25 W default); a non-standard typed rating
+// keeps Custom… with the number preserved.
+function populateRatingPicker() {
+  var pick = el(PANEL_ID + '-rating-pick');
+  var input = el(PANEL_ID + '-rating');
+  if (!pick || !input) return;
+  var ratings = catalogCache && catalogCache.resistor &&
+    catalogCache.resistor.ratings_w;
+  if (!Array.isArray(ratings) || !ratings.length) {
+    pick.style.display = 'none';
+    input.style.display = '';
+    return;
+  }
+  pick.innerHTML = '';
+  ratings.forEach(function (r) {
+    var opt = document.createElement('option');
+    opt.value = String(r);
+    opt.textContent = String(r) + ' W';
+    pick.appendChild(opt);
+  });
+  var customOpt = document.createElement('option');
+  customOpt.value = 'custom';
+  customOpt.textContent = 'Custom\u2026';
+  pick.appendChild(customOpt);
+  pick.style.display = '';
+
+  var current = Number(input.value);
+  var haveCurrent = input.value.trim() !== '' && isFiniteNumber(current);
+  if (ratingCustomMode || (haveCurrent && ratings.indexOf(current) === -1)) {
+    if (haveCurrent && ratings.indexOf(current) === -1) ratingCustomMode = true;
+    pick.value = 'custom';
+    input.style.display = '';
+    return;
+  }
+  if (haveCurrent) {
+    pick.value = String(current);
+    input.style.display = 'none';
+    return;
+  }
+  var def = catalogCache.resistor.default_rating_w;
+  pick.value = String(isFiniteNumber(def) ? def : 0.25);
+  input.style.display = 'none';
+}
+
+// Show the LED Vf hint for `color`, or hide it. `mismatchOnly`
+// (load path): only show when the value disagrees with the colour's
+// Vf by more than rounding. Colour-change path passes false: always
+// show the typical Vf. Never overwrites the value; the "Use Vf"
+// button applies it, and only when the user clicks it.
+function refreshLedHint(color, mismatchOnly) {
+  var box = el(PANEL_ID + '-led-hint');
+  var text = el(PANEL_ID + '-led-hint-text');
+  var btn = el(PANEL_ID + '-led-use-vf');
+  if (!box || !text || !btn) return;
+  var type = el(PANEL_ID + '-type') ? el(PANEL_ID + '-type').value : '';
+  var entry = ledEntryForColor(color);
+  ledHintVf = null;
+  if (type !== 'led' || !entry || !color) {
+    box.style.display = 'none';
+    return;
+  }
+  var vfText = fmtVf(entry.vf_v);
+  var current = Number(el(PANEL_ID + '-value').value);
+  var matches = isFiniteNumber(current) && Math.abs(current - entry.vf_v) <= 0.05;
+  if (mismatchOnly && matches) {
+    box.style.display = 'none';
+    return;
+  }
+  var maxMa = fmt(entry.if_max_a * 1000);
+  var warnMa = fmt(entry.if_warn_a * 1000);
+  if (mismatchOnly) {
+    text.textContent = 'Value ' + fmt(current) + ' V does not match ' + color +
+      ' Vf ' + vfText + ' (max ' + maxMa + ' mA, warn at ' + warnMa + ' mA).';
+  } else {
+    text.textContent = 'Typical Vf for ' + color + ': ' + vfText +
+      ' (max ' + maxMa + ' mA, warn at ' + warnMa + ' mA).';
+  }
+  btn.textContent = 'Use ' + vfText;
+  ledHintVf = entry.vf_v;
+  box.style.display = '';
+}
+
+function onUseVfClick() {
+  if (!isFiniteNumber(ledHintVf)) return;
+  var input = el(PANEL_ID + '-value');
+  if (!input) return;
+  valueCustomMode = false;
+  input.value = String(ledHintVf);
+  populateValuePicker();
+  var box = el(PANEL_ID + '-led-hint');
+  if (box) box.style.display = 'none';
+  ledHintVf = null;
+}
+
+function refreshPickers() {
+  populateColorSelect();
+  populateValuePicker();
+  populateRatingPicker();
+  var color = el(PANEL_ID + '-color') ? el(PANEL_ID + '-color').value : '';
+  refreshLedHint(color, true);
+}
+
 function renderPanel() {
   var c = currentComponent;
   if (!c) return;
@@ -415,6 +730,22 @@ function renderPanel() {
   // fields) but disable colour for non-LED/diode types.
   var type = el(PANEL_ID + '-type').value;
   el(PANEL_ID + '-color').disabled = !(type === 'led' || type === 'diode');
+
+  // Fresh open: no custom value typed yet. Populate the pickers from
+  // whatever catalog is cached (or fall back to free-text inputs when
+  // it is not), then upgrade in place when the fetch lands.
+  valueCustomMode = false;
+  ratingCustomMode = false;
+  refreshPickers();
+  var openedId = c.id;
+  fetchPartsCatalog().then(function (catalog) {
+    if (!currentComponent || currentComponent.id !== openedId) return;
+    if (catalog) {
+      refreshPickers();
+    } else {
+      setStatus('Standard values unavailable \u2014 enter a custom value.');
+    }
+  });
 
   renderMeasurements(c, currentReport);
   renderFindings(c, currentReport);
@@ -515,20 +846,77 @@ function onButtonClick(name) {
   cb(result.component);
 }
 
-// Keep the unit hint and colour availability in step with the type.
-// Registered once, when the panel is first built (not at import time,
-// so importing this module never touches the DOM).
+// Keep the unit hint, colour availability, pickers and LED Vf hint
+// in step with the panel inputs. Registered once, when the panel is
+// first built (not at import time, so importing this module never
+// touches the DOM). Document-level delegation: the panel DOM is
+// created after this wiring runs.
 var typeChangeWired = false;
 function wireTypeChange() {
   if (typeChangeWired) return;
   typeChangeWired = true;
   document.addEventListener('change', function (e) {
-    if (!e.target || e.target.id !== PANEL_ID + '-type') return;
-    var type = e.target.value;
-    var unit = el(PANEL_ID + '-unit');
-    if (unit) unit.textContent = valueUnit(type);
-    var color = el(PANEL_ID + '-color');
-    if (color) color.disabled = !(type === 'led' || type === 'diode');
+    if (!e.target) return;
+    var id = e.target.id;
+    if (id === PANEL_ID + '-type') {
+      var type = e.target.value;
+      var unit = el(PANEL_ID + '-unit');
+      if (unit) unit.textContent = valueUnit(type);
+      var color = el(PANEL_ID + '-color');
+      if (color) color.disabled = !(type === 'led' || type === 'diode');
+      // Repopulate the picker for the new type. A custom value the
+      // user already typed stays Custom… (valueCustomMode); otherwise
+      // the nearest standard is preselected, or Custom… when the old
+      // value is orders of magnitude from the new type's list.
+      populateValuePicker();
+      refreshLedHint(color ? color.value : '', true);
+    } else if (id === PANEL_ID + '-value-pick') {
+      var pick = e.target;
+      var input = el(PANEL_ID + '-value');
+      if (!input) return;
+      if (pick.value === 'custom') {
+        // Custom… keeps whatever value is in the number input and
+        // shows it, focused, for free-text entry.
+        valueCustomMode = true;
+        input.style.display = '';
+        input.focus();
+        var hint = el(PANEL_ID + '-value-hint');
+        if (hint) hint.textContent = '';
+      } else {
+        // Choosing a standard entry writes its SI float into the
+        // number input, so readEditedComponent() needs no change.
+        valueCustomMode = false;
+        input.value = pick.value;
+        input.style.display = 'none';
+        var hint2 = el(PANEL_ID + '-value-hint');
+        if (hint2) hint2.textContent = '';
+      }
+    } else if (id === PANEL_ID + '-rating-pick') {
+      var rpick = e.target;
+      var rinput = el(PANEL_ID + '-rating');
+      if (!rinput) return;
+      if (rpick.value === 'custom') {
+        ratingCustomMode = true;
+        rinput.style.display = '';
+        rinput.focus();
+      } else {
+        ratingCustomMode = false;
+        rinput.value = rpick.value;
+        rinput.style.display = 'none';
+      }
+    } else if (id === PANEL_ID + '-color') {
+      // Colour change never overwrites the value: show the typical
+      // Vf with a "Use Vf" button instead.
+      refreshLedHint(e.target.value, false);
+    }
+  });
+  // Typing in a visible number input means the value is custom, so a
+  // catalog load landing afterwards must not overwrite it with a
+  // picker selection.
+  document.addEventListener('input', function (e) {
+    if (!e.target) return;
+    if (e.target.id === PANEL_ID + '-value') valueCustomMode = true;
+    else if (e.target.id === PANEL_ID + '-rating') ratingCustomMode = true;
   });
 }
 

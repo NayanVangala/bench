@@ -268,6 +268,12 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .btn-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
 .btn-row .dark-btn { margin-left: auto; }
 .btn-col { display: grid; gap: 8px; }
+.cta-ghost {
+  display: block; width: 100%; margin: 0 0 10px; padding: 9px 12px; border-radius: 10px;
+  border: 1px solid var(--accent); background: var(--card); color: var(--ink);
+  font-weight: 600; font-size: 13px; text-align: left;
+}
+.cta-ghost:hover { background: var(--accent); color: var(--accent-ink); }
 
 .command-wrap {
   display: flex; align-items: center; gap: 6px; border: 1px solid var(--line-strong);

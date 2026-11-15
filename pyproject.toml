@@ -10,6 +10,7 @@ dependencies = [
     "python-multipart",
     "sse-starlette",
     "anthropic",
+    "fpdf2>=2.9.0",
 ]
 
 [dependency-groups]
@@ -24,8 +25,9 @@ gemini = ["google-genai"]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.hatch.build]
-force-include = { "backend/netproof" = "netproof" }
+[tool.hatch.build.targets.wheel]
+# Package lives in backend/netproof; installs as "netproof" (editable in dev).
+packages = ["backend/netproof"]
 
 [tool.pytest.ini_options]
 testpaths = ["backend/tests"]

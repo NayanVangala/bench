@@ -167,7 +167,7 @@ from typing import Any, AsyncIterator, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -1636,6 +1636,34 @@ async def download_netlist(request: Request) -> PlainTextResponse:
         spice_text,
         media_type="text/plain",
         headers={"Content-Disposition": 'attachment; filename="netlist.cir"'},
+    )
+
+
+@app.post("/build-pack")
+def build_pack(netlist: IRNetlist) -> Response:
+    """PDF build pack for a circuit that passed: parts with estimated prices
+    and buy links, breadboard steps, multimeter checks, PCB footprints.
+
+    Re-runs the real check first (ngspice + rules, no LLM), so the pack's
+    verdict is the server's own, never the client's. A STOP circuit gets
+    no pack (409). Sync ``def``: ngspice runs in the threadpool.
+    """
+    from . import buildpack
+
+    report = _report_response(_verify_netlist(netlist, record=False), netlist)
+    if str(report.get("verdict", "")).upper() == "STOP":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "not_buildable",
+                "message": "This circuit fails its check (STOP). Fix it first, for example with Repair, then get the build pack.",
+            },
+        )
+    pdf = buildpack.render_pdf(netlist.model_dump(mode="json"), report)
+    return Response(
+        pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'attachment; filename="netproof-build-pack.pdf"'},
     )
 
 

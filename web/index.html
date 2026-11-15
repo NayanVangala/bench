@@ -268,6 +268,7 @@
           <div class="card-head"><span class="eyebrow"><span class="step">03</span> Verdict</span></div>
           <div id="verdict" aria-live="polite"></div>
           <p class="verdict-empty empty" id="verdict-empty">No check yet.</p>
+          <button id="build-pack-cta" type="button" class="cta-ghost" hidden>Ready to build &rarr; get the build pack (PDF)</button>
           <dl id="key-readings" aria-label="Key measured values">
             <div class="reading"><dt>LED current</dt><dd id="key-led">&mdash;</dd></div>
             <div class="reading"><dt>Resistor power</dt><dd id="key-power">&mdash;</dd></div>
@@ -375,6 +376,7 @@
           <div class="btn-col">
             <button id="dl-cir-btn" type="button" class="ghost-btn">Download netlist.cir</button>
             <button id="dl-bom-btn" type="button" class="ghost-btn">Download bom.csv</button>
+            <button id="build-pack-btn" type="button" class="dark-btn">Build pack (PDF): parts, prices, build guide</button>
             <button id="share-btn" type="button" class="ghost-btn">Copy share link</button>
           </div>
           <p id="share-status" class="empty" role="status" aria-live="polite"></p>
@@ -563,6 +565,8 @@
     // white, not white on a colour block); mirror it via data-verdict.
     var callout = $('verdict-callout');
     if (callout) callout.setAttribute('data-verdict', label);
+    var packCta = $('build-pack-cta');
+    if (packCta) packCta.hidden = !(label === 'PASS' || label === 'WARN') || !!mock;
     var empty = $('verdict-empty');
     if (empty) empty.style.display = 'none';
   }
@@ -1498,8 +1502,9 @@
   // POST request body; no GET with a body is used here.
   async function download(kind) {
     var isCir = kind === 'cir';
-    var url = isCir ? '/download/netlist' : '/download/bom';
-    var filename = isCir ? 'netlist.cir' : 'bom.csv';
+    var isPack = kind === 'pack';
+    var url = isPack ? '/build-pack' : isCir ? '/download/netlist' : '/download/bom';
+    var filename = isPack ? 'netproof-build-pack.pdf' : isCir ? 'netlist.cir' : 'bom.csv';
     clearError();
     var payload = collectNetlistPayload();
     if (!payload.components.length) { showError('Netlist is empty', 'Add at least one netlist row before downloading.'); return; }
@@ -1509,7 +1514,12 @@
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
-      if (!res.ok) { handleErrorPayload(null, 'Download failed (' + res.status + ') for ' + filename); return; }
+      if (!res.ok) {
+        var errData = null;
+        try { errData = await res.json(); } catch (e2) { /* non-JSON error body */ }
+        handleErrorPayload(errData, 'Download failed (' + res.status + ') for ' + filename);
+        return;
+      }
       var blob = await res.blob();
       var cd = res.headers.get('content-disposition') || '';
       var m = /filename="?([^";]+)"?/.exec(cd);
@@ -2272,6 +2282,8 @@
   $('sweep-btn').addEventListener('click', runSweep);
   $('dl-cir-btn').addEventListener('click', function () { download('cir'); });
   $('dl-bom-btn').addEventListener('click', function () { download('bom'); });
+  $('build-pack-btn').addEventListener('click', function () { download('pack'); });
+  $('build-pack-cta').addEventListener('click', function () { download('pack'); });
   $('share-btn').addEventListener('click', shareLink);
   // A second share link pasted into this tab's address bar re-loads;
   // our own publishShareLink uses replaceState, which does not fire this.

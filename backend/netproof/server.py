@@ -554,6 +554,15 @@ def _netlist_rows(
             value = getattr(comp, "value", None)
             nodes = list(getattr(comp, "nodes", None) or [])
         current = currents.get(str(cid).lower()) if cid else None
+        if current is None and str(ctype).lower() in ("led", "diode") and not isinstance(comp, dict):
+            # Same derivation the rules use (KCL at the LED's nodes), so the
+            # table and the LED-current readout can never disagree with the verdict.
+            try:
+                from . import rules as _rules
+
+                current = _rules.led_current(comp, list(components), node_voltages, branch_currents)
+            except Exception:  # underdetermined / unusual circuit: leave it unknown
+                current = None
         if (
             current is None
             and str(ctype).lower() == "resistor"

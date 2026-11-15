@@ -819,6 +819,14 @@
         if (p != null) resistorPower = p;
       }
     });
+    if (ledCurrent == null && Array.isArray(lastReport.netlist)) {
+      // The report's per-row current for the LED (server: same KCL
+      // derivation the rules use).
+      lastReport.netlist.forEach(function (row) {
+        var t = String(row.type || '').toLowerCase();
+        if (ledCurrent == null && (t === 'led' || t === 'diode') && row.current != null) ledCurrent = row.current;
+      });
+    }
     if (ledCurrent == null) {
       // Fall back to the LED finding's own message text, e.g.
       // "LED D1 current 70.0 mA exceeds the 30 mA limit."
@@ -1211,7 +1219,7 @@
     $('recheck-btn').disabled = b;
     $('share-btn').disabled = b;
     var checkBtn = $('check-btn');
-    if (checkBtn) { checkBtn.disabled = b; checkBtn.textContent = b ? 'Checking\u2026' : 'Check \u2192'; }
+    if (checkBtn) { checkBtn.disabled = b; checkBtn.textContent = b ? 'Checking\u2026' : 'Check circuit \u2192'; }
     var goalEl = $('goal');
     if (goalEl) goalEl.disabled = b;
     var upBtn = $('upload-btn');
@@ -2282,6 +2290,12 @@
     if (drawerToggle) drawerToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
     if (!open && drawerToggle) drawerToggle.focus();
     syncSceneInset();
+    if (!window.matchMedia('(min-width: 901px)').matches) {
+      setTimeout(function () {
+        var h = window.__netproof3d;
+        if (h && typeof h.resetView === 'function') h.resetView();
+      }, 60);
+    }
   }
   // The bench canvas is full-bleed behind the floating panel; tell the 3D
   // scene how many px the panel covers so it frames the circuit (and lays

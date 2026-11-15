@@ -43,3 +43,11 @@ def test_build_pack_endpoint():
     assert ok.content.startswith(b"%PDF") and len(ok.content) > 5000
     stop = client.post("/build-pack", json=_load("led_overcurrent"))
     assert stop.status_code == 409 and stop.json()["error"] == "not_buildable"
+
+
+@pytest.mark.skipif(shutil.which("ngspice") is None, reason="ngspice not installed")
+def test_check_reports_led_current_on_pass():
+    """A PASS has no LED finding to read the current from: the LED row must carry it."""
+    rows = TestClient(server.app).post("/check", json=_load("good_led")).json()["netlist"]
+    d1 = next(r for r in rows if r["id"] == "D1")
+    assert d1["current"] == pytest.approx(0.0149, abs=5e-4)

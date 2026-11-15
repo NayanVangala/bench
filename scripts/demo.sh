@@ -11,7 +11,10 @@
 # Prerequisites:
 #   - ngspice on PATH          (brew install ngspice)
 #   - uv                       (https://docs.astral.sh/uv/) or python3 + pip
-#   - ANTHROPIC_API_KEY set    (export ANTHROPIC_API_KEY=sk-ant-...)
+#   - GEMINI_API_KEY set       (export GEMINI_API_KEY=...; default provider
+#                              is Gemini, LLM_PROVIDER=gemini. For the
+#                              Anthropic fallback, LLM_PROVIDER=anthropic
+#                              plus ANTHROPIC_API_KEY instead.)
 #
 # The server serves the web UI at http://127.0.0.1:8000/
 
@@ -31,15 +34,29 @@ if ! command -v ngspice >/dev/null 2>&1; then
 fi
 echo "ngspice: $(command -v ngspice)"
 
-# --- 2. Anthropic API key check ---------------------------------------------
-if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-    echo "WARNING: ANTHROPIC_API_KEY is not set." >&2
+# --- 2. LLM API key check ----------------------------------------------------
+# Default provider is Gemini (LLM_PROVIDER=gemini); Anthropic is the
+# fallback (LLM_PROVIDER=anthropic). Warn when the selected provider's
+# key is missing; the server still starts and /check still works.
+_provider="$(printf '%s' "${LLM_PROVIDER:-gemini}" | tr '[:upper:]' '[:lower:]')"
+if [ "$_provider" = "anthropic" ]; then
+    if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+        echo "WARNING: LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY is not set." >&2
+        echo "The server will start, but LLM explanations and repair proposals" >&2
+        echo "will be unavailable. The simulator verdicts still work." >&2
+        echo "Set it before running for the full demo:" >&2
+        echo "  export ANTHROPIC_API_KEY=sk-ant-..." >&2
+    else
+        echo "ANTHROPIC_API_KEY: set"
+    fi
+elif [ -z "${GEMINI_API_KEY:-}" ] && [ -z "${GOOGLE_API_KEY:-}" ]; then
+    echo "WARNING: GEMINI_API_KEY (or GOOGLE_API_KEY) is not set." >&2
     echo "The server will start, but LLM explanations and repair proposals" >&2
     echo "will be unavailable. The simulator verdicts still work." >&2
     echo "Set it before running for the full demo:" >&2
-    echo "  export ANTHROPIC_API_KEY=sk-ant-..." >&2
+    echo "  export GEMINI_API_KEY=..." >&2
 else
-    echo "ANTHROPIC_API_KEY: set"
+    echo "Gemini API key: set"
 fi
 
 # --- 3. Install dependencies -------------------------------------------------
@@ -51,7 +68,7 @@ else
     echo "NOTE: uv not found; using python3 -m pip instead." >&2
     echo "Install uv for the supported setup: https://docs.astral.sh/uv/" >&2
     python3 -m pip install -e . 2>/dev/null \
-        || python3 -m pip install fastapi uvicorn pydantic python-multipart sse-starlette anthropic
+        || python3 -m pip install fastapi uvicorn pydantic python-multipart sse-starlette anthropic google-genai
     RUN="python3 -m"
 fi
 

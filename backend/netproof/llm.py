@@ -1,38 +1,74 @@
 """LLM access for Netproof — the ONLY module that talks to an LLM.
 
-Single provider: Anthropic official SDK, model ``claude-sonnet-5-5``.
-No LangChain, no other provider, no hardcoded netlists in any non-mock
-path. The API key comes from the environment (``ANTHROPIC_API_KEY``),
-read by ``anthropic.Anthropic()`` itself; this module never reads the
-key value.
+Default provider: Google Gemini via the official ``google-genai``
+SDK, model ``gemini-4-argon`` (override with ``GEMINI_MODEL`` env).
+Fallback provider: Anthropic official SDK, model
+``claude-sonnet-5-5``, selected per call by ``LLM_PROVIDER``
+(``gemini`` by default, ``anthropic`` for Anthropic;
+case-insensitive). No LangChain, no other
+provider, no hardcoded netlists in any non-mock path. API keys come
+from the environment and are read by the respective SDK itself
+(``ANTHROPIC_API_KEY`` for Anthropic; ``GEMINI_API_KEY`` for Gemini,
+falling back to ``GOOGLE_API_KEY`` — in google-genai 3.3.0 the SDK
+prefers ``GOOGLE_API_KEY`` when both are set, so set only one key);
+this module never
+reads, prints or logs a key value.
 
 Import safety
 ------------
-``anthropic`` is imported lazily inside :func:`_get_client`, so importing
-this module — and running tests with a fake client — works with no SDK
-installed and no key set. Only a real call with ``client=None`` needs
-the SDK and the key.
+Both SDKs are imported lazily inside :func:`_get_client` /
+:func:`_get_gemini_client`, so importing this module — and running
+tests with a fake client — works with no SDK installed and no key
+set. Only a real call with ``client=None`` needs the SDK and the key
+for the selected provider. ``google-genai`` is an optional
+dependency (``uv sync --extra gemini``).
 
 Injectable client (for tests)
 -----------------------------
-Every public function takes ``client=None``. Pass a fake whose
-``client.messages.create(model=..., max_tokens=..., messages=[...])``
-returns an object whose ``.content[0].text`` is the model reply
-(a plain ``.text`` attribute or a plain string reply also work).
-If ``client`` is ``None``, a real ``anthropic.Anthropic()`` is built.
+Every public function takes ``client=None`` plus ``provider=None``.
+Pass a fake whose ``client.messages.create(model=..., max_tokens=...,
+messages=[...])`` returns an object whose ``.content[0].text`` is the
+model reply (a plain ``.text`` attribute or a plain string reply also
+work). If ``client`` is ``None``, a real client is built for the
+provider resolved by :func:`get_provider`. An injected client always
+wins and bypasses provider selection entirely — even an unknown
+``LLM_PROVIDER`` value cannot break a call that injects a client.
+One exception: a bare ``google.genai`` client passed as ``client=``
+has ``.models`` and no ``.messages``, so it is wrapped in a
+:class:`_GeminiClientAdapter` to satisfy the Anthropic-shaped call.
+
+Gemini adapter
+--------------
+:class:`_GeminiClientAdapter` wraps a ``google.genai.Client`` and
+exposes the same ``.messages.create(model=..., max_tokens=...,
+messages=...)`` shape the rest of this module uses, so
+``_call_model`` is provider-agnostic. It collapses all messages into
+one ``types.Content(role="user", ...)`` (text via
+``Part.from_text``, image blocks via ``Part.from_bytes`` with the
+base64 payload decoded and the MIME type passed through), substitutes
+its own model name (the Anthropic model name passed in is meaningless
+to Gemini), and maps ``max_tokens`` to ``max_output_tokens`` in a
+``GenerateContentConfig`` with ``response_mime_type="application/json"``.
+Gemini's documented image formats are PNG, JPEG, WEBP, HEIC and HEIF;
+``image/gif`` is rejected loudly instead of failing as a cryptic API
+400. The reply comes back through ``response.text`` and is wrapped as
+``.content[0].text``.
 
 Failure policy
 --------------
 Invalid JSON or a reply that fails Pydantic validation gets exactly
 one retry (the error is fed back and valid JSON is demanded again).
 If the retry also fails, a ``ValueError`` is raised loudly. There is
-never a silent fallback, default, or guessed netlist.
+never a silent fallback, default, or guessed netlist. An unknown
+provider value likewise raises ``ValueError`` loudly — never a silent
+fallback to another provider.
 """
 
 from __future__ import annotations
 
 import base64
 import json
+import os
 from typing import Any
 
 from pydantic import ValidationError
@@ -41,13 +77,17 @@ from .ir import ComponentType, Finding, Netlist
 
 __all__ = [
     "MODEL",
+    "GEMINI_MODEL",
     "MAX_TOKENS",
+    "get_provider",
     "read_schematic",
     "design",
     "repair",
 ]
 
 MODEL = "claude-sonnet-5-5"
+# Default Gemini model; override per call with the GEMINI_MODEL env var.
+GEMINI_MODEL = "gemini-4-argon"
 MAX_TOKENS = 4096
 
 # Allowed component types, from ir.ComponentType. Listed in prompts so
@@ -96,18 +136,259 @@ _RETRY_TEXT = (
 # ---------------------------------------------------------------------------
 
 
-def _get_client(client: Any) -> Any:
-    """Return the given client, or build a real Anthropic client.
+# ---------------------------------------------------------------------------
+# Provider selection + Gemini adapter
+# ---------------------------------------------------------------------------
 
-    The ``anthropic`` import lives here so importing this module never
-    requires the SDK or a key. ``anthropic.Anthropic()`` reads
-    ``ANTHROPIC_API_KEY`` from the environment.
+
+def get_provider(provider: str | None = None) -> str:
+    """Resolve the LLM provider name: ``"anthropic"`` or ``"gemini"``.
+
+    An explicit argument wins; otherwise ``LLM_PROVIDER`` from the
+    environment; otherwise ``"gemini"``. Matching is
+    case-insensitive and surrounding whitespace is ignored. Any other
+    value raises ``ValueError`` loudly — never a silent fallback to
+    another provider.
+    """
+    raw = provider if provider is not None else os.environ.get("LLM_PROVIDER")
+    resolved = (raw or "gemini").strip().lower()
+    if resolved not in ("anthropic", "gemini"):
+        raise ValueError(
+            f"unknown LLM provider: {resolved!r} "
+            "(expected 'anthropic' or 'gemini'; "
+            "set LLM_PROVIDER to one of those)"
+        )
+    return resolved
+
+
+def _resolve_gemini_model() -> str:
+    """Gemini model name: ``GEMINI_MODEL`` env, else ``GEMINI_MODEL``."""
+    return (os.environ.get("GEMINI_MODEL") or GEMINI_MODEL).strip() or GEMINI_MODEL
+
+
+class _AdapterTextBlock:
+    """Minimal text block: ``.text`` is the reply text."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+class _AdapterResponse:
+    """Anthropic-shaped response shim: ``.content[0].text`` is the reply."""
+
+    def __init__(self, text: str) -> None:
+        self.content = [_AdapterTextBlock(text)]
+
+
+def _gemini_response_text(response: Any) -> str:
+    """Extract reply text from a Gemini GenerateContentResponse.
+
+    Prefers the SDK's ``response.text`` accessor; falls back to
+    walking ``candidates[*].content.parts``. Raises ValueError when
+    the response holds no text.
+    """
+    text: Any = None
+    try:
+        text = response.text
+    except (AttributeError, ValueError):
+        text = None
+    if isinstance(text, str) and text:
+        return text
+    for candidate in getattr(response, "candidates", None) or []:
+        content = getattr(candidate, "content", None)
+        for part in getattr(content, "parts", None) or []:
+            part_text = getattr(part, "text", None)
+            if isinstance(part_text, str) and part_text:
+                return part_text
+    raise ValueError("Gemini response contained no text")
+
+
+class _GeminiClientAdapter:
+    """Anthropic-Messages-shaped wrapper around a ``google.genai`` client.
+
+    The rest of this module talks to ``client.messages.create(model=...,
+    max_tokens=..., messages=...)``; this adapter is that namespace
+    (``self.messages is self``) and translates each call to
+    ``client.models.generate_content(...)``.
+
+    Translation — all messages collapse to one Content
+    -------------------------------------------------
+    Every Anthropic message, whatever its role, is folded into a
+    single ``types.Content(role="user", parts=[...])``. Netproof only
+    ever sends user-role messages (design / read_schematic / repair,
+    plus the user-role retry), so collapsing loses nothing; the retry
+    message simply becomes a later part of the same user turn. Text
+    becomes ``types.Part.from_text``; an Anthropic image block becomes
+    ``types.Part.from_bytes`` with the base64 payload decoded to raw
+    bytes and the MIME type passed through. Gemini's documented image
+    formats are PNG, JPEG, WEBP, HEIC and HEIF — ``image/gif`` is
+    rejected loudly here instead of failing as a cryptic API 400.
+
+    Model / tokens
+    --------------
+    The ``model=`` argument to ``create`` is accepted for signature
+    compatibility and ignored: Gemini always uses this adapter's model
+    (``GEMINI_MODEL`` env, else ``"gemini-4-argon"``) — the Anthropic
+    model name is meaningless to Gemini. ``max_tokens`` becomes
+    ``max_output_tokens`` in a ``GenerateContentConfig`` that also sets
+    ``response_mime_type="application/json"``: every Netproof prompt
+    demands strict JSON, so JSON mode is correct for design,
+    read_schematic and repair alike.
+
+    The reply comes back through ``response.text`` and is wrapped as
+    ``.content[0].text`` so ``_response_text`` works unchanged.
+
+    ``types_module`` is injectable so tests can pass a fake types
+    module; when omitted it is imported lazily from ``google.genai``,
+    so importing this module never requires the SDK.
+    """
+
+    def __init__(
+        self,
+        genai_client: Any,
+        model: str | None = None,
+        types_module: Any = None,
+    ) -> None:
+        self._genai_client = genai_client
+        self._model = (model or "").strip() or _resolve_gemini_model()
+        self._types_module = types_module
+        # _call_model talks to ``client.messages.create(...)``.
+        self.messages = self
+
+    def _types(self) -> Any:
+        if self._types_module is None:
+            from google.genai import types
+
+            self._types_module = types
+        return self._types_module
+
+    def _translate_parts(
+        self, types: Any, messages: list[dict[str, Any]]
+    ) -> list[Any]:
+        parts: list[Any] = []
+        for message in messages:
+            content = message.get("content", "")
+            blocks = [content] if isinstance(content, str) else list(content or [])
+            for block in blocks:
+                if isinstance(block, str):
+                    if block:
+                        parts.append(types.Part.from_text(text=block))
+                elif isinstance(block, dict):
+                    parts.append(self._translate_block(types, block))
+                else:
+                    raise ValueError(
+                        f"unsupported message block for Gemini: {block!r}"
+                    )
+        if not parts:
+            raise ValueError("no message content to send to Gemini")
+        return parts
+
+    @staticmethod
+    def _translate_block(types: Any, block: dict[str, Any]) -> Any:
+        block_type = block.get("type")
+        if block_type == "text":
+            return types.Part.from_text(text=block.get("text", ""))
+        if block_type == "image":
+            source = block.get("source") or {}
+            if source.get("type") != "base64":
+                raise ValueError(
+                    "Gemini image blocks need a base64 source, "
+                    f"got {source.get('type')!r}"
+                )
+            data = source.get("data", "")
+            media_type = source.get("media_type") or _detect_media_type(
+                base64.b64decode(data)
+            )
+            if media_type == "image/gif":
+                raise ValueError(
+                    "Gemini does not accept image/gif inline data "
+                    "(supported: PNG, JPEG, WEBP, HEIC, HEIF); "
+                    "convert the schematic to PNG first"
+                )
+            return types.Part.from_bytes(
+                data=base64.b64decode(data),
+                mime_type=media_type,
+            )
+        raise ValueError(
+            f"unsupported message block type for Gemini: {block_type!r}"
+        )
+
+    def create(
+        self,
+        *,
+        model: str | None = None,
+        max_tokens: int | None = None,
+        messages: list[dict[str, Any]] | None = None,
+    ) -> Any:
+        """Anthropic-shaped ``messages.create`` backed by Gemini.
+
+        ``model`` is ignored (see the class docstring): the adapter's
+        own model is always used.
+        """
+        types = self._types()
+        parts = self._translate_parts(types, messages or [])
+        contents = [types.Content(role="user", parts=parts)]
+        config = types.GenerateContentConfig(
+            max_output_tokens=max_tokens if max_tokens is not None else MAX_TOKENS,
+            response_mime_type="application/json",
+        )
+        response = self._genai_client.models.generate_content(
+            model=self._model,
+            contents=contents,
+            config=config,
+        )
+        return _AdapterResponse(_gemini_response_text(response))
+
+
+def _get_gemini_client() -> Any:
+    """Build a Gemini adapter around a real ``google.genai`` client.
+
+    ``genai.Client()`` is constructed with no arguments: the SDK reads
+    the key from the environment itself (``GEMINI_API_KEY``, falling
+    back to ``GOOGLE_API_KEY`` — in google-genai 3.3.0 the SDK prefers
+    ``GOOGLE_API_KEY`` when both are set, so set only one key; this
+    module never reads, prints or logs the key value). The model comes
+    from ``GEMINI_MODEL`` env, default ``"gemini-4-argon"``.
+    """
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError as exc:
+        raise ImportError(
+            "LLM_PROVIDER=gemini needs the google-genai SDK, which is "
+            "not installed (install the optional dependency: "
+            "`uv sync --extra gemini`)"
+        ) from exc
+    return _GeminiClientAdapter(genai.Client(), types_module=types)
+
+
+def _get_client(client: Any = None, provider: str | None = None) -> Any:
+    """Return the given client, or build a real client for the provider.
+
+    An injected client always wins and bypasses provider selection
+    entirely — even an unknown ``LLM_PROVIDER`` value cannot break a
+    call that injects a client. One exception: a bare ``google.genai``
+    client passed as ``client=`` has ``.models`` and no ``.messages``,
+    so it is wrapped in a ``_GeminiClientAdapter`` to satisfy the
+    Anthropic-shaped ``_call_model``.
+
+    Otherwise the provider comes from ``get_provider(provider)``:
+    ``anthropic`` builds ``anthropic.Anthropic()`` (reads
+    ``ANTHROPIC_API_KEY`` itself); ``gemini`` builds a Gemini adapter
+    around ``genai.Client()`` (reads ``GEMINI_API_KEY`` /
+    ``GOOGLE_API_KEY`` itself). Both SDK imports are lazy, so
+    importing this module needs neither SDK nor any key.
     """
     if client is not None:
+        if hasattr(client, "models") and not hasattr(client, "messages"):
+            return _GeminiClientAdapter(client)
         return client
-    import anthropic
+    resolved = get_provider(provider)
+    if resolved == "anthropic":
+        import anthropic
 
-    return anthropic.Anthropic()
+        return anthropic.Anthropic()
+    return _get_gemini_client()
 
 
 def _response_text(response: Any) -> str:
@@ -226,7 +507,9 @@ def _detect_media_type(image_bytes: bytes) -> str:
     )
 
 
-def read_schematic(image_bytes: bytes, client: Any = None) -> Netlist:
+def read_schematic(
+    image_bytes: bytes, client: Any = None, provider: str | None = None
+) -> Netlist:
     """Transcribe a schematic image into a Netlist.
 
     Vision prompt asks for JSON netlist only. Invalid JSON gets one
@@ -236,7 +519,7 @@ def read_schematic(image_bytes: bytes, client: Any = None) -> Netlist:
         raise ValueError("read_schematic requires non-empty image bytes")
     image_bytes = bytes(image_bytes)
     media_type = _detect_media_type(image_bytes)
-    client = _get_client(client)
+    client = _get_client(client, provider)
     messages: list[dict[str, Any]] = [
         {
             "role": "user",
@@ -272,11 +555,11 @@ def read_schematic(image_bytes: bytes, client: Any = None) -> Netlist:
 # ---------------------------------------------------------------------------
 
 
-def design(goal: str, client: Any = None) -> Netlist:
+def design(goal: str, client: Any = None, provider: str | None = None) -> Netlist:
     """Design a circuit for a plain-English goal, returning a Netlist."""
     if not isinstance(goal, str) or not goal.strip():
         raise ValueError("design requires a non-empty goal string")
-    client = _get_client(client)
+    client = _get_client(client, provider)
     messages: list[dict[str, Any]] = [
         {
             "role": "user",
@@ -330,6 +613,7 @@ def repair(
     netlist: Netlist | dict[str, Any],
     findings: list[Finding | dict[str, Any] | str],
     client: Any = None,
+    provider: str | None = None,
 ) -> tuple[Netlist, list[str]]:
     """Repair a netlist against findings.
 
@@ -349,7 +633,7 @@ def repair(
     if not isinstance(findings, (list, tuple)) or not findings:
         raise ValueError("repair requires a non-empty list of findings")
     findings_text = "\n".join(f"- {_finding_text(f)}" for f in findings)
-    client = _get_client(client)
+    client = _get_client(client, provider)
 
     prompt = (
         "Repair this netlist so every finding below is resolved. Change "

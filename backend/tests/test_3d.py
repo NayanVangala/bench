@@ -172,3 +172,41 @@ def test_index_loads_main3d() -> None:
             "web/index.html does not reference 3d/main3d.js"
         )
     assert "3d/main3d.js" in html
+
+
+def test_index_edit_panel_hooks_match_main3d_signatures() -> None:
+    """P4 regression: the page's edit-panel hooks must match the
+    signatures main3d.js actually calls. ``onEdit`` gets
+    ``(id, updatedRow, netlist)`` but ``onRecheck`` / ``onRepair``
+    get ``(updatedRow, netlist)`` — the row carries its own id. An
+    earlier wiring passed ``(id, updated)`` for all three, so
+    ``applyEdit`` silently found no row (object id never equals a
+    string id) and the panel's Re-check / Repair buttons no-op'd
+    while Save worked."""
+    html = _index_html_or_skip()
+    assert "onRecheck: function (updated)" in html
+    assert "onRepair: function (updated)" in html
+    assert "page.applyEdit(updated.id, updated)" in html
+    assert "onRecheck: function (id, updated)" not in html
+    assert "onRepair: function (id, updated)" not in html
+
+
+def test_3d_report_lookups_are_case_insensitive() -> None:
+    """P4 regression: Report keys are not one case — ngspice
+    lowercases branch-current keys ("r1") while power keeps the
+    component id ("R1"). The 3D labels and the edit panel must look
+    values up case-insensitively, or the current line silently
+    disappears (labels showed power with no current; the panel
+    showed "—" for current)."""
+    for filename in ("overlay.js", "edit-panel.js"):
+        text = _read(THREE_D_DIR / filename)
+        assert "lookupCI" in text, f"{filename} has no case-insensitive lookup"
+        assert "toLowerCase()" in text
+    overlay = _read(THREE_D_DIR / "overlay.js")
+    assert "lookupCI(branchCurrents, id)" in overlay
+    assert "lookupCI(power, id)" in overlay
+    assert "lookupCI(currents, branchId)" in overlay
+    panel = _read(THREE_D_DIR / "edit-panel.js")
+    assert "lookupCI(report.branch_currents, component.id)" in panel
+    assert "lookupCI(report.power, component.id)" in panel
+    assert "lookupCI(report.node_voltages, component.nodes[0])" in panel

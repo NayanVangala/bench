@@ -17,6 +17,9 @@ dev = [
     "pytest",
 ]
 
+[project.optional-dependencies]
+gemini = ["google-genai"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

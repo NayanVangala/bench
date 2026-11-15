@@ -36,7 +36,9 @@
  *
  * Voltage for a component is the difference of its two node voltages
  * from the Report (V(n1) - V(n2)); the Report carries node voltages,
- * not per-component voltages.
+ * not per-component voltages. The panel labels it "Voltage across
+ * component (V(n1) − V(n2))" so it is not confused with the netlist
+ * table's first-node voltage (node_voltages[first node]).
  *
  * Callbacks:
  *   onSave(editedComponent)    — required. Save validates the inputs,
@@ -84,6 +86,22 @@ function escapeHtml(s) {
 
 function isFiniteNumber(v) {
   return typeof v === 'number' && Number.isFinite(v);
+}
+
+// Case-insensitive map lookup. Report keys are not one case: ngspice
+// lowercases branch-current keys ("r1") while power keeps the
+// component id ("R1"), and node names may be either. An exact lookup
+// alone showed "—" for current in this panel even though the Report
+// carried it (P4).
+function lookupCI(map, key) {
+  if (!map || key == null) return undefined;
+  if (map[key] != null) return map[key];
+  var want = String(key).toLowerCase();
+  var ks = Object.keys(map);
+  for (var i = 0; i < ks.length; i++) {
+    if (ks[i].toLowerCase() === want) return map[ks[i]];
+  }
+  return undefined;
 }
 
 // Format a measured number with up to 4 significant digits.
@@ -141,8 +159,8 @@ function setStatus(msg, isError) {
 // Report's node_voltages. Null when either node voltage is missing.
 function componentVoltage(component, report) {
   if (report && report.node_voltages && component.nodes) {
-    var v1 = report.node_voltages[component.nodes[0]];
-    var v2 = report.node_voltages[component.nodes[1]];
+    var v1 = lookupCI(report.node_voltages, component.nodes[0]);
+    var v2 = lookupCI(report.node_voltages, component.nodes[1]);
     if (isFiniteNumber(v1) && isFiniteNumber(v2)) return v1 - v2;
   }
   // Fallback: a voltage already carried on the component object
@@ -154,7 +172,7 @@ function componentVoltage(component, report) {
 
 function componentCurrent(component, report) {
   if (report && report.branch_currents) {
-    var i = report.branch_currents[component.id];
+    var i = lookupCI(report.branch_currents, component.id);
     if (isFiniteNumber(i)) return i;
   }
   if (isFiniteNumber(component.current)) return component.current;
@@ -163,7 +181,7 @@ function componentCurrent(component, report) {
 
 function componentPower(component, report) {
   if (report && report.power) {
-    var p = report.power[component.id];
+    var p = lookupCI(report.power, component.id);
     if (isFiniteNumber(p)) return p;
   }
   if (isFiniteNumber(component.power)) return component.power;
@@ -332,14 +350,24 @@ function renderMeasurements(component, report) {
   var fv = fmtVolts(v);
   var fi = fmtAmps(i);
   var fp = fmtWatts(p);
+  // Label the voltage explicitly as the voltage ACROSS this component,
+  // V(n1) - V(n2), with the component's actual node names, so it is
+  // never read as the netlist table's first-node voltage
+  // (node_voltages[first node]). The computed value is unchanged:
+  // componentVoltage() still returns V(nodes[0]) - V(nodes[1]).
+  var nodes = Array.isArray(component.nodes) ? component.nodes : [];
+  var n1 = nodes[0] != null ? String(nodes[0]) : 'n1';
+  var n2 = nodes[1] != null ? String(nodes[1]) : 'n2';
   box.innerHTML = '<table class="ep-measure"><tbody>' +
-    '<tr><td>Voltage</td><td>' + (fv == null ? '—' : escapeHtml(fv)) + '</td></tr>' +
+    '<tr><td>Voltage across component (V(' + escapeHtml(n1) + ') \u2212 V(' + escapeHtml(n2) + '))</td><td>' + (fv == null ? '—' : escapeHtml(fv)) + '</td></tr>' +
     '<tr><td>Current</td><td>' + (fi == null ? '—' : escapeHtml(fi)) + '</td></tr>' +
     '<tr><td>Power</td><td>' + (fp == null ? '—' : escapeHtml(fp)) + '</td></tr>' +
     '</tbody></table>' +
     '<p class="ep-hint">From the latest /check report' +
     (report.verdict ? ' (verdict: ' + escapeHtml(String(report.verdict)) + ')' : '') +
-    '. “—” means the report did not include that value for this component.</p>';
+    '. Voltage across the component is V(n1) \u2212 V(n2) (first-node voltage minus second-node voltage), ' +
+    'not the netlist table\u2019s first-node voltage. ' +
+    '“—” means the report did not include that value for this component.</p>';
 }
 
 function renderFindings(component, report) {

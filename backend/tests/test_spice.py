@@ -408,3 +408,165 @@ def test_run_ngspice_good_led_current_derived(good_led_spice: str) -> None:
     if reported is not None:
         assert abs(reported) == pytest.approx(0.015, abs=0.005)
         assert abs(reported) == pytest.approx(derived, abs=0.002)
+
+
+# --------------------------------------------------------------------------
+# parse_op_output: tabular fallback is section-gated (spice.py fix 1)
+# --------------------------------------------------------------------------
+def test_parse_op_output_tabular_outside_op_section_rejected() -> None:
+    # Two-token "word number" lines outside any operating-point section
+    # are prose / warnings, not node voltages: nothing may be invented.
+    text = (
+        "Warning: tolerance 1e-3 exceeded\n"
+        "vcc   9.000000e+00\n"
+        "something 2.5\n"
+        "error 3.3\n"
+    )
+    assert parse_op_output(text) == ({}, {})
+
+
+def test_parse_op_output_tabular_only_after_op_header() -> None:
+    # A tabular row before the header is dropped; the same row after it
+    # is a real operating-point value.
+    text = "vcc 9.0\nOperating point\nled 1.945\n"
+    voltages, currents = parse_op_output(text)
+    assert voltages == {"led": pytest.approx(1.945)}
+    assert "vcc" not in voltages
+    assert currents == {}
+
+
+def test_parse_op_output_tabular_after_node_voltage_header() -> None:
+    # Real ngspice .op tables head their columns "Node ... Voltage"
+    # (wide spacing); that header opens the section for tabular rows.
+    text = "Node   Voltage\nvcc   9.000000e+00\nled   1.945000e+00\n"
+    voltages, _ = parse_op_output(text)
+    assert voltages["vcc"] == pytest.approx(9.0, abs=0.01)
+    assert voltages["led"] == pytest.approx(1.945, abs=0.001)
+
+
+def test_parse_op_output_tabular_section_ends_after_table() -> None:
+    # Latent false-positive: once the section opened it never closed,
+    # so a tabular-shaped prose/warning line right after the table
+    # was invented as a voltage. "tolerance 1e-3" is prose, not a node.
+    text = "Operating point\nvcc 9.0\ntolerance 1e-3\n"
+    voltages, currents = parse_op_output(text)
+    assert voltages == {"vcc": pytest.approx(9.0)}
+    assert "tolerance" not in voltages
+    assert currents == {}
+
+
+def test_parse_op_output_tabular_section_ends_at_blank_line() -> None:
+    # A blank line closes the operating-point section: a tabular row
+    # after it is prose until a fresh header re-opens the section.
+    text = "Operating point\nvcc 9.0\n\nled 1.945\n"
+    voltages, _ = parse_op_output(text)
+    assert voltages == {"vcc": pytest.approx(9.0)}
+    assert "led" not in voltages
+
+
+def test_parse_op_output_tabular_section_reopens_after_new_header() -> None:
+    # Closing a section is not permanent: a new operating-point header
+    # re-opens it, including after a blank line closed the first one.
+    text = "Operating point\nvcc 9.0\n\nOperating point\nled 1.945\n"
+    voltages, _ = parse_op_output(text)
+    assert voltages["vcc"] == pytest.approx(9.0)
+    assert voltages["led"] == pytest.approx(1.945)
+
+
+# --------------------------------------------------------------------------
+# netlist_to_spice: model_line allowlist (spice.py fix 2)
+#
+# Dict-shaped components are used here: ir.Component has no
+# model / model_line fields, and netlist_to_spice accepts dicts.
+# --------------------------------------------------------------------------
+def _diode_with_model_line(model_line) -> list:
+    return [
+        {
+            "ref": "D1",
+            "kind": "D",
+            "nodes": ["a", "0"],
+            "model_line": model_line,
+        }
+    ]
+
+
+def test_netlist_to_spice_single_token_model_line_raises() -> None:
+    # Was an IndexError from str.split()[1]; must be a ValueError now.
+    with pytest.raises(ValueError):
+        netlist_to_spice(_diode_with_model_line(".model"))
+    with pytest.raises(ValueError):
+        netlist_to_spice(_diode_with_model_line("DGEN"))
+    with pytest.raises(ValueError):
+        netlist_to_spice(_diode_with_model_line(".model DGEN"))
+
+
+@pytest.mark.parametrize(
+    "bad_line",
+    [
+        # Multi-line: smuggled extra component line.
+        ".model DGEN D(IS=1e-14)\nV99 0 0 DC 999",
+        # Multi-line: smuggled control block.
+        ".control\nop\n.endc",
+        # Control statements, one line each.
+        ".end",
+        ".include /etc/passwd",
+        ".lib /tmp/evil.lib",
+        ".subckt BAD 1 2",
+        # Unsafe characters in the parameter list.
+        ".model DGEN D(IS=1e-14); rm -rf /",
+        ".model DGEN D(IS=1e-14) extra",
+        # Model name must be a safe identifier.
+        ".model D-GEN D(IS=1e-14)",
+        ".model 9GEN D(IS=1e-14)",
+    ],
+)
+def test_netlist_to_spice_model_line_injection_rejected(bad_line: str) -> None:
+    with pytest.raises(ValueError):
+        netlist_to_spice(_diode_with_model_line(bad_line))
+
+
+def test_netlist_to_spice_valid_model_line_accepted() -> None:
+    line = ".model DGEN D(IS=1e-14 N=1.0 RS=0.1 BV=100 IBV=1e-3)"
+    text = netlist_to_spice(_diode_with_model_line(line))
+    assert line in text
+    assert text.count(line) == 1
+    assert re.search(r"(?m)^D1\s+a\s+0\s+DGEN\b", text), f"no D1/DGEN line in:\n{text}"
+
+
+def test_netlist_to_spice_model_name_injection_rejected() -> None:
+    # A model name is pasted onto the component line, so it must be a
+    # single safe identifier too: no spaces, newlines, or punctuation.
+    for bad_model in ["D GEN", "DGEN\nV99 0 0 DC 9", "DGEN;op"]:
+        with pytest.raises(ValueError):
+            netlist_to_spice(
+                [{"ref": "D1", "kind": "D", "nodes": ["a", "0"], "model": bad_model}]
+            )
+
+
+# --------------------------------------------------------------------------
+# netlist_to_spice: sanitised-node collision (spice.py fix 3)
+# --------------------------------------------------------------------------
+def test_netlist_to_spice_node_collision_raises() -> None:
+    # "a-b" and "a_b" both sanitise to "a_b": silently merging them
+    # would short two different nets, so this must raise.
+    netlist = [
+        {"ref": "R1", "kind": "R", "value": 100, "nodes": ["a-b", "0"]},
+        {"ref": "R2", "kind": "R", "value": 100, "nodes": ["a_b", "0"]},
+    ]
+    with pytest.raises(ValueError, match="collide"):
+        netlist_to_spice(netlist)
+
+
+def test_netlist_to_spice_node_collision_same_spelling_ok() -> None:
+    # The same node used by two components is fine, as are case-only
+    # differences (SPICE node names are case-insensitive) and the
+    # various ground spellings, which intentionally collapse to "0".
+    netlist = [
+        {"ref": "V1", "kind": "V", "value": 9, "nodes": ["VCC", "GND"]},
+        {"ref": "R1", "kind": "R", "value": 100, "nodes": ["vcc", "a-b"]},
+        {"ref": "R2", "kind": "R", "value": 100, "nodes": ["a-b", "gnd"]},
+        {"ref": "R3", "kind": "R", "value": 100, "nodes": ["a-b", "0"]},
+    ]
+    text = netlist_to_spice(netlist)
+    assert re.search(r"(?m)^V1\s+VCC\s+0\s+DC\s+9", text)
+    assert re.search(r"(?m)^R1\s+vcc\s+a_b\s+100", text)

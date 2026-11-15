@@ -234,8 +234,19 @@ _KIND_ALIASES = {
 _GROUND_NAMES = {"0", "gnd", "ground", "gnd!"}
 
 
-def _norm_node(node) -> str:
-    """Normalise one node name; ground becomes "0"."""
+def _norm_node(node, seen=None) -> str:
+    """Normalise one node name; ground becomes "0".
+
+    ``seen`` is an optional dict (owned by the caller, one per deck)
+    mapping sanitised-lowercased node name -> the raw node spelling that
+    produced it. Sanitisation collapses distinct spellings onto one
+    SPICE name (``"a-b"`` and ``"a_b"`` both become ``"a_b"``), which
+    would silently short two different nets together; when ``seen`` is
+    given, that collision raises ``ValueError`` instead. Ground
+    spellings (``"GND"`` / ``"gnd"`` / ``"0"``) intentionally collapse
+    to ``"0"`` and are not tracked. Case-only differences (``"VCC"``
+    vs ``"vcc"``) are the same SPICE node and do not collide.
+    """
     text = str(node).strip()
     if text.lower() in _GROUND_NAMES:
         return "0"
@@ -244,6 +255,16 @@ def _norm_node(node) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_]", "_", text)
     if not cleaned:
         raise ValueError(f"empty node name in netlist (from {node!r})")
+    if seen is not None:
+        key = cleaned.lower()
+        raw = text.lower()
+        previous = seen.get(key)
+        if previous is not None and previous != raw:
+            raise ValueError(
+                f"node names {previous!r} and {text!r} collide after "
+                f"sanitisation (both become {cleaned!r}); rename one"
+            )
+        seen[key] = raw
     return cleaned
 
 
@@ -279,7 +300,7 @@ def _norm_kind(component) -> str:
     )
 
 
-def _norm_nodes(component) -> tuple:
+def _norm_nodes(component, seen=None) -> tuple:
     nodes = _get(component, "nodes", "node", "terminals", "pins", "connections")
     if nodes is None:
         n1 = _get(component, "n1", "plus", "anode", "p", "node1", "a")
@@ -292,7 +313,7 @@ def _norm_nodes(component) -> tuple:
         raise ValueError(
             f"component must have exactly 2 nodes, got {len(nodes)}: {component!r}"
         )
-    return (_norm_node(nodes[0]), _norm_node(nodes[1]))
+    return (_norm_node(nodes[0], seen), _norm_node(nodes[1], seen))
 
 
 def _components_of(netlist) -> list:
@@ -324,6 +345,66 @@ _GENERIC_DIODE_MODEL_LINE = (
     ".model DGEN D(IS=1e-14 N=1.0 RS=0.1 BV=100 IBV=1e-3)"
 )
 
+# A caller-supplied .model line is pasted into the deck, so it is
+# validated against a tight allowlist instead of used verbatim: exactly
+# one line, ".model <NAME> <TYPE>(<params>)", where NAME is a safe
+# identifier, TYPE is a single device letter, and the parameter list
+# holds only safe characters. Anything else (multi-line input, a
+# control statement such as .control/.end/.include, a missing parameter
+# list, stray punctuation) is rejected with ValueError, which the API
+# layer maps to HTTP 422.
+_MODEL_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+_MODEL_LINE_RE = re.compile(
+    r"^\.model\s+([A-Za-z][A-Za-z0-9_]*)\s+([A-Za-z])"
+    r"\s*\(\s*([A-Za-z0-9_=.\-+ ]*?)\s*\)\s*$"
+)
+
+
+def _validate_model_name(name) -> str:
+    """Validate a SPICE model name used on a component line.
+
+    Only ``[A-Za-z][A-Za-z0-9_]*`` is allowed: a name with a space,
+    newline, or punctuation could smuggle extra deck lines or tokens
+    into the component line. Raises ``ValueError`` on anything else.
+    """
+    text = str(name).strip()
+    if not _MODEL_NAME_RE.match(text):
+        raise ValueError(
+            f"invalid SPICE model name: {name!r} "
+            "(must match [A-Za-z][A-Za-z0-9_]*)"
+        )
+    return text
+
+
+def _validate_model_line(line) -> tuple:
+    """Validate a caller-supplied ``.model`` line.
+
+    Returns ``(line, model_name)`` with the line stripped. Raises
+    ``ValueError`` for a non-string, an empty line, any control
+    character (including a newline, i.e. multi-line input), or any
+    line that is not a single ``.model NAME TYPE(params)`` in the
+    allowlisted shape. In particular a single-token line such as
+    ``".model"`` raises here instead of crashing downstream with an
+    ``IndexError`` when the model name is extracted.
+    """
+    if not isinstance(line, str):
+        raise ValueError(
+            f"model_line must be a string, got {type(line).__name__}"
+        )
+    text = line.strip()
+    if not text or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in text):
+        raise ValueError(
+            "model_line must be a single line with no control "
+            f"characters, got {line!r}"
+        )
+    match = _MODEL_LINE_RE.match(text)
+    if not match:
+        raise ValueError(
+            "model_line must be a single '.model NAME TYPE(params)' "
+            f"line with safe characters only, got {line!r}"
+        )
+    return text, match.group(1)
+
 
 def netlist_to_spice(netlist) -> str:
     """Convert an IR netlist to a SPICE deck string.
@@ -341,6 +422,10 @@ def netlist_to_spice(netlist) -> str:
     seen_models: set = set()
     element_lines: list = []
     counters: dict = {}
+    # Sanitised node names seen so far (raw spelling per name): shared
+    # across components so "a-b" on one component and "a_b" on another
+    # is caught as a collision instead of silently shorting the nets.
+    seen_nodes: dict = {}
 
     def _emit_model(line: str) -> None:
         if line not in seen_models:
@@ -349,7 +434,7 @@ def netlist_to_spice(netlist) -> str:
 
     for component in components:
         kind = _norm_kind(component)
-        n1, n2 = _norm_nodes(component)
+        n1, n2 = _norm_nodes(component, seen_nodes)
         ref = _get(component, "ref", "name", "id", "designator")
         letter = "D" if kind in ("D", "LED") else kind
         if ref is None or str(ref).strip() == "":
@@ -379,10 +464,15 @@ def netlist_to_spice(netlist) -> str:
             model = _get(component, "model", "model_name")
             model_line = _get(component, "model_line")
             if model_line:
-                _emit_model(str(model_line).strip())
-                model = model or str(model_line).split()[1]
-            elif model:
-                model = str(model).strip()
+                # Validated, never used verbatim: a bad line raises
+                # ValueError here instead of injecting deck lines (and a
+                # single-token line no longer crashes with IndexError).
+                line, line_model = _validate_model_line(model_line)
+                _emit_model(line)
+                if not model:
+                    model = line_model
+            if model:
+                model = _validate_model_name(model)
             elif kind == "LED":
                 color = _get(component, "color", "colour") or "red"
                 model = _parts_model_name(str(color))
@@ -442,10 +532,12 @@ _NUMBER = r"([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)"
 #   vcc = 9.0                    (bare "name = value" assignment)
 # The separator between a name and its value is optional: real ngspice
 # output uses "=", compact/sample output sometimes omits it entirely.
-# Tabular rows ("vcc   9.000000e+00") are accepted anywhere, not only
-# after an "Operating point" header: real ngspice .op tables head their
-# columns "Node ... Voltage" (wide spacing, no literal "node voltage"
-# substring), and some sample outputs carry no header at all.
+# Tabular rows ("vcc   9.000000e+00") are only accepted inside an
+# operating-point section (parse_op_output gates them on the
+# "Operating point" / "Node ... Voltage" header): real ngspice .op
+# tables head their columns "Node ... Voltage" (wide spacing), so the
+# header is present in real output, and accepting the rows anywhere
+# would invent voltages from stray prose or warning lines.
 _NUMBER = r"([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)"
 _SEP = r"\s*[:=]?\s*"
 _VOLT_RE = re.compile(rf"^\s*v\(\s*([^)\s]+)\s*\){_SEP}{_NUMBER}", re.IGNORECASE)
@@ -463,8 +555,18 @@ _BARE_RE = re.compile(
     re.IGNORECASE,
 )
 # Tabular fallback: "vcc   9.000000e+00" (optional trailing unit).
+# Only accepted inside an operating-point section (see parse_op_output):
+# outside one, a two-token "word number" line is just prose or a
+# warning, and inventing a node voltage from it would be wrong.
+# The value must carry a decimal point: real ngspice prints voltages
+# as "9.000000e+00" / "1.945", while prose and option lines use bare
+# integers or point-free exponents ("tolerance 1e-3", "maxiter 100").
+# The other forms keep the general _NUMBER: they carry an explicit
+# separator or v(...)/i(...) wrapper, so they are already strong
+# evidence and may legitimately hold integer values.
+_TABULAR_NUMBER = r"([-+]?(?:\d+\.\d*|\.\d+)(?:[eE][-+]?\d+)?)"
 _TABULAR_RE = re.compile(
-    rf"^\s*([A-Za-z][A-Za-z0-9_.\-]*)\s+{_NUMBER}"
+    rf"^\s*([A-Za-z][A-Za-z0-9_.\-]*)\s+{_TABULAR_NUMBER}"
     r"(?:\s+[A-Za-z%]+)?\s*$"
 )
 _OP_SECTION_RE = re.compile(
@@ -491,7 +593,19 @@ def parse_op_output(text):
     omitted. Handles ``v(n1) = ...``, ``i(v1) = ...``,
     ``v1#branch = ...``, bare ``vcc = 9.0`` assignments, and tabular
     ``n1  9.0`` rows, in spaced or compact form, with ``=``, ``:``, or
-    no separator at all. Unparseable / empty text yields ``({}, {})``.
+    no separator at all. Tabular rows are only accepted inside an
+    operating-point section (a line matching ``operating point``,
+    ``node voltage``, or ``dc operating``); a two-token prose or
+    warning line outside such a section (e.g. ``"tolerance 1e-3"``)
+    must never become a node voltage. The section also ends once it
+    has started: after at least one tabular row was accepted, a blank
+    line, a new section header, or a line matching no value pattern
+    closes it, so tabular-shaped prose after the table is not
+    invented as a voltage either. A new operating-point header
+    re-opens a section. Tabular values must carry a decimal point
+    (real ngspice prints ``9.000000e+00``); point-free numbers such
+    as ``1e-3`` read as prose/option values, not voltages.
+    Unparseable / empty text yields ``({}, {})``.
     """
     node_voltages: dict = {}
     branch_currents: dict = {}
@@ -499,9 +613,12 @@ def parse_op_output(text):
         return node_voltages, branch_currents
 
     in_op_section = False
+    tabular_accepted = False
     for line in str(text).splitlines():
-        if _OP_SECTION_RE.search(line):
+        is_section_header = bool(_OP_SECTION_RE.search(line))
+        if is_section_header:
             in_op_section = True
+            tabular_accepted = False
 
         match = _VOLT_RE.match(line)
         if match:
@@ -531,15 +648,30 @@ def parse_op_output(text):
                 node_voltages[name] = float(match.group(2))
             continue
 
-        # Tabular "node value" rows. Accepted anywhere, not only inside
-        # an operating-point section (see the regex comment above); the
-        # two-token shape plus the header-word / ground exclusions keep
-        # stray prose lines such as "nothing useful here" out.
+        # Tabular "node value" rows, but ONLY inside an operating-point
+        # section: real ngspice .op tables head their columns "Node ...
+        # Voltage" (wide spacing), which sets in_op_section above, and
+        # some sample outputs carry an "Operating point" header. Outside
+        # such a section a two-token line is prose or a warning (e.g.
+        # "tolerance 1e-3"), and the header-word / ground exclusions
+        # alone cannot keep it out.
         match = _TABULAR_RE.match(line)
         if match:
-            name = match.group(1).strip().lower()
-            if name not in _HEADER_WORDS and not _is_ground(name):
-                node_voltages[name] = float(match.group(2))
+            if in_op_section:
+                name = match.group(1).strip().lower()
+                if name not in _HEADER_WORDS and not _is_ground(name):
+                    node_voltages[name] = float(match.group(2))
+                    tabular_accepted = True
+            continue
+
+        # Line matched no value pattern: a blank line, a new section
+        # header, or prose/a warning. If a table was open, it ends
+        # here; tabular-shaped lines after this point need a fresh
+        # operating-point header to be accepted. (A section header
+        # itself re-opens the section above, so it never closes one.)
+        if tabular_accepted and not is_section_header:
+            in_op_section = False
+            tabular_accepted = False
 
     return node_voltages, branch_currents
 

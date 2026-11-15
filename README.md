@@ -13,14 +13,25 @@ a circuit passes.
 ## How it works
 
 1. You submit a circuit (netlist / component list) through the API or web UI.
-2. Netproof builds a SPICE netlist and runs a DC operating-point simulation
-   with ngspice.
+2. Netproof builds a SPICE netlist and, unless the pre-simulation checks
+   already contain a STOP finding, runs a DC operating-point simulation
+   with ngspice. When a pre-sim STOP exists, simulation is skipped and
+   the report is built from the static-check findings alone
+   (`_verify_netlist` in `backend/netproof/server.py`, `analyze` in
+   `backend/netproof/pipeline.py`).
 3. The simulation results are checked against the rule list below.
 4. You get a verdict — **PASS**, **WARN**, or **STOP** — plus the specific
-   rule(s) that fired and, on a STOP, a proposed repair. A repair is only
-   accepted if the repaired circuit re-simulates clean. The verdict is
-   derived from the findings: any STOP finding means STOP, otherwise any
-   WARN finding means WARN, otherwise PASS.
+   rule(s) that fired and, on a STOP, a proposed repair. A repair is
+   re-simulated and re-checked, but a repair is not "accepted" just
+   because verification ran: `/repair` is a single repair round and
+   returns `verified=true` whenever verification runs, even if the
+   repaired circuit still verdicts STOP (`verified=false` only when
+   verification itself errors). The pipeline's `repair_loop` runs up
+   to 3 rounds and returns the best report it got, even if that report
+   is still STOP. Only a PASS verdict means the repaired circuit
+   re-simulated clean. The verdict is derived from the findings: any
+   STOP finding means STOP, otherwise any WARN finding means WARN,
+   otherwise PASS.
 
 ## Rules
 
@@ -49,26 +60,45 @@ the rest are static checks that run even without one.
 
 Prerequisites: [Homebrew](https://brew.sh) (macOS) or your distro's package
 manager (Debian/Ubuntu: `apt install ngspice`), [uv](https://docs.astral.sh/uv/),
-and an Anthropic API key. Run from the repo root, where `pyproject.toml` lives.
+and a Gemini API key for LLM features only (explanations, design, and
+repair proposals; Gemini is the default provider, Anthropic works too
+with `LLM_PROVIDER=anthropic`). The key is not needed to start the server or to run
+simulation-only checks: the server's startup check looks only for
+`ngspice` on PATH, and the LLM SDKs are imported lazily inside
+`backend/netproof/llm.py`, so `/check` works with no key set.
+
+Run from `backend/` (where the `netproof` package lives), or from the repo
+root with `PYTHONPATH=backend`. Running `uv run uvicorn
+netproof.server:app` from the repo root may work only after `uv sync`
+has installed the package (see `pyproject.toml`: hatchling
+force-includes `backend/netproof` as `netproof`); the supported form is
+the `backend/` one, as in `backend/netproof/server.py` and
+`scripts/demo.sh`.
 
 ```bash
 # 1. Install the simulator
 brew install ngspice
 
-# 2. Install dependencies
+# 2. Install dependencies (from the repo root, where pyproject.toml lives)
 uv sync
 
 # 3. Check the install
 which ngspice
 uv run pytest
 
-# 4. Set your API key
-export ANTHROPIC_API_KEY=sk-ant-...
+# 4. Set your API key (only needed for LLM features, not to start
+#    the server or to run /check). Gemini is the default provider;
+#    use ANTHROPIC_API_KEY with LLM_PROVIDER=anthropic instead.
+export GEMINI_API_KEY=...
 
-# 5. Start the server (backend/netproof/server.py exists; it serves
-#    the API and the web UI on the same origin)
+# 5. Start the server (from backend/, so the netproof package is
+#    importable; it serves the API and the web UI on the same origin)
+cd backend
 uv run uvicorn netproof.server:app --reload
 ```
+
+From the repo root instead: `PYTHONPATH=backend uv run uvicorn
+netproof.server:app --reload` (this is what `scripts/demo.sh` does).
 
 The server refuses to start without `ngspice` on PATH (its startup
 check raises `RuntimeError` with install instructions), unless a fake
@@ -82,7 +112,9 @@ Environment variables:
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `ANTHROPIC_API_KEY` | Yes for LLM features | Anthropic API key, used for circuit explanations and repair proposals. The simulator, not the model, decides the verdict. The `/check` verdict path makes no LLM call, so simulation-only checks do not need the key. |
+| `GEMINI_API_KEY` | No, to start the server or run `/check`; yes for LLM features (default provider) | Gemini API key, used for circuit explanations and repair proposals. The simulator, not the model, decides the verdict. The `/check` verdict path makes no LLM call, so simulation-only checks do not need the key. Set only one Gemini key: `google-genai` 3.3.0 prefers `GOOGLE_API_KEY` over `GEMINI_API_KEY` when both are set. |
+| `ANTHROPIC_API_KEY` | No, to start the server or run `/check`; yes for LLM features when `LLM_PROVIDER=anthropic` | Anthropic API key (fallback provider), used for circuit explanations and repair proposals. The simulator, not the model, decides the verdict. The `/check` verdict path makes no LLM call, so simulation-only checks do not need the key. |
+| `LLM_PROVIDER` | No (default `gemini`) | `gemini` or `anthropic` (case-insensitive). With `gemini`, the Gemini SDK reads the key from the environment itself (`GEMINI_API_KEY`, or `GOOGLE_API_KEY` as fallback; if both are set the SDK prefers `GOOGLE_API_KEY`, so set only one key) and uses model `gemini-4-argon` (override with `GEMINI_MODEL`); `google-genai` is an optional dependency (`uv sync --extra gemini`). `llm.py` never reads the key value. |
 
 ## Demo script
 
@@ -95,14 +127,21 @@ The canonical demo is a 9 V LED circuit with an undersized series resistor
    current) lets about (9 − 2.34) V / 100 Ω ≈ 67 mA flow, over the
    30 mA STOP line, with R1 dissipating about 0.44 W, over its
    0.25 W rating.
-2. **STOP.** Netproof simulates it and reports `LED_OVERCURRENT` — the LED
-   would burn out. The verdict comes from the simulation, not from the
-   model's opinion.
-3. **Repair.** Netproof proposes a correctly sized series resistor: 470 Ω,
-   which lets about (9 − 2) V / 470 Ω ≈ 15 mA flow (14.9 mA simulated,
-   Vf ≈ 2.00 V at that current).
+2. **STOP.** Netproof simulates it and reports two STOP findings:
+   `LED_OVERCURRENT` — the LED would burn out — and `RESISTOR_POWER`
+   (R1 dissipates about 0.44 W, over its 0.25 W rating). The verdict
+   comes from the simulation, not from the model's opinion.
+3. **Repair.** Netproof asks the LLM for a correctly sized series
+   resistor. It may propose 470 Ω or a similar value; 470 Ω is not a
+   guaranteed repair outcome, it is the value in the `good_led.json`
+   fixture (`backend/tests/fixtures/good_led.json`), which lets about
+   (9 − 2) V / 470 Ω ≈ 15 mA flow (14.9 mA simulated, Vf ≈ 2.00 V at
+   that current).
 4. **Re-simulate.** The repaired circuit is simulated again.
-5. **PASS.** No rules fire. The circuit is safe to build.
+5. **PASS.** If the proposed repair re-simulates clean, no rules fire
+   and the circuit is safe to build. A repair is not guaranteed: if
+   the proposed repair still STOPs, the verdict stays STOP (see
+   "How it works" above).
 
 ## Project layout
 
@@ -110,9 +149,15 @@ The canonical demo is a 9 V LED circuit with an undersized series resistor
 netproof/
 ├── README.md            # This file
 ├── pyproject.toml       # uv project root: dependencies, pytest config
+├── docs/
+│   └── demo-image.md    # How to make the real demo schematic image
+├── scripts/
+│   └── demo.sh          # Demo walkthrough: starts the server
 ├── backend/
 │   ├── netproof/        # Python package: ir, spice (ngspice), rules,
-│   │                    # parts, bom, llm, pipeline, server
+│   │                    # parts, bom, llm, pipeline, server, plus
+│   │                    # __init__.py (re-exports Netlist, Component,
+│   │                    # Finding, Report)
 │   └── tests/           # conftest.py, test_server.py, test_pipeline.py,
 │                        # test_spice.py, test_rules.py, test_llm.py,
 │                        # test_consensus.py, test_bom.py, test_3d.py,
@@ -141,21 +186,48 @@ directly.
 - **Library:** Three.js 0.160.0 via CDN
   (`https://unpkg.com/three@0.160.0/build/three.module.js`, plus
   `OrbitControls` from the same version). No build step.
-- **Navigate:** left-drag orbits, right-drag pans, scroll wheel zooms
+- **Navigate:** left-drag on empty space orbits, right-drag pans, scroll wheel zooms
   (`OrbitControls`, damping on). Touch: one finger rotates, two fingers
-  zoom/pan.
+  zoom/pan. Left-drag on a component moves that component instead of
+  orbiting (see Drag below).
 - **Click:** clicking a component selects it (raycast pick; a pointer
-  release only counts as a click if it moved 5 px or less, so an orbit
+  release only counts as a click if it moved 6 px or less
+  (`CLICK_THRESHOLD_PX = 6` in `web/3d/interaction.js`), so an orbit
   drag never selects by accident). Clicking empty space clears the
-  selection. The host page gets the pick through an `onPick` callback.
-- **Drag:** dragging orbits the camera; it does not move components.
-- **Edit:** double-click is the edit gesture: it opens the edit panel
+  selection. The host page receives the pick through the
+  `setupInteraction` `onSelect` callback. That is the live path:
+  `main3d.js` calls `createScene(element)` with no `onPick`, so
+  `scene.js`'s `onPick` callback is never wired (its own pointer-up
+  handler still runs a 5 px `pickAt` that only scales the picked mesh
+  in place; it does not notify the page).
+- **Drag:** dragging a component moves that component's mesh on the
+  ground plane (`interaction.js` moves the mesh on y = 0 and shifts
+  its node anchors / wire hooks with it); it never changes the
+  netlist, the simulation, or the verdict. Only empty-space drag
+  orbits the camera (`interaction.js` returns early when the press
+  hit no component, so `OrbitControls` handles it). A drag reports
+  positions through `onMove`, which is layout-only: `main3d.js`
+  forwards it to the page and deliberately does not call
+  `onNetlistChange`, and the page's `onMove` hook is a no-op.
+- **Edit:** double-click is the edit gesture: `interaction.js` fires
+  `onEdit` on double-click and `main3d.js` opens the edit panel
   (`web/3d/edit-panel.js`), where its value, power rating, and (for LEDs)
-  colour can be changed. Saving posts the edited netlist to `/check`
-  (or `/repair`) and re-simulates; the panel itself never computes a
-  verdict. The wiring exists end to end: `interaction.js` fires `onEdit`
-  on double-click, `main3d.js` opens the edit panel, and the host page's
-  `onEdit` callback applies the patch and re-checks.
+  colour can be changed. All three panel buttons re-simulate through
+  the page: Save applies the edit and POSTs `/check`, Re-check does
+  the same, and Repair applies the edit and POSTs `/repair`. The page
+  supplies all three hooks (`onEdit`, `onRecheck`, `onRepair`) to
+  `init3D`; without them the panel disables the Re-check / Repair
+  buttons. Signature trap, pinned by
+  `backend/tests/test_3d.py::test_index_edit_panel_hooks_match_main3d_signatures`:
+  `onEdit` gets `(id, updatedRow, netlist)` but `onRecheck` /
+  `onRepair` get `(updatedRow, netlist)` — the row carries its own
+  id. Passing `(id, updated)` for those two silently no-ops
+  (`applyEdit` finds no row for an object id). The panel's
+  measurements and the 3D labels look Report values up
+  case-insensitively (`lookupCI` in `edit-panel.js` / `overlay.js`):
+  ngspice lowercases branch-current keys (`"r1"`) while power keeps
+  the component id (`"R1"`), so an exact lookup showed "—" for
+  current in the panel and power with no current on the labels.
 - **Numbers come from ngspice only.** The 3D view holds no simulation
   numbers of its own. Mesh colours come only from the verdict values
   passed in by the host page, which must come from a real `/check` run
@@ -171,9 +243,16 @@ the failure instead of an error). All seven `web/3d/*.js` modules exist
 (`main3d.js`, `scene.js`, `components.js`, `interaction.js`,
 `overlay.js`, `edit-panel.js`, `history.js`). The server serves the
 whole `web/` directory same-origin (static mount after the API routes),
-so the `./3d/main3d.js` import resolves instead of 404ing. Live
-in-browser rendering is not covered by the backend test suite; the
-tests cover serving the files, not running them.
+so the `./3d/main3d.js` import resolves instead of 404ing. Test
+coverage is thin and uneven: only `main3d.js` has an HTTP serving test
+(`test_server.py::test_3d_main_script_served_as_javascript` GETs
+`/3d/main3d.js` and checks for a 200, a JavaScript content type, and
+`init3D` in the body). The other six modules are covered only by
+`backend/tests/test_3d.py`, which checks on disk that each file exists,
+is non-empty, and contains its key function name as a string — no JS
+is executed and no module is imported. Live in-browser rendering is
+not covered by the backend test suite; the tests cover serving the
+files, not running them.
 
 ## Known limits
 
@@ -181,10 +260,40 @@ tests cover serving the files, not running them.
   and serves the API plus the web UI, but its startup check refuses to
   start without the `ngspice` binary on PATH (tests inject a fake
   simulator instead, so they run without it).
-- **3D view is wired in but not browser-verified here.** `web/index.html`
-  loads `./3d/main3d.js` and the server serves it, but no backend test
-  runs the 3D code in a browser, so a rendering failure would surface
-  only in the `#scene3d` fallback text, not in the test suite.
+- **3D view is wired in and browser-verified in P4 (fake simulator).**
+  `web/index.html` loads `./3d/main3d.js` and the server serves it; P4
+  ran the page in headless Chromium against an analytic fake simulator
+  (no ngspice in that VM): the 3D canvas renders, colours follow the
+  verdict, click-select works both ways (3D → table row, table row →
+  3D), the edit panel's Save / Re-check / Repair all re-simulate, and
+  labels show voltage, current and power from the Report. What P4 did
+  NOT prove: the same against real ngspice, against the real unpkg
+  CDN (Chromium in that VM cannot reach it; three.js was served
+  locally via route interception), or with a real LLM key. Those need
+  a Mac with network.
+- **Real Repair to PASS needs a Mac with a working LLM key.** The
+  default provider is Gemini (`LLM_PROVIDER=gemini`,
+  model `gemini-4-argon`, key `GEMINI_API_KEY` or `GOOGLE_API_KEY`;
+  Anthropic is the fallback with `LLM_PROVIDER=anthropic`). As of
+  2026-11-15 the Gemini keys on hand both return `API_KEY_INVALID`
+  and the account that issued them looks shut down, so LLM paths
+  (`/run-image`, `/run-goal`, Repair) fail loudly until a new Gemini
+  key is sorted, or `LLM_PROVIDER=anthropic` with a working Anthropic
+  key is used. `/check`, both downloads, and the 3D view need no key.
+  P4 verified the full STOP → Repair → PASS loop end to end in the
+  browser with a deterministic repair stub standing in for the LLM
+  (100 Ω → 470 Ω) and the analytic fake simulator; the LLM's own
+  repair judgement is the unproven part, not the endpoint or the
+  re-simulation.
+- **CDN dependencies fall back, they do not fail the page.** Three.js
+  comes from unpkg and the IBM Plex fonts from Google Fonts. On a
+  network that cannot reach them the 3D view shows its fallback text
+  and the page uses system fonts; the flat page, `/check`, and the
+  downloads keep working.
+- **Example picker covers 4 of the 11 fixtures** (good LED, LED
+  overcurrent, resistor warn, shorted source). The other 7 fixtures
+  exist only as `backend/tests/fixtures/*.json` and are exercised
+  through `/check` directly, not through the picker.
 - **DC operating point only.** Netproof runs a DC operating-point
   simulation. It does not do transient analysis or AC analysis, so it
   cannot check anything that depends on time, switching, or frequency

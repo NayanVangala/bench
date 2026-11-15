@@ -57,6 +57,7 @@ export const SEVERITY_COLORS = {
   WARN: '#d97706', // amber
   PASS: '#1a7f37', // green
   INFO: '#667085', // grey (never used for tinting; INFO never colours a part)
+  UNKNOWN: '#8b949e', // grey, matches scene.js VERDICT_COLORS.UNKNOWN
 };
 
 const SEVERITY_RANK = { STOP: 0, WARN: 1, INFO: 2 };
@@ -120,6 +121,34 @@ function fmtWatts(p) {
   if (a >= 1) return p.toFixed(2) + ' W';
   if (a >= 1e-3) return (p * 1e3).toFixed(1) + ' mW';
   return (p * 1e6).toFixed(1) + ' uW';
+}
+
+// Case-insensitive map lookup. Report keys are not one case: ngspice
+// lowercases branch-current keys ("r1") while power keeps the
+// component id ("R1"), and node names may be either. An exact lookup
+// alone drops the current line (and, for uppercase nodes, the voltage
+// line) — see P4: the edit panel showed "—" for current and the 3D
+// labels showed power with no current until this landed.
+function lookupCI(map, key) {
+  if (!map || key == null) return undefined;
+  if (map[key] != null) return map[key];
+  const want = String(key).toLowerCase();
+  for (const k of Object.keys(map)) {
+    if (k.toLowerCase() === want) return map[k];
+  }
+  return undefined;
+}
+
+// Same, but returns the map's own key (for the flow-dot wiring, where
+// the flows map is keyed by the wire id, not the Report's key).
+function findKeyCI(map, key) {
+  if (!map || key == null) return undefined;
+  if (Object.prototype.hasOwnProperty.call(map, key)) return key;
+  const want = String(key).toLowerCase();
+  for (const k of Object.keys(map)) {
+    if (k.toLowerCase() === want) return k;
+  }
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -212,11 +241,42 @@ function injectLabelStyles() {
 // ---------------------------------------------------------------------------
 
 /**
- * Worst finding severity touching a component, from finding.component_ids.
- * Returns 'STOP' | 'WARN' | null (null = no finding touches it -> PASS).
- * Findings with no component_ids (e.g. NO_GROUND) colour no component.
+ * True when a finding names no component (a global finding such as
+ * NO_GROUND) and is severe enough to block a PASS claim for any part.
+ * Such a finding colours no component, so no untouched component may
+ * be shown green on its account.
  */
-export function severityForComponent(componentId, findings) {
+function hasGlobalSevereFinding(findings) {
+  for (const f of findings || []) {
+    if (!f || typeof f !== 'object') continue;
+    const sev = String(f.severity || f.level || '').toUpperCase();
+    if (sev !== 'STOP' && sev !== 'WARN') continue;
+    let ids = f.component_ids ?? f.componentIds ?? null;
+    let list;
+    if (Array.isArray(ids)) list = ids;
+    else if (typeof ids === 'string') list = [ids];
+    else if (f.component) list = [f.component];
+    else if (f.id) list = [f.id];
+    else list = [];
+    if (!list.length) return true;
+  }
+  return false;
+}
+
+/**
+ * Worst finding severity touching a component, from finding.component_ids.
+ * Returns 'STOP' | 'WARN' when a finding touches it.
+ * Returns null when no finding touches it AND no overall verdict was
+ * supplied: null means "unknown, not PASS" — the caller must resolve it
+ * against the backend verdict, never assume green.
+ * With an overall verdict supplied (third argument, the Report's
+ * verdict), an untouched component resolves to 'PASS' only when the
+ * overall verdict is PASS and no severe global finding (e.g. NO_GROUND,
+ * which names no component) blocks that claim; otherwise 'UNKNOWN'.
+ * Findings with no component_ids (e.g. NO_GROUND) colour no component.
+ * INFO findings never change a component's colour.
+ */
+export function severityForComponent(componentId, findings, overallVerdict) {
   let worst = null;
   for (const f of findings || []) {
     if (!f || typeof f !== 'object') continue;
@@ -229,7 +289,11 @@ export function severityForComponent(componentId, findings) {
     if (sev === 'WARN' && worst !== 'STOP') worst = 'WARN';
     // INFO findings never change a component's colour.
   }
-  return worst;
+  if (worst) return worst;
+  if (overallVerdict === undefined || overallVerdict === null) return null;
+  const verdict = String(overallVerdict).trim().toUpperCase();
+  if (verdict === 'PASS' && !hasGlobalSevereFinding(findings)) return 'PASS';
+  return 'UNKNOWN';
 }
 
 function storeOriginalMaterial(mat) {
@@ -347,14 +411,14 @@ function buildLabelLines(id, nodes, nodeVoltages, branchCurrents, power) {
   const lines = [];
   const voltParts = [];
   for (const node of nodes || []) {
-    const v = nodeVoltages[node];
+    const v = lookupCI(nodeVoltages, node);
     if (isNum(v)) voltParts.push(node + ' ' + fmtVolts(v));
   }
   if (voltParts.length) lines.push(voltParts.join(' · '));
   const ipParts = [];
-  const i = branchCurrents[id];
+  const i = lookupCI(branchCurrents, id);
   if (isNum(i)) ipParts.push(fmtAmps(i));
-  const p = power[id];
+  const p = lookupCI(power, id);
   if (isNum(p)) ipParts.push(fmtWatts(p));
   if (ipParts.length) lines.push(ipParts.join(' · '));
   return lines;
@@ -409,8 +473,14 @@ export function updateOverlays(report, meshesById, extra) {
     if (!mesh) continue;
     seen.add(id);
 
-    // Colour: worst finding touching this component, else PASS green.
-    const sev = severityForComponent(id, findings) || 'PASS';
+    // Colour: worst finding touching this component. An untouched
+    // component is PASS green only when the backend verdict is PASS
+    // overall and no severe global finding (e.g. NO_GROUND, which
+    // names no component) blocks that claim; otherwise it is UNKNOWN
+    // grey, like scene.js — the 3D view never infers a PASS itself.
+    // A null from severityForComponent (no verdict supplied) also
+    // resolves to UNKNOWN, never to green.
+    const sev = severityForComponent(id, findings, report.verdict) || 'UNKNOWN';
     const color = SEVERITY_COLORS[sev];
     tintMesh(mesh, color);
 
@@ -554,12 +624,16 @@ export function animateFlow(deltaTime, branchCurrents) {
   const currents = branchCurrents || {};
 
   // Lazily build dot pools for wired branches that now carry current.
-  for (const branchId of Object.keys(currents)) {
-    if (!flows.has(branchId) && wiresById[branchId]) ensureFlow(branchId);
+  // Branch-current keys are lowercase ("r1") while wire ids keep the
+  // component id ("R1"): resolve the wire id case-insensitively, or
+  // no flow is ever built (P4).
+  for (const key of Object.keys(currents)) {
+    const wireId = findKeyCI(wiresById, key) || key;
+    if (!flows.has(wireId) && wiresById[wireId]) ensureFlow(wireId);
   }
 
   for (const [branchId, flow] of flows) {
-    const i = currents[branchId];
+    const i = lookupCI(currents, branchId);
     const active = isNum(i) && i !== 0;
     for (const dot of flow.dots) dot.visible = active;
     if (!active) continue;

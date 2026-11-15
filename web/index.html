@@ -96,14 +96,18 @@
   error. Import map: 'three' maps to the unpkg three@0.160.0 URL.
   Entry point: init3D(container, callbacks, options), also the default
   export. Callbacks: onSelect(id, component), onEdit(id, updatedRow,
-  netlist), onNetlistChange(netlist), onMove(id, pose) (layout-only),
+  netlist) (applies the edit AND re-checks via POST /check),
+  onRecheck(updatedRow, netlist) (same as onEdit: apply + /check),
+  onRepair(updatedRow, netlist) (apply + POST /repair),
+  onNetlistChange(netlist), onMove(id, pose) (layout-only),
   onError(error), editOnSelect: false (the page handles selection/editing
   itself in the table). Options carries the initial {netlist, report,
   history}. Handle methods the page calls: setNetlist(netlist, report),
   updateReport(report), renderHistory(history), select(id),
   clearSelection(), dispose().
   Page side of the bridge (exposed as window.NetproofPage): getNetlist,
-  getReport, selectComponent, applyEdit, applyNetlist, getRepairHistory.
+  getReport, selectComponent, applyEdit, applyNetlist, getRepairHistory,
+  recheck, repair.
   Accessibility split with P2: web/3d/interaction.js owns keyboard
   handling once the 3D canvas has focus, and web/3d/edit-panel.js owns
   the edit panel dialog (role="dialog", focus in on open, Escape to
@@ -1102,9 +1106,13 @@
         if (input) { input.focus(); input.select(); }
       }
     }
-    if (!opts.fromTable && threeD && typeof threeD.select === 'function') {
+    // Mirror the selection into 3D whatever its origin (table row,
+    // keyboard cycle, or 3D click). The 3D select() is a no-op when
+    // the id is already selected (interaction.js same-id guard), so
+    // the 3D -> page -> 3D round-trip through onSelect terminates.
+    if (threeD && typeof threeD.select === 'function') {
       try { threeD.select(selectedId); } catch (e) { /* 3D highlight is best-effort */ }
-    } else if (!opts.fromTable && threeDModule && typeof threeDModule.select === 'function') {
+    } else if (threeDModule && typeof threeDModule.select === 'function') {
       try { threeDModule.select(selectedId); } catch (e) { /* best-effort */ }
     }
     if (selectedId) logLine('system', 'Selected component: ' + selectedId, 'info');
@@ -1192,7 +1200,9 @@
     getRepairHistory: function () { return repairHistory.slice(); },
     selectComponent: selectComponent,
     applyEdit: applyEdit,
-    applyNetlist: applyNetlist
+    applyNetlist: applyNetlist,
+    recheck: recheck,
+    repair: repair
   };
 
   // ---- Theme toggle (persisted) ----
@@ -1293,7 +1303,10 @@
   // #scene3d fallback text, never in the red error banner.
   // Real API (read from web/3d/main3d.js): init3D(container, callbacks,
   // options). Callbacks: onSelect(id, component), onEdit(id, updatedRow,
-  // netlist), onNetlistChange(netlist), onMove(id, pose) (layout-only:
+  // netlist) (apply the edit, then re-check via POST /check),
+  // onRecheck(updatedRow, netlist) (same: apply + /check),
+  // onRepair(updatedRow, netlist) (apply + POST /repair),
+  // onNetlistChange(netlist), onMove(id, pose) (layout-only:
   // dragging a mesh never changes nodes/value), onError(error),
   // editOnSelect (default true; false here because the page handles
   // selection/editing itself in the table, per main3d.js's docstring).
@@ -1318,7 +1331,17 @@
       getNetlist: page.getNetlist,
       getReport: page.getReport,
       onSelect: function (id) { page.selectComponent(id, { from3D: true }); },
-      onEdit: function (id, updated) { return page.applyEdit(id, updated); },
+      // Edit-panel Save: apply the edit, then re-check (POST /check).
+      // Re-check button: same path. Repair button: apply, then /repair.
+      // main3d.js only passes onRecheck / onRepair to the panel when
+      // the page supplies them, so supplying them here is what enables
+      // those two buttons; without them the panel disables both.
+      // Signature note: onEdit gets (id, updatedRow, netlist), but
+      // onRecheck / onRepair get (updatedRow, netlist) — the row
+      // carries its own id (main3d.js docstring).
+      onEdit: function (id, updated) { if (page.applyEdit(id, updated)) { page.recheck(); } },
+      onRecheck: function (updated) { if (page.applyEdit(updated.id, updated)) { page.recheck(); } },
+      onRepair: function (updated) { if (page.applyEdit(updated.id, updated)) { page.repair(); } },
       onNetlistChange: function (list) { page.applyNetlist(list); },
       onMove: function (id, pose) { /* layout-only drag; never changes the netlist or verdict */ },
       onError: function (err) {

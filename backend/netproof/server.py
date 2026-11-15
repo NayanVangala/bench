@@ -27,15 +27,28 @@ modules, whose real APIs this file is written against (read 2026-11-15)::
                 -> ``(repaired_netlist, reasons)``. ``repair`` REQUIRES a
                 non-empty findings list and raises ValueError loudly on
                 bad replies; there is never a silent fallback. Only real
-                calls (``client=None``) need the Anthropic SDK + key.
+                calls (``client=None``) need the selected provider's SDK
+                + key (google-genai + ``GEMINI_API_KEY`` by default;
+                Anthropic SDK + ``ANTHROPIC_API_KEY`` for the fallback).
     bom.py    - ``netlist_to_bom_csv(netlist) -> str`` (header
                 ``id,type,value,rating,qty``; groups by type+value).
     parts.py  - part limits table (used by rules/spice, not by the server).
-    pipeline.py - Exists (landed mid-task) but the server does NOT depend
-                on it: ``/check`` composes ``spice`` + ``rules`` directly,
-                and the streaming endpoints compose ``llm`` + the same
-                check. Delegating to pipeline later is optional, not
-                required; the server keeps working unchanged either way.
+    pipeline.py - The streaming endpoints delegate to it (see
+                ``_run_stream``): ``/run-image`` runs
+                ``pipeline.run_image`` (3 parallel schematic reads,
+                >= 2/3 consensus, then verify + repair while STOP)
+                and ``/run-goal`` runs ``pipeline.run_goal``
+                (best-of-3 design, each candidate simulated, then
+                repair while STOP). The server NEVER makes its own
+                ``llm.read_schematic`` / ``llm.design`` call on those
+                paths: a single read / single design would bypass the
+                consensus and best-of-3 trust checks, so the pipeline
+                is the one real path. ``/check`` still composes
+                ``spice`` + ``rules`` directly (no LLM, ever) and
+                ``/repair`` is one frontend-driven repair round;
+                both are equivalent to ``pipeline.analyze`` /
+                ``pipeline.repair_loop`` for a single round, so they
+                stay direct rather than being re-plumbed.
 
 Endpoints::
 
@@ -53,11 +66,28 @@ Endpoints::
                               repaired netlist rows + changes + round +
                               verdict + findings (via llm.repair + verify)
     POST /download/netlist    JSON Netlist -> netlist.cir (text/plain,
-    GET  /download/netlist    the exact SPICE text that was simulated)
+                              the exact SPICE text that was simulated)
     GET  /download/netlist.cir  same, for the last checked netlist
     POST /download/bom        JSON Netlist -> bom.csv
-    GET  /download/bom        (id,type,value,rating,qty)
+                              (id,type,value,rating,qty)
     GET  /download/bom.csv     same, for the last checked netlist
+
+    There is deliberately NO bodyless GET /download/netlist or
+    GET /download/bom: a GET carries no netlist to render, so those
+    routes were removed (they used to 400 on the missing body).
+    GET /download/netlist.cir and /download/bom.csv serve the last
+    checked netlist (``_LAST_NETLIST``): one process-global value,
+    shared across tabs, lost on restart (404 until the next check),
+    so POST /download/* with the current table is the reliable path.
+
+    SSE contract (``/run-image``, ``/run-goal``): ``progress`` events
+    carry only agent / message / stage (plus filename/goal) / mock,
+    never a netlist, verdict, or findings, so nothing is applied
+    mid-stream. The terminal event is ``result`` and carries the full
+    shaped report plus ``done: true``; stream close is also a
+    terminator (the UI treats both as "run finished"). An ``error``
+    event carries ``error`` / ``http_status`` / ``detail`` and ends
+    the stream with no result; it is never the final result event.
 
 Startup rule: ngspice MUST be on PATH. The check runs in the FastAPI
 startup event (``shutil.which("ngspice")``) and raises ``RuntimeError``
@@ -79,12 +109,27 @@ SSE ``error`` event carrying ``http_status: 502`` once streaming has
 started). There is NEVER a silent fallback: no alternate model, no
 returning the input as "repaired", no empty report. Simulation-infra
 failure (ngspice missing / timeout) -> HTTP 500 with a visible error.
-Invalid netlist JSON -> HTTP 422 via ir.py validation.
+Invalid netlist JSON -> HTTP 422 with the same ``{"error",
+"message", ...}`` shape as every other error (``error:
+"validation_error"`` for request validation, ``"invalid_netlist"``
+for a download body that fails ir validation), never FastAPI's
+default ``{"detail": [...]}`` shape. One deliberate exception:
+``/repair`` returns HTTP 200 with ``verified: false``,
+``report: null``, ``verdict: null`` when verification of the repaired
+netlist fails; the repaired rows are still returned for manual
+inspection, and the UI MUST check ``verified`` before applying
+anything (see ``RepairOut``).
 
 Mock mode: ``?mock=1`` ONLY, on ``/check``, ``/run-image`` and
 ``/run-goal``. Every mock event and mock Report carries ``mock=true`` so
 the UI can show a MOCK badge. ``/repair`` does not support mock (a
-fabricated repair would be a lie).
+fabricated repair would be a lie). Mock reports have exactly the real
+Report keys (plus ``mock``): no ``spice`` / ``summary`` extras. Mock
+streams use exactly the real progress stages (image: started,
+vision_extract, spice_render, simulate, rules_check; goal: started,
+plan, spice_render, simulate, rules_check) and end with the same
+``done: true`` result event; the stages fire instantly, so mock
+``elapsed_s`` / timing means nothing.
 
 CORS: not needed (same origin).
 
@@ -99,12 +144,15 @@ import asyncio
 import importlib
 import importlib.util
 import json
+import queue
 import shutil
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
@@ -280,10 +328,22 @@ class RepairOut(BaseModel):
     """Repair result, in the shape web/index.html consumes.
 
     ``netlist`` is the repaired netlist as editable table rows (same
-    shape as /check), ``changes`` is one reason per changed component,
+    shape as /check: a list of ``{id, type, value, nodes,
+    node_voltage, current, power}`` dicts), NOT an ir.Netlist; callers
+    needing a Netlist wrap the rows as ``{"title": "", "components":
+    rows}``. ``changes`` is one reason per changed component,
     ``round`` echoes the request round, and ``verdict`` / ``findings``
-    are the fresh verification results. ``reasons`` is kept as an alias
-    of ``changes`` and ``report`` carries the full shaped report.
+    are the fresh verification results. ``reasons`` is kept as an
+    alias of ``changes`` (identical list, for older consumers); new
+    code should read ``changes``. ``report`` carries the full shaped
+    report.
+
+    Unverified repair (HTTP 200, NOT an error status, so the repaired
+    rows survive for manual inspection): ``verified`` is False,
+    ``report`` is None, ``verdict`` is None, ``findings`` is empty,
+    and ``verification_error`` names the failure. Consumers MUST
+    check ``verified`` before applying ``netlist`` / ``verdict`` /
+    ``findings``: a 200 here does not mean the repair is good.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -308,7 +368,12 @@ _SIMULATOR_OVERRIDE: Any = None
 
 # Last netlist that went through a real check (covers /check, repair
 # verification and the streaming runs). Serves GET /download/netlist.cir
-# and GET /download/bom.csv, which take no request body.
+# and GET /download/bom.csv, which take no request body. Process-global
+# and shared across tabs: a second tab's check overwrites the first
+# tab's download, and a restart clears it (404 until the next check).
+# POST /download/* renders from the posted netlist and has no such
+# staleness; prefer it. Deliberately no locking / per-session store:
+# the reliable fix is the POST path, not more server-side state.
 _LAST_NETLIST: Any = None
 
 
@@ -433,8 +498,10 @@ def _netlist_rows(
     components = getattr(netlist, "components", None)
     if components is None and isinstance(netlist, dict):
         components = netlist.get("components") or []
-    # rules.py lowercases branch-current keys ("v1" for "V1"); look both
-    # maps up case-insensitively so the current/power columns fill in.
+    # spice.py lowercases branch-current keys ("v1" for "V1") and node
+    # names, so look all three maps up case-insensitively; a row id
+    # "V1" / node "N1" must still find "v1" / "n1" in the Report.
+    voltages = {str(k).lower(): v for k, v in node_voltages.items()}
     currents = {str(k).lower(): v for k, v in branch_currents.items()}
     powers = {str(k).lower(): v for k, v in component_power.items()}
     rows: list[dict] = []
@@ -457,8 +524,8 @@ def _netlist_rows(
             and value
             and len(nodes) >= 2
         ):
-            v0 = node_voltages.get(nodes[0])
-            v1 = node_voltages.get(nodes[1])
+            v0 = voltages.get(nodes[0].lower())
+            v1 = voltages.get(nodes[1].lower())
             if v0 is not None and v1 is not None:
                 current = (v0 - v1) / value
         rows.append(
@@ -467,7 +534,7 @@ def _netlist_rows(
                 "type": ctype,
                 "value": value,
                 "nodes": nodes,
-                "node_voltage": node_voltages.get(nodes[0]) if nodes else None,
+                "node_voltage": voltages.get(nodes[0].lower()) if nodes else None,
                 "current": current,
                 "power": powers.get(str(cid).lower()) if cid else None,
             }
@@ -513,8 +580,14 @@ _MOCK_MESSAGE = (
 )
 
 
-def _mock_report(netlist: Any, *, summary: str) -> dict:
-    """A mock ir.Report as a plain dict, plus mock=true for the UI."""
+def _mock_report(netlist: Any) -> dict:
+    """A mock ir.Report as a plain dict, plus mock=true for the UI.
+
+    Same keys as a real Report (verdict, findings, node_voltages,
+    branch_currents, power, netlist_used, uncertain) plus ``mock``.
+    No ``spice`` / ``summary`` extras: mock must not carry fields the
+    real path never sends, or consumers learn to depend on them.
+    """
     ir_mod = _load_sibling("ir")
     if ir_mod is not None:
         report = ir_mod.Report(
@@ -550,29 +623,199 @@ def _mock_report(netlist: Any, *, summary: str) -> dict:
             "uncertain": ["Mock mode: nothing was simulated or checked."],
         }
     data["mock"] = True
-    data["summary"] = summary
     return data
 
 
 async def _mock_event_stream(
     kind: str, *, detail: dict, report: dict
 ) -> AsyncIterator[dict]:
+    """Mock SSE stages, identical to the real stream's stages.
+
+    Image: started, vision_extract, spice_render, simulate,
+    rules_check. Goal: started, plan, spice_render, simulate,
+    rules_check (no "generate": the real goal stream has no such
+    stage). Stages fire instantly, so mock timing means nothing.
+    The terminal ``result`` event carries ``done: true``, exactly
+    like the real stream; stream close is also a terminator.
+    """
     stages = (
         ["started", "vision_extract", "spice_render", "simulate", "rules_check"]
         if kind == "image"
-        else ["started", "plan", "generate", "spice_render", "simulate", "rules_check"]
+        else ["started", "plan", "spice_render", "simulate", "rules_check"]
     )
     for stage in stages:
         yield {
             "event": "progress",
             "data": {"stage": stage, "mock": True, **detail},
         }
-    yield {"event": "result", "data": {**report, "mock": True}}
+    yield {"event": "result", "data": {**report, "mock": True, "done": True}}
 
 
 # ---------------------------------------------------------------------------
-# Streaming runs (llm + check, composed here; no pipeline module needed)
+# Streaming runs (delegated to pipeline.run_image / pipeline.run_goal)
 # ---------------------------------------------------------------------------
+
+
+def _pipeline_progress_event(event: dict) -> dict:
+    """Translate one pipeline progress event into an SSE event dict.
+
+    Pipeline events carry ``stage`` / ``agent`` / ``message`` /
+    ``elapsed_s``; the SSE shape the web UI consumes is
+    ``{"event": "progress", "data": {...}}`` with only agent /
+    message / stage / elapsed_s / mock keys, never a netlist,
+    verdict, or findings mid-stream.
+    """
+    return _sse_event(
+        {
+            "event": "progress",
+            "data": {
+                "agent": event.get("agent", "pipeline"),
+                "message": event.get("message", ""),
+                "stage": event.get("stage", ""),
+                "elapsed_s": event.get("elapsed_s"),
+                "mock": False,
+            },
+        }
+    )
+
+
+def _pipeline_error_event(exc: BaseException) -> dict:
+    """Classify a pipeline failure for an SSE error event.
+
+    LLM failures (pipeline wraps them as ``RuntimeError("LLM call
+    failed: ...")``) keep the old ``_llm_error_event`` mapping
+    (400 for bad image bytes / empty input, else 502). Any other
+    failure (ngspice missing / timeout, unrenderable netlist) is a
+    500 ``verification_failed``, as ``_verify_netlist`` used to
+    raise for the same conditions. An error event ends the stream
+    with no result; it is never the final result event.
+    """
+    message = str(exc)
+    if (
+        "LLM call failed" in message
+        or "unsupported image format" in message
+        or "requires non-empty" in message
+    ):
+        return _sse_event(_llm_error_event(exc))
+    if isinstance(exc, ValueError):
+        return _sse_event(
+            {
+                "event": "error",
+                "data": {
+                    "error": "invalid_input",
+                    "http_status": 400,
+                    "detail": message,
+                    "mock": False,
+                },
+            }
+        )
+    return _sse_event(
+        {
+            "event": "error",
+            "data": {
+                "error": "verification_failed",
+                "http_status": 500,
+                "detail": f"{type(exc).__name__}: {message}",
+                "mock": False,
+            },
+        }
+    )
+
+
+async def _run_stream(
+    kind: str,
+    *,
+    mock: bool,
+    image_bytes: Optional[bytes] = None,
+    filename: Optional[str] = None,
+    goal: Optional[str] = None,
+) -> AsyncIterator[dict]:
+    """Yield SSE-ready event dicts for /run-image or /run-goal.
+
+    The real work is ``pipeline.run_image`` (image: 3 parallel
+    reads + >= 2/3 consensus) or ``pipeline.run_goal`` (goal:
+    best-of-3 design, every candidate simulated), each followed by
+    verify + repair-while-STOP. The pipeline generator is blocking,
+    so it runs on a worker thread and forwards its progress events
+    through a queue; this coroutine only translates them to SSE.
+    The pipeline's own terminal event is NOT forwarded as-is: the
+    final result is built from the generator's return value
+    (``PipelineResult``) with ``_report_response``, so the result
+    keeps the exact prior shape (netlist rows, ``mock: false``)
+    plus ``repairs`` / ``rounds`` / ``round`` and ``done: true``.
+    The injected simulator (``set_simulator``, tests only) is passed
+    through so a fake simulator still serves the pipeline's
+    simulations.
+    """
+    if mock:
+        ir_mod = _load_sibling("ir")
+        empty = ir_mod.Netlist(title="mock") if ir_mod is not None else {"title": "mock", "components": []}
+        detail = {"filename": filename} if kind == "image" else {"goal": goal}
+        report = _mock_report(empty)
+        async for event in _mock_event_stream(kind, detail=detail, report=report):
+            yield _sse_event(event)
+        return
+
+    pipeline = _require_module("pipeline")
+    yield _sse_event(
+        {
+            "event": "progress",
+            "data": {
+                "agent": "system",
+                "message": "Run started.",
+                "stage": "started",
+                "mock": False,
+            },
+        }
+    )
+
+    events: queue.Queue = queue.Queue()
+
+    def _drive() -> None:
+        """Run the blocking pipeline generator; queue its events,
+        then its return value (``("done", PipelineResult)``), or
+        its exception (``("error", exc)``)."""
+        try:
+            if kind == "image":
+                gen = pipeline.run_image(
+                    image_bytes, simulator=_SIMULATOR_OVERRIDE
+                )
+            else:
+                gen = pipeline.run_goal(goal, simulator=_SIMULATOR_OVERRIDE)
+            while True:
+                try:
+                    event = next(gen)
+                except StopIteration as done:
+                    events.put(("done", done.value))
+                    return
+                events.put(("event", event))
+        except BaseException as exc:  # noqa: BLE001 - forwarded to SSE
+            events.put(("error", exc))
+
+    threading.Thread(target=_drive, daemon=True).start()
+    while True:
+        tag, payload = await asyncio.to_thread(events.get)
+        if tag == "event":
+            # The pipeline's terminal event carries the report in
+            # its "data" key; skip it here, the "done" return value
+            # below is what the final result is built from.
+            if isinstance(payload, dict) and payload.get("event") == "result":
+                continue
+            yield _pipeline_progress_event(payload)
+        elif tag == "done":
+            result = payload
+            global _LAST_NETLIST
+            _LAST_NETLIST = result.netlist
+            report_data = _report_response(result.report, result.netlist)
+            report_data["repairs"] = list(result.repairs)
+            report_data["rounds"] = result.rounds
+            report_data["round"] = result.rounds
+            report_data["done"] = True
+            yield _sse_event({"event": "result", "data": report_data})
+            return
+        else:  # tag == "error"
+            yield _pipeline_error_event(payload)
+            return
 
 
 def _llm_error_event(exc: Exception) -> dict:
@@ -611,124 +854,6 @@ def _sse_event(event: dict) -> dict:
     }
 
 
-async def _run_stream(
-    kind: str,
-    *,
-    mock: bool,
-    image_bytes: Optional[bytes] = None,
-    filename: Optional[str] = None,
-    goal: Optional[str] = None,
-) -> AsyncIterator[dict]:
-    """Yield SSE-ready event dicts for /run-image or /run-goal."""
-    if mock:
-        ir_mod = _load_sibling("ir")
-        empty = ir_mod.Netlist(title="mock") if ir_mod is not None else {"title": "mock", "components": []}
-        detail = {"filename": filename} if kind == "image" else {"goal": goal}
-        report = _mock_report(empty, summary=f"Mock {kind} run: " + _MOCK_MESSAGE)
-        async for event in _mock_event_stream(kind, detail=detail, report=report):
-            yield _sse_event(event)
-        return
-
-    llm = _require_module("llm")
-    yield _sse_event(
-        {
-            "event": "progress",
-            "data": {
-                "agent": "system",
-                "message": "Run started.",
-                "stage": "started",
-                "mock": False,
-            },
-        }
-    )
-    try:
-        if kind == "image":
-            yield _sse_event(
-                {
-                    "event": "progress",
-                    "data": {
-                        "agent": "reader",
-                        "message": f"Reading schematic {filename}...",
-                        "stage": "vision_extract",
-                        "filename": filename,
-                        "mock": False,
-                    },
-                }
-            )
-            netlist = await asyncio.to_thread(llm.read_schematic, image_bytes)
-        else:
-            yield _sse_event(
-                {
-                    "event": "progress",
-                    "data": {
-                        "agent": "designer",
-                        "message": f"Designing circuit for goal: {goal}",
-                        "stage": "plan",
-                        "goal": goal,
-                        "mock": False,
-                    },
-                }
-            )
-            netlist = await asyncio.to_thread(llm.design, goal)
-    except Exception as exc:  # noqa: BLE001 - ANY llm failure is a 502/400 event
-        yield _sse_event(_llm_error_event(exc))
-        return
-
-    yield _sse_event(
-        {
-            "event": "progress",
-            "data": {
-                "agent": "simulator",
-                "message": "Netlist ready; rendering SPICE deck.",
-                "stage": "spice_render",
-                "netlist": netlist.model_dump(mode="json"),
-                "mock": False,
-            },
-        }
-    )
-    yield _sse_event(
-        {
-            "event": "progress",
-            "data": {
-                "agent": "simulator",
-                "message": "Running ngspice DC operating point...",
-                "stage": "simulate",
-                "mock": False,
-            },
-        }
-    )
-    try:
-        report = await asyncio.to_thread(_verify_netlist, netlist)
-    except HTTPException as exc:
-        detail = exc.detail
-        yield _sse_event(
-            {
-                "event": "error",
-                "data": {
-                    "error": "verification_failed",
-                    "http_status": exc.status_code,
-                    "detail": detail if isinstance(detail, str) else str(detail),
-                    "mock": False,
-                },
-            }
-        )
-        return
-    yield _sse_event(
-        {
-            "event": "progress",
-            "data": {
-                "agent": "checker",
-                "message": "Checking rules...",
-                "stage": "rules_check",
-                "mock": False,
-            },
-        }
-    )
-    # Final event: verdict/findings/netlist rows (+ mock: false). No
-    # "done" flag: the web UI applies a result event, then treats a
-    # done-flagged event (or stream end) as the terminator.
-    report_data = _report_response(report, netlist)
-    yield _sse_event({"event": "result", "data": report_data})
 
 
 # ---------------------------------------------------------------------------
@@ -766,12 +891,22 @@ async def index() -> Any:
 
 @app.get("/health")
 async def health() -> dict:
+    # "ok" only when simulation can actually run (ngspice on PATH or
+    # a test simulator injected) AND every sibling module loaded.
+    # Anything else is "degraded": the old unconditional "ok" hid a
+    # missing module behind a green status. (ngspice missing with no
+    # override still refuses startup in the lifespan handler, so a
+    # degraded ngspice status is only reachable in tests.)
+    modules = _sibling_status()
+    healthy = (_ngspice_available() or _SIMULATOR_OVERRIDE is not None) and all(
+        modules.values()
+    )
     return {
-        "status": "ok",
+        "status": "ok" if healthy else "degraded",
         "ngspice": _ngspice_available(),
         "ngspice_path": shutil.which("ngspice"),
         "simulator_override": _SIMULATOR_OVERRIDE is not None,
-        "modules": _sibling_status(),
+        "modules": modules,
     }
 
 
@@ -790,13 +925,8 @@ def check(netlist: IRNetlist, mock: bool = Query(False)) -> Any:
         )
     if mock:
         _LAST_NETLIST = netlist
-        try:
-            spice_text = _render_spice_text(netlist)
-        except HTTPException:
-            spice_text = None
-        report = _mock_report(netlist, summary="Mock check: no simulation ran.")
-        if spice_text is not None:
-            report["spice"] = spice_text
+        # Same keys as a real report (plus mock): no "spice" extra.
+        report = _mock_report(netlist)
         report["netlist"] = _netlist_rows(netlist, {}, {}, {})
         return JSONResponse(content=report)
     return JSONResponse(content=_report_response(_verify_netlist(netlist), netlist))
@@ -837,11 +967,12 @@ async def run_image(
                 "message": f"expected an image upload, got Content-Type {image.content_type!r}.",
             },
         )
-    # Fail fast (before headers stream) if the LLM module is missing and
-    # this is not a mock run, so the client gets a clean HTTP 501
-    # instead of an SSE error frame.
+    # Fail fast (before headers stream) if the pipeline module is
+    # missing and this is not a mock run, so the client gets a clean
+    # HTTP 501 instead of an SSE error frame. (Pipeline imports llm,
+    # so this also gates on the LLM module.)
     if not mock:
-        _require_module("llm")
+        _require_module("pipeline")
 
     async def _events() -> AsyncIterator[dict]:
         async for event in _run_stream(
@@ -859,7 +990,7 @@ async def run_image(
 async def run_goal(body: GoalIn, mock: bool = Query(False)) -> EventSourceResponse:
     """JSON {"goal": str} -> SSE stream of pipeline events, then Report."""
     if not mock:
-        _require_module("llm")
+        _require_module("pipeline")
 
     async def _events() -> AsyncIterator[dict]:
         async for event in _run_stream("goal", mock=mock, goal=body.goal):
@@ -976,9 +1107,13 @@ async def _parse_netlist_body(request: Request) -> Any:
 
 
 @app.post("/download/netlist")
-@app.get("/download/netlist")
 async def download_netlist(request: Request) -> PlainTextResponse:
-    """Return the exact SPICE text that would be simulated, as netlist.cir."""
+    """Return the exact SPICE text that would be simulated, as netlist.cir.
+
+    POST only: there is no bodyless GET for this route (a GET carries
+    no netlist to render). For the last checked netlist without a
+    body, use GET /download/netlist.cir.
+    """
     netlist = await _parse_netlist_body(request)
     try:
         spice_text = _render_spice_text(netlist)
@@ -995,9 +1130,13 @@ async def download_netlist(request: Request) -> PlainTextResponse:
 
 
 @app.post("/download/bom")
-@app.get("/download/bom")
 async def download_bom(request: Request) -> PlainTextResponse:
-    """Return bom.csv with columns id,type,value,rating,qty."""
+    """Return bom.csv with columns id,type,value,rating,qty.
+
+    POST only: there is no bodyless GET for this route (a GET carries
+    no netlist to render). For the last checked netlist without a
+    body, use GET /download/bom.csv.
+    """
     netlist = await _parse_netlist_body(request)
     bom = _require_module("bom")
     return PlainTextResponse(
@@ -1025,7 +1164,12 @@ def _last_netlist_or_404() -> Any:
 
 @app.get("/download/netlist.cir")
 async def download_netlist_cir() -> PlainTextResponse:
-    """SPICE deck of the last checked netlist (no request body needed)."""
+    """SPICE deck of the last checked netlist (no request body needed).
+
+    Serves ``_LAST_NETLIST``: shared across tabs, lost on restart
+    (404 until the next check). POST /download/netlist with the
+    current table is the reliable path.
+    """
     netlist = _last_netlist_or_404()
     try:
         spice_text = _render_spice_text(netlist)
@@ -1043,13 +1187,19 @@ async def download_netlist_cir() -> PlainTextResponse:
 
 @app.get("/download/bom.csv")
 async def download_bom_csv() -> PlainTextResponse:
-    """BOM CSV of the last checked netlist (no request body needed)."""
+    """BOM CSV of the last checked netlist (no request body needed).
+
+    Serves ``_LAST_NETLIST``: shared across tabs, lost on restart
+    (404 until the next check). POST /download/bom with the current
+    table is the reliable path. Delivered filename is ``bom.csv``,
+    matching the POST route (it used to be ``BOM.csv`` here).
+    """
     netlist = _last_netlist_or_404()
     bom = _require_module("bom")
     return PlainTextResponse(
         bom.netlist_to_bom_csv(netlist),
         media_type="text/csv",
-        headers={"Content-Disposition": 'attachment; filename="BOM.csv"'},
+        headers={"Content-Disposition": 'attachment; filename="bom.csv"'},
     )
 
 
@@ -1066,12 +1216,61 @@ _WEB_DIR = next(
 app.mount("/", StaticFiles(directory=_WEB_DIR, html=True), name="web")
 
 
+@app.exception_handler(RequestValidationError)
+async def _validation_error(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    """Request validation (bad Netlist / goal JSON) in the same error
+    shape as every other endpoint error: {"error", "message",
+    "detail"}, never FastAPI's default {"detail": [...]} shape, so
+    the UI's error banner (which reads error/message) works for 422s
+    too. The raw pydantic error list is kept under "detail".
+    """
+    errors = exc.errors()
+    first = errors[0] if errors else {}
+    message = str(first.get("msg", "request validation failed"))
+    loc = ".".join(str(p) for p in first.get("loc", ()) if p != "body")
+    if loc:
+        message = f"{loc}: {message}"
+    # Pydantic error dicts can carry non-JSON values in "ctx"
+    # (e.g. a ValueError); serialise defensively so the 422 itself
+    # never 500s on encoding.
+    safe_errors = json.loads(json.dumps(errors, default=str))
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": "validation_error",
+            "message": message,
+            "detail": safe_errors,
+        },
+    )
+
+
+@app.exception_handler(HTTPException)
+async def _http_error(request: Request, exc: HTTPException) -> JSONResponse:
+    """Every HTTP error in the flat {"error", "message"} shape.
+
+    Dict details (the {"error", "message"} dicts the endpoints raise)
+    pass through unchanged. A bare string detail becomes
+    {"error": "http_error", "message": ...} instead of FastAPI's
+    default {"detail": ...} wrapper, which no consumer reads. This
+    replaces FastAPI's built-in HTTPException handler; without it the
+    handler below (registered for Exception) would never see an
+    HTTPException, because Starlette prefers the exact-class handler.
+    """
+    detail = exc.detail
+    body = (
+        detail
+        if isinstance(detail, dict)
+        else {"error": "http_error", "message": str(detail)}
+    )
+    return JSONResponse(status_code=exc.status_code, content=body)
+
+
 @app.exception_handler(Exception)
 async def _unhandled_exception(request: Request, exc: Exception) -> JSONResponse:
-    if isinstance(exc, HTTPException):
-        detail = exc.detail
-        body = detail if isinstance(detail, dict) else {"detail": detail}
-        return JSONResponse(status_code=exc.status_code, content=body)
+    # HTTPException never reaches here (see _http_error above); this
+    # is only for unexpected failures.
     return JSONResponse(
         status_code=500,
         content={

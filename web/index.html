@@ -260,6 +260,9 @@
     <h2>Downloads</h2>
     <button id="dl-cir-btn" type="button" class="secondary">Download netlist.cir</button>
     <button id="dl-bom-btn" type="button" class="secondary">Download bom.csv</button>
+    <button id="share-btn" type="button" class="secondary">Copy share link</button>
+    <p id="share-status" class="empty" role="status" aria-live="polite"></p>
+    <p class="empty">Shares the netlist only (no title, no result). Opening the link re-checks the circuit on the server; no result is stored in the link. Anyone with the link can see the circuit, so do not put secrets in node names.</p>
     <p class="empty">POST /download/netlist (netlist.cir) and POST /download/bom (bom.csv) render from the netlist in the table above. GET /download/netlist.cir and GET /download/bom.csv return the same files for the last checked netlist: one value shared across tabs, lost on restart, so POST is the reliable path. BOM header: id,type,value,rating,qty.</p>
   </section>
 
@@ -280,6 +283,14 @@
   var lastReport = null;     // last backend Report dict (or null); ONLY source of numbers
   var repairRound = 0;
   var MAX_REPAIR_ROUNDS = 3;
+  // Share-link length limits (P5.1). Measured against the FULL share
+  // URL (origin + path + '#s=' + payload), not just the hash: a
+  // 3-component LED circuit is ~230-250 chars total on localhost.
+  // Over the soft limit the link is still published with a warning;
+  // over the hard limit it is refused (suggest Download netlist.cir).
+  var SHARE_SOFT_LIMIT = 1800;
+  var SHARE_HARD_LIMIT = 6000;
+  var shareLoading = false; // re-entrancy guard for loadFromHash()
   var selectedFile = null;
   var selectedId = null;
   var busy = false;
@@ -862,6 +873,7 @@
     $('run-goal-btn').disabled = b;
     $('repair-btn').disabled = b || repairRound >= MAX_REPAIR_ROUNDS;
     $('recheck-btn').disabled = b;
+    $('share-btn').disabled = b;
     statusEl.textContent = label || '';
   }
 
@@ -1031,6 +1043,233 @@
     } catch (e) {
       handleErrorPayload(null, 'Network error downloading ' + filename + ': ' + e.message);
     }
+  }
+
+  // ---- Shareable results (P5.1) ---------------------------------------
+  // A share link carries exactly one thing in the URL hash: the bare
+  // ir.py Netlist, gzip-compressed and base64url-encoded:
+  //   <origin><path>#s=v1.<base64url(gzip(utf8(canonical JSON)))>
+  // `v1u.` is the uncompressed fallback (no CompressionStream, or gzip
+  // not shorter). The hash is never sent to the server, so the netlist
+  // never appears in server access logs — but the link is
+  // bearer-readable: anyone with it sees the circuit.
+  //
+  // TITLES ARE DROPPED IN v1 (deliberate): collectNetlistPayload()
+  // hardcodes title '' and the page has no title input, so the encoder
+  // can never emit a title; the decoder likewise drops any title in a
+  // hand-made link instead of silently losing it on re-share. The
+  // server defaults a missing title to "".
+  //
+  // TRUST MODEL: the URL is untrusted input. No verdict, findings,
+  // voltages, currents, powers, round, or mock flag is ever encoded,
+  // and normRow()/normNetlist() drop any such forged field on decode.
+  // Opening a link MUST re-run POST /check; applyResult() is the only
+  // path that may produce a verdict, and it runs only on the fresh
+  // Report. Until /check returns, no verdict is shown.
+
+  // Canonical netlist for sharing: the table contents, defaults the
+  // server re-applies stripped (rating_watts 0.25 on a resistor,
+  // color "red" on an LED), fixed key order
+  // id, type, value, nodes, rating_watts, color so the JSON is
+  // deterministic for a given table. No title (see note above).
+  function canonicalNetlistForShare() {
+    var payload = collectNetlistPayload();
+    var comps = payload.components.map(function (c) {
+      var row = normRow(c);
+      var out = { id: row.id, type: row.type, value: row.value, nodes: row.nodes };
+      if (row.rating_watts != null &&
+          !(row.type === 'resistor' && row.rating_watts === 0.25))
+        out.rating_watts = row.rating_watts;
+      if (row.color != null &&
+          !(row.type === 'led' && row.color === 'red'))
+        out.color = row.color;
+      return out;
+    });
+    return { components: comps };
+  }
+
+  function utf8Bytes(obj) {
+    return new TextEncoder().encode(JSON.stringify(obj));
+  }
+  async function gzipBytes(bytes) {
+    var stream = new Blob([bytes]).stream()
+      .pipeThrough(new CompressionStream('gzip'));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  }
+  function base64url(bytes) {
+    var bin = '';
+    var CHUNK = 0x8000;
+    for (var i = 0; i < bytes.length; i += CHUNK)
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  // Encode: try gzip, fall back to uncompressed if the API is missing
+  // or gzip is (for a degenerate tiny payload) not shorter. Never
+  // throws for a valid netlist.
+  async function encodeSharePayload(netlistObj) {
+    var raw = utf8Bytes(netlistObj);
+    var plain = 'v1u.' + base64url(raw);
+    if (typeof CompressionStream === 'undefined') return plain;
+    try {
+      var gz = 'v1.' + base64url(await gzipBytes(raw));
+      return gz.length <= plain.length ? gz : plain;
+    } catch (e) { return plain; }
+  }
+  // Built from origin + pathname only: any query string (including
+  // ?mock=1) is dropped, so a shared link always does a real check.
+  function buildShareUrl(encoded) {
+    return location.origin + location.pathname + '#s=' + encoded;
+  }
+  function publishShareLink(encoded) {
+    // replaceState, NOT pushState: no history entry, no hashchange
+    // event, no reload loop. Replace with the FULL url (origin +
+    // pathname + hash), not just '#s=...': a bare '#s=...' would keep
+    // any existing query string (e.g. ?mock=1) in the address bar,
+    // and buildShareUrl() is defined to drop it.
+    var url = buildShareUrl(encoded);
+    history.replaceState(null, '', url);
+    return url;
+  }
+  // Clipboard with a textarea + execCommand fallback: writeText needs
+  // a secure context and can be denied by permissions. A copy failure
+  // must not block publishing the link in the address bar.
+  async function copyTextToClipboard(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      try { await navigator.clipboard.writeText(text); return true; } catch (e) { /* fall through */ }
+    }
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = document.execCommand('copy');
+      ta.remove();
+      return !!ok;
+    } catch (e) { return false; }
+  }
+  async function shareLink() {
+    if (busy) return;
+    clearError();
+    var canonical = canonicalNetlistForShare();
+    if (!canonical.components.length) { showError('Netlist is empty', 'Add at least one netlist row before sharing.'); return; }
+    var encoded = await encodeSharePayload(canonical);
+    var url = buildShareUrl(encoded);
+    // Length limits are on the FULL share URL (see SHARE_*_LIMIT).
+    if (url.length > SHARE_HARD_LIMIT) {
+      showError('Circuit too large to share as a link',
+        'This netlist makes a ' + url.length + '-character URL (limit ' + SHARE_HARD_LIMIT + '). Download netlist.cir instead.');
+      return;
+    }
+    url = publishShareLink(encoded);
+    var copied = await copyTextToClipboard(url);
+    // Dedicated #share-status: setBusy(false) wipes #status, so the
+    // confirmation must not live there.
+    var shareStatus = $('share-status');
+    if (shareStatus) {
+      shareStatus.textContent = copied
+        ? 'Share link copied (' + url.length + ' chars).'
+        : 'Link is in the address bar; copy it from there.';
+      if (url.length > SHARE_SOFT_LIMIT)
+        shareStatus.textContent += ' Long link: some chat apps may truncate it.';
+    }
+    logLine('system', 'Share link published (' + url.length + ' chars).', 'info');
+  }
+
+  function base64urlToBytes(s) {
+    s = s.replace(/-/g, '+').replace(/_/g, '/');
+    while (s.length % 4) s += '=';
+    var bin = atob(s); // throws on invalid alphabet -> caught by caller
+    var bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }
+  async function gunzipBytes(bytes) {
+    var stream = new Blob([bytes]).stream()
+      .pipeThrough(new DecompressionStream('gzip'));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  }
+  // Returns a canonical Netlist object, or throws with a user-facing
+  // message. Forged verdict/findings/power/mock fields are dropped by
+  // normNetlist(); the title is dropped in v1 (see note above).
+  async function decodeSharePayload(encoded) {
+    var gzipped, body;
+    if (encoded.indexOf('v1.') === 0)       { gzipped = true;  body = encoded.slice(3); }
+    else if (encoded.indexOf('v1u.') === 0) { gzipped = false; body = encoded.slice(4); }
+    else throw new Error('Unsupported share-link version. This link was made by a newer Netproof.');
+    if (!/^[A-Za-z0-9\-_]+$/.test(body)) throw new Error('Share link is corrupted (bad characters).');
+    var bytes = base64urlToBytes(body);
+    if (gzipped) {
+      if (typeof DecompressionStream === 'undefined')
+        throw new Error('This browser cannot open compressed share links.');
+      try { bytes = await gunzipBytes(bytes); }
+      catch (e) { throw new Error('Share link is corrupted or truncated (cannot decompress).'); }
+    }
+    var obj;
+    try { obj = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
+    catch (e) { throw new Error('Share link is corrupted (not valid JSON).'); }
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj))
+      throw new Error('Share link does not contain a circuit.');
+    if (!Array.isArray(obj.components) || !obj.components.length)
+      throw new Error('Share link contains no components.');
+    var rows = normNetlist(obj); // drops unknown keys; server is the validator
+    if (!rows.length) throw new Error('Share link contains no usable components.');
+    return { components: rows };
+  }
+
+  // Open a #s= share link: decode fully FIRST (no /check call until
+  // decode succeeds), fill the table with no verdict, then re-run
+  // POST /check exactly like recheck(). Returns true when a #s= hash
+  // was present, false otherwise.
+  async function loadFromHash() {
+    var m = /^#s=(.+)$/.exec(location.hash || '');
+    if (!m) return false;
+    // Re-entrancy guard: a second link pasted while the first /check
+    // is still in flight is ignored (no overlapping POSTs, no
+    // first-call finally { setBusy(false) } re-enabling buttons
+    // mid-check). The user can paste again once the first load lands.
+    if (shareLoading) return true;
+    shareLoading = true;
+    var hash = m[1].replace(/[\s\r\n]+/g, ''); // tolerate line-wrapped pastes
+    try { hash = decodeURIComponent(hash); } catch (e) { /* keep raw hash */ }
+    clearError();
+    lastReport = null; findings = []; repairHistory = []; repairRound = 0;
+    // Hide any verdict: nothing is shown until the fresh /check
+    // returns. #verdict is display:none without the .show class
+    // (web/styles.css), and setVerdict() is the only thing that adds it.
+    verdictEl.className = '';
+    verdictEl.textContent = '';
+    var empty = $('verdict-empty');
+    if (empty) empty.style.display = '';
+    renderFindings();
+    renderRepairHistory(repairHistory);
+    renderKeyReadings();
+    var netlistObj;
+    try { netlistObj = await decodeSharePayload(hash); }
+    catch (e) {
+      showError('Could not open share link', e.message);
+      shareLoading = false;
+      return true; // link was present but bad: empty page, NO /check POST
+    }
+    netlist = normNetlist(netlistObj); // table shows the circuit immediately
+    renderNetlist(); sync3D();
+    setBusy(true, 'Shared circuit loaded. Re-checking…');
+    try {
+      var res = await fetch('/check', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(netlistObj)
+      });
+      var data = await res.json().catch(function () { return null; });
+      if (!res.ok || !data) { handleErrorPayload(data, 'Re-check failed (' + res.status + ')'); return true; }
+      if (data.error || isLlmError(data)) { handleErrorPayload(data, 'Re-check failed'); return true; }
+      applyResult(data); // verdict/findings/numbers come ONLY from here
+      logLine('system', 'Shared circuit re-checked. Verdict: ' + (data.verdict || (data.report && data.report.verdict) || 'unknown'), 'info');
+    } catch (e) {
+      handleErrorPayload(null, 'Network error calling /check: ' + e.message);
+    } finally { setBusy(false); shareLoading = false; }
+    return true;
   }
 
   function setFile(file) {
@@ -1276,6 +1515,10 @@
   $('repair-btn').addEventListener('click', repair);
   $('dl-cir-btn').addEventListener('click', function () { download('cir'); });
   $('dl-bom-btn').addEventListener('click', function () { download('bom'); });
+  $('share-btn').addEventListener('click', shareLink);
+  // A second share link pasted into this tab's address bar re-loads;
+  // our own publishShareLink uses replaceState, which does not fire this.
+  window.addEventListener('hashchange', loadFromHash);
   document.querySelectorAll('[data-example]').forEach(function (btn) {
     btn.addEventListener('click', function () { loadExample(btn.getAttribute('data-example')); });
   });
@@ -1294,6 +1537,9 @@
   renderNetlist();
   renderFindings();
   renderRepairHistory(repairHistory);
+  // Share link in the URL hash, if any: decode + re-check (async,
+  // does not block the separate 3D module bootstrap below).
+  loadFromHash();
 })();
 </script>
 <script type="module">

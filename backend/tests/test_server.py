@@ -284,6 +284,28 @@ def test_check_good_circuit_passes(client: TestClient):
 
 @needs_server
 @needs_simulation
+def test_check_minimal_canonical_share_form_passes(client: TestClient):
+    """P5.1: the minimal canonical form a share link posts — no title,
+    no rating_watts / color (the server re-applies those defaults) —
+    must still PASS. This guards the exact shape decodeSharePayload
+    posts to /check (web/index.html share links carry the bare
+    Netlist in this stripped form)."""
+    payload = {
+        "components": [
+            _component("V1", "voltage_source", 9.0, ["vcc", "0"]),
+            _component("R1", "resistor", 470.0, ["vcc", "led"]),
+            _component("D1", "led", 2.0, ["led", "0"]),
+        ]
+    }
+    resp = client.post(CHECK_PATH, json=payload)
+    assert resp.status_code == 200
+    report = resp.json()
+    assert report["verdict"] == "PASS"
+    assert report["findings"] == []
+
+
+@needs_server
+@needs_simulation
 def test_check_overcurrent_circuit_stops(client: TestClient):
     resp = client.post(CHECK_PATH, json=overcurrent_payload())
     assert resp.status_code == 200

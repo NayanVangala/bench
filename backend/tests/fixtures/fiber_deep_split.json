@@ -1,0 +1,7 @@
+{"title":"1310 nm, 20 km, 1x64 split","elements":[
+ {"id":"L1","type":"laser","wavelength_nm":1310,"power_dbm":-3},
+ {"id":"C1","type":"connector","polish_a":"UPC","polish_b":"UPC"},
+ {"id":"F1","type":"fiber","fiber_type":"smf","length_m":20000},
+ {"id":"S1","type":"splitter","ports":64},
+ {"id":"C2","type":"connector","polish_a":"UPC","polish_b":"UPC"},
+ {"id":"D1","type":"detector","sensitivity_dbm":-28,"max_dbm":0,"min_nm":1260,"max_nm":1620}]}

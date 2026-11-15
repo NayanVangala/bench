@@ -1,0 +1,5 @@
+{"title":"10 mW laser straight into a power meter","elements":[
+ {"id":"L1","type":"laser","wavelength_nm":1550,"power_dbm":10},
+ {"id":"F1","type":"fiber","fiber_type":"smf","length_m":1},
+ {"id":"C1","type":"connector","polish_a":"UPC","polish_b":"UPC"},
+ {"id":"D1","type":"detector"}]}

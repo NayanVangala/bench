@@ -42,8 +42,14 @@ _TOOLS = [
 ]
 
 
-def buy_links(query: str) -> list[tuple[str, str]]:
+def buy_links(query: str, fiber: bool = False) -> list[tuple[str, str]]:
     q = quote_plus(query)
+    if fiber:  # fiber parts: optics vendors instead of electronics distributors
+        return [
+            ("Thorlabs", f"https://www.thorlabs.com/search/thorsearch.cfm?search={q}"),
+            ("FS.com", f"https://www.fs.com/search_result?keyword={q}"),
+            ("Amazon", f"https://www.amazon.com/s?k={q}"),
+        ]
     return [
         ("DigiKey", f"https://www.digikey.com/en/products/result?keywords={q}"),
         ("Mouser", f"https://www.mouser.com/c/?q={q}"),
@@ -137,10 +143,11 @@ def line_items(netlist: dict) -> list[dict]:
     return out
 
 
-def tool_items() -> list[dict]:
+def tool_items(table: list | None = None) -> list[dict]:
+    fiber = table is not None
     return [
-        {"name": n, "spec": s, "unit_usd": p, "qty": 1, "total_usd": p, "note": note, "links": buy_links(q), "refs": []}
-        for n, s, p, q, note in _TOOLS
+        {"name": n, "spec": s, "unit_usd": p, "qty": 1, "total_usd": p, "note": note, "links": buy_links(q, fiber=fiber), "refs": []}
+        for n, s, p, q, note in (table if table is not None else _TOOLS)
     ]
 
 
@@ -249,6 +256,155 @@ PCB_STEPS = [
 
 
 # ---------------------------------------------------------------------------
+# Fiber link packs (report from fiber.check_link)
+# ---------------------------------------------------------------------------
+
+_FIBER_TOOLS = [
+    ("Fiber cleaning kit", "one-click cleaner + wipes", 20.00, "fiber optic connector cleaner one click", ""),
+    ("Optical power meter", "InGaAs, -50 to +3 dBm", 40.00, "optical power meter fiber -50 dBm", ""),
+    ("Visual fault locator", "650 nm, finds breaks", 15.00, "visual fault locator 650nm fiber", ""),
+]
+
+
+def _fiber_items(e: dict, wl: float) -> list[dict]:
+    t = e["type"]
+    band = f"{wl:g} nm"
+    if t == "laser":
+        return [{"name": "Fiber laser source", "spec": f"{band}, {e.get('power_dbm', 0):g} dBm, FC connector",
+                 "unit_usd": 60.00, "query": f"{wl:g}nm fiber laser light source FC"}]
+    if t == "fiber":
+        kind = "single-mode OS2" if (e.get("fiber_type") or "smf") == "smf" else "multimode OM3"
+        length = float(e.get("length_m") or 1)
+        if length > 100:
+            return [{"name": "Fiber cable", "spec": f"{kind}, {length / 1000:g} km, duplex", "unit_usd": round(0.15 * length, 2),
+                     "query": f"{kind} fiber cable {length / 1000:g} km"}]
+        return [{"name": f"Patch cord, {length:g} m", "spec": f"{kind}, FC/UPC", "unit_usd": 12.00,
+                 "query": f"{kind} fiber patch cord FC UPC {length:g}m"}]
+    if t == "connector":
+        pol = e.get("polish_a") or "UPC"
+        return [{"name": "Mating sleeve (adapter)", "spec": f"FC/{pol}, single-mode", "unit_usd": 5.00,
+                 "query": f"FC {pol} fiber mating sleeve adapter single mode"}]
+    if t == "splice":
+        if (e.get("splice_kind") or "fusion") == "mechanical":
+            return [{"name": "Mechanical splice", "spec": "single-mode", "unit_usd": 6.00, "query": "mechanical fiber splice single mode"}]
+        return [{"name": "Splice protection sleeve", "spec": "60 mm, for fusion splices", "unit_usd": 0.20, "query": "fusion splice protection sleeve 60mm"}]
+    if t == "splitter":
+        n = int(e.get("ports") or 2)
+        return [{"name": f"1x{n} splitter", "spec": f"PLC/FBT, equal split, {band}", "unit_usd": 15.00 if n <= 4 else 30.00,
+                 "query": f"1x{n} fiber splitter PLC FC UPC"}]
+    if t == "attenuator":
+        db = e.get("loss_db") if e.get("loss_db") is not None else 10
+        return [{"name": "In-line attenuator", "spec": f"{db:g} dB, FC/UPC", "unit_usd": 8.00, "query": f"{db:g}dB fiber attenuator FC UPC"}]
+    if t == "isolator":
+        return [{"name": "Fiber isolator", "spec": f"{band}, polarization-independent", "unit_usd": 60.00,
+                 "query": f"{wl:g}nm fiber optic isolator FC"}]
+    if t == "detector":
+        return [{"name": "Photodetector", "spec": "InGaAs, fiber-coupled (FC)", "unit_usd": 150.00,
+                 "query": "InGaAs fiber coupled photodetector FC"}]
+    return []
+
+
+def fiber_line_items(report: dict) -> list[dict]:
+    wl = float(report.get("wavelength_nm") or 1550)
+    groups: "OrderedDict[tuple, dict]" = OrderedDict()
+    for e in report["link"]["elements"]:
+        for item in _fiber_items(e, wl):
+            g = groups.setdefault((item["name"], item["spec"]), {**item, "qty": 0, "refs": []})
+            g["qty"] += 1
+            g["refs"].append(e["id"])
+    out = []
+    for g in groups.values():
+        g["total_usd"] = round(g["unit_usd"] * g["qty"], 2)
+        g["links"] = buy_links(g["query"], fiber=True)
+        out.append(g)
+    return out
+
+
+def fiber_build_steps(report: dict) -> list[str]:
+    els = report["link"]["elements"]
+    wl = report.get("wavelength_nm", 1550)
+    steps = [
+        f"Laser safety first: keep the laser OFF until the last step, never look into a fiber end, and wear glasses rated for {wl:g} nm.",
+        "Clean and inspect every connector end face before each mating (one-click cleaner, then inspect). Dirt is the most common cause of extra loss.",
+    ]
+    for prev, e, nxt in zip([None] + els[:-1], els, els[1:] + [None]):
+        t, i = e["type"], e["id"]
+        if t == "fiber":
+            steps.append(f"Route {i} ({e.get('length_m') or 1:g} m). Keep bends wider than about 30 mm across: tight bends leak light.")
+        elif t == "connector":
+            steps.append(f"Join the two fibers at {i} with an FC/{e.get('polish_a') or 'UPC'} mating sleeve: line up the key, push in, tighten finger-tight.")
+        elif t == "splice":
+            steps.append(f"Make splice {i} ({e.get('splice_kind') or 'fusion'}), then protect it with a sleeve.")
+        elif t == "splitter":
+            steps.append(f"Connect {i} (1x{e.get('ports') or 2} splitter): input from {prev['id'] if prev else 'the source'}, "
+                         f"output 1 toward {nxt['id'] if nxt else 'the detector'}. Cap the unused outputs.")
+        elif t == "attenuator":
+            steps.append(f"Insert {i} ({e.get('loss_db') if e.get('loss_db') is not None else 10:g} dB attenuator) in line.")
+        elif t == "isolator":
+            steps.append(f"Insert {i} (isolator) with its arrow pointing away from the laser.")
+        elif t == "detector":
+            steps.append(f"Connect the last fiber to {i} (detector).")
+    steps.append(f"Last: switch on the laser ({report.get('launch_dbm', 0):g} dBm).")
+    return steps
+
+
+def fiber_test_steps(report: dict) -> list[str]:
+    steps = [f"Set the optical power meter to {report.get('wavelength_nm', 1550):g} nm. Measure by disconnecting at each point below "
+             "and plugging that fiber end into the meter (laser on, nothing pointed at your eyes)."]
+    for row in report["trace"]:
+        if row["type"] in ("connector", "splitter", "attenuator", "isolator", "splice"):
+            mw = row["power_mw"]
+            mw_txt = f"{mw:.3f} mW" if mw >= 0.001 else f"{mw * 1000:.2f} µW"
+            steps.append(f"After {row['id']} ({row['type']}): expect about {row['power_dbm']:.1f} dBm ({mw_txt}).")
+    steps.append("Within about 1 dB of these values is normal. More loss? Re-clean the connector just before the drop.")
+    return steps
+
+
+def fiber_pack(report: dict) -> dict:
+    title = (report["link"].get("title") or "").strip() or "Your fiber link"
+    rx = report.get("received_dbm")
+    return {
+        "title": title,
+        "verdict": report["verdict"],
+        "findings": report.get("findings") or [],
+        "pass_text": "This link passed every rule in the optical power budget. The parts, prices and steps below are for exactly this link.",
+        "summary": f"{report.get('wavelength_nm', 1550):g} nm · launch {report.get('launch_dbm', 0):g} dBm · "
+                   f"loss {report.get('total_loss_db', 0):.2f} dB · received {rx:.1f} dBm",
+        "items": fiber_line_items(report),
+        "tools": tool_items(_FIBER_TOOLS),
+        "sections": [
+            {"title": "Assemble the link", "steps": fiber_build_steps(report)},
+            {"title": "Check it with an optical power meter", "steps": fiber_test_steps(report)},
+        ],
+        "footer": "verdict from a deterministic optical power budget + fixed rules",
+    }
+
+
+def circuit_pack(netlist: dict, report: dict) -> dict:
+    return {
+        "title": (netlist.get("title") or "").strip() or "Your circuit",
+        "verdict": str(report.get("verdict", "UNKNOWN")).upper(),
+        "findings": report.get("findings") or [],
+        "pass_text": "This circuit passed every rule in a real ngspice simulation. The parts, prices and steps below are for exactly this netlist.",
+        "summary": f"{len(netlist.get('components', []))} parts",
+        "items": line_items(netlist),
+        "tools": tool_items(),
+        "sections": [
+            {"title": "Build it on a breadboard", "steps": build_steps(netlist, report)},
+            {"title": "Test it with a multimeter", "steps": test_steps(netlist, report)},
+            {"title": "Order a printed circuit board (optional)",
+             "intro": "Once the breadboard works, the same circuit can go on a PCB. Suggested KiCad footprints:",
+             "table": {"header": ["Ref", "Type", "KiCad footprint"], "widths": [16, 30, None],
+                       "rows": [[r["ref"], r["type"].replace("_", " "), r["footprint"]] for r in pcb_footprints(netlist)]},
+             "steps": PCB_STEPS,
+             "note": "Board houses show a live quote when you upload; small two-layer boards are usually the cheapest option. "
+                     "Netproof does not generate board layouts yet."},
+        ],
+        "footer": "verdict from an ngspice DC operating point + fixed rules",
+    }
+
+
+# ---------------------------------------------------------------------------
 # PDF
 # ---------------------------------------------------------------------------
 
@@ -264,24 +420,22 @@ def _usd(x: float) -> str:
     return f"${x:,.2f}"
 
 
-def render_pdf(netlist: dict, report: dict) -> bytes:
+def render_pdf(pack: dict) -> bytes:
+    """Render a pack (circuit_pack / fiber_pack) as a PDF."""
     from fpdf import FPDF  # local import: only this route needs it
 
-    verdict = str(report.get("verdict", "UNKNOWN")).upper()
-    title = (netlist.get("title") or "").strip() or "Your circuit"
-    parts = line_items(netlist)
-    tools = tool_items()
+    verdict = str(pack.get("verdict", "UNKNOWN")).upper()
+    parts, tools = pack["items"], pack["tools"]
     parts_total = round(sum(p["total_usd"] for p in parts), 2)
     tools_total = round(sum(t["total_usd"] for t in tools), 2)
+    footer_text = f"Netproof build pack · {pack['footer']} · prices: single-unit estimates, {PRICES_AS_OF}"
 
     class PDF(FPDF):
         def footer(self):
             self.set_y(-14)
             self.set_font("Sans", "", 7.5)
             self.set_text_color(*_MUTED)
-            self.cell(0, 5, f"Netproof build pack · verdict from an ngspice DC operating point + fixed rules · "
-                            f"prices are typical single-unit estimates ({PRICES_AS_OF}); check the links · page {self.page_no()}",
-                      align="C")
+            self.cell(0, 5, f"{footer_text} · page {self.page_no()}", align="C")
 
     pdf = PDF(format="Letter")
     pdf.set_margins(16, 16, 16)
@@ -299,7 +453,7 @@ def render_pdf(netlist: dict, report: dict) -> bytes:
 
     def section(num, text):
         pdf.ln(4)
-        eyebrow(f"{num}  {text}")
+        eyebrow(f"{num:02d}  {text}")
         pdf.set_draw_color(*_LINE)
         pdf.line(pdf.l_margin, pdf.get_y(), pdf.l_margin + W, pdf.get_y())
         pdf.ln(2)
@@ -319,6 +473,7 @@ def render_pdf(netlist: dict, report: dict) -> bytes:
             pdf.ln(0.6)
 
     def table(rows, widths, header, link_col=None):
+        widths = [w if w is not None else W - sum(x for x in widths if x is not None) for w in widths]
         pdf.set_font("Sans", "B", 8)
         pdf.set_text_color(*_MUTED)
         for h, w in zip(header, widths):
@@ -334,16 +489,18 @@ def render_pdf(netlist: dict, report: dict) -> bytes:
                     pdf.set_text_color(*_ACCENT)
                     x = pdf.get_x()
                     for label, url in row["links"]:
-                        lw = pdf.get_string_width(label) + 2.5
-                        pdf.cell(lw, 6.5, label, link=url)
+                        pdf.cell(pdf.get_string_width(label) + 2.5, 6.5, label, link=url)
                     pdf.line(x, pdf.get_y() + 6.5, x + w, pdf.get_y() + 6.5)
                     pdf.set_x(x + w)
                     pdf.set_text_color(*_INK)
                 else:
-                    pdf.cell(w, 6.5, val, border="B")
+                    text = val
+                    while text and pdf.get_string_width(text) > w - 2:
+                        text = text[:-2] + "…"
+                    pdf.cell(w, 6.5, text, border="B")
             pdf.ln()
 
-    # Header
+    # Header band
     pdf.set_fill_color(*_INK)
     pdf.rect(0, 0, pdf.w, 34, style="F")
     pdf.set_xy(16, 9)
@@ -353,7 +510,7 @@ def render_pdf(netlist: dict, report: dict) -> bytes:
     pdf.set_xy(16, 15)
     pdf.set_font("Sans", "B", 17)
     pdf.set_text_color(255, 255, 255)
-    pdf.cell(W - 30, 10, title)
+    pdf.cell(W - 30, 10, pack["title"])
     vr = _VERDICT_RGB.get(verdict, _MUTED)
     pdf.set_fill_color(*vr)
     pdf.set_xy(pdf.w - 16 - 26, 15)
@@ -361,61 +518,48 @@ def render_pdf(netlist: dict, report: dict) -> bytes:
     pdf.cell(26, 10, verdict, align="C", fill=True)
     pdf.set_y(40)
 
-    # 01 Summary
-    section("01", "Summary")
-    findings = report.get("findings") or []
+    num = 1
+    section(num, "Summary")
     if verdict == "PASS":
-        para("This circuit passed every rule in a real ngspice simulation. The parts, prices and steps below are for exactly this netlist.")
+        para(pack["pass_text"])
     else:
-        para(f"Verdict {verdict}: it simulates without a STOP, but these warnings still apply. Read them before you build:", color=vr)
-        for f in findings:
+        para(f"Verdict {verdict}: no STOP, but these warnings still apply. Read them before you build:", color=vr)
+        for f in pack["findings"]:
             para(f"• {f.get('rule_id', '')}: {f.get('message', '')}", size=9)
-    counts = f"{len(netlist.get('components', []))} parts · parts {_usd(parts_total)} · tools {_usd(tools_total)} · total {_usd(parts_total + tools_total)}"
     pdf.set_font("Mono", "", 9)
     pdf.set_text_color(*_INK)
-    pdf.cell(0, 7, counts, new_x="LMARGIN", new_y="NEXT")
+    pdf.multi_cell(0, 6, f"{pack['summary']} · parts {_usd(parts_total)} · tools {_usd(tools_total)} · "
+                         f"total {_usd(parts_total + tools_total)}", new_x="LMARGIN", new_y="NEXT")
 
-    # 02 Bill of materials
-    section("02", "Bill of materials")
-    widths = [10, 38, 50, 20, 20, W - 138]
-    table(
-        [{"cells": [str(p["qty"]), p["name"], p["spec"], _usd(p["unit_usd"]), _usd(p["total_usd"]), ""],
-          "links": p["links"]} for p in parts],
-        widths, ["Qty", "Part", "Spec", "Est. unit", "Est. total", "Buy"], link_col=5,
-    )
+    num += 1
+    section(num, "Bill of materials")
+    widths = [10, 40, 52, 20, 20, None]
+    table([{"cells": [str(p["qty"]), p["name"], p["spec"], _usd(p["unit_usd"]), _usd(p["total_usd"]), ""], "links": p["links"]}
+           for p in parts], widths, ["Qty", "Part", "Spec", "Est. unit", "Est. total", "Buy"], link_col=5)
     pdf.ln(1)
     para("Refs: " + "; ".join(f"{p['name']} = {', '.join(p['refs'])}" for p in parts), size=8, color=_MUTED)
     pdf.ln(2)
     eyebrow("Tools and supplies (one-time)")
-    table(
-        [{"cells": [str(t["qty"]), t["name"], t["spec"] + (f" ({t['note']})" if t["note"] else ""), _usd(t["unit_usd"]), _usd(t["total_usd"]), ""],
-          "links": t["links"]} for t in tools],
-        widths, ["Qty", "Item", "Spec", "Est. unit", "Est. total", "Buy"], link_col=5,
-    )
+    table([{"cells": [str(t["qty"]), t["name"], t["spec"], _usd(t["unit_usd"]), _usd(t["total_usd"]), ""], "links": t["links"]}
+           for t in tools], widths, ["Qty", "Item", "Spec", "Est. unit", "Est. total", "Buy"], link_col=5)
     pdf.ln(2)
     pdf.set_font("Sans", "B", 10)
     pdf.set_text_color(*_INK)
-    pdf.cell(0, 6, f"Estimated total: {_usd(parts_total + tools_total)}  (parts {_usd(parts_total)} + tools {_usd(tools_total)}, before tax and shipping)",
-             new_x="LMARGIN", new_y="NEXT")
-    para("Buying single parts often costs more than a small assortment kit (resistor kits, LED kits) that covers future builds too.", size=8.5, color=_MUTED)
+    pdf.cell(0, 6, f"Estimated total: {_usd(parts_total + tools_total)}  (parts {_usd(parts_total)} + tools {_usd(tools_total)}, "
+                   f"before tax and shipping)", new_x="LMARGIN", new_y="NEXT")
 
-    # 03 Build
-    section("03", "Build it on a breadboard")
-    numbered(build_steps(netlist, report))
-
-    # 04 Test
-    section("04", "Test it with a multimeter")
-    numbered(test_steps(netlist, report))
-
-    # 05 PCB
-    section("05", "Order a printed circuit board (optional)")
-    para("Once the breadboard works, the same circuit can go on a PCB. Suggested KiCad footprints:")
-    pdf.ln(1)
-    table([{"cells": [r["ref"], r["type"].replace("_", " "), r["footprint"]], "links": []} for r in pcb_footprints(netlist)],
-          [16, 30, W - 46], ["Ref", "Type", "KiCad footprint"])
-    pdf.ln(2)
-    numbered(PCB_STEPS)
-    para("Board houses show a live quote when you upload; small two-layer boards are usually the cheapest option. Netproof does not generate board layouts yet.",
-         size=8.5, color=_MUTED)
+    for sec in pack["sections"]:
+        num += 1
+        section(num, sec["title"])
+        if sec.get("intro"):
+            para(sec["intro"])
+            pdf.ln(1)
+        if sec.get("table"):
+            t = sec["table"]
+            table([{"cells": r, "links": []} for r in t["rows"]], t["widths"], t["header"])
+            pdf.ln(2)
+        numbered(sec.get("steps", []))
+        if sec.get("note"):
+            para(sec["note"], size=8.5, color=_MUTED)
 
     return bytes(pdf.output())

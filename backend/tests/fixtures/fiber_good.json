@@ -1,0 +1,9 @@
+{"title":"1550 nm lab link with 1x2 tap","elements":[
+ {"id":"L1","type":"laser","wavelength_nm":1550,"power_dbm":0},
+ {"id":"F1","type":"fiber","fiber_type":"smf","length_m":2},
+ {"id":"C1","type":"connector","polish_a":"UPC","polish_b":"UPC"},
+ {"id":"F2","type":"fiber","fiber_type":"smf","length_m":10},
+ {"id":"S1","type":"splitter","ports":2},
+ {"id":"F3","type":"fiber","fiber_type":"smf","length_m":2},
+ {"id":"C2","type":"connector","polish_a":"UPC","polish_b":"UPC"},
+ {"id":"D1","type":"detector"}]}

@@ -1,0 +1,5 @@
+{"title":"APC patch cord into a PC port","elements":[
+ {"id":"L1","type":"laser","wavelength_nm":1550,"power_dbm":0},
+ {"id":"F1","type":"fiber","fiber_type":"smf","length_m":3},
+ {"id":"C1","type":"connector","polish_a":"APC","polish_b":"PC"},
+ {"id":"D1","type":"detector"}]}

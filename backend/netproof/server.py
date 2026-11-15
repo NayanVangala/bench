@@ -1659,11 +1659,49 @@ def build_pack(netlist: IRNetlist) -> Response:
                 "message": "This circuit fails its check (STOP). Fix it first, for example with Repair, then get the build pack.",
             },
         )
-    pdf = buildpack.render_pdf(netlist.model_dump(mode="json"), report)
+    pdf = buildpack.render_pdf(buildpack.circuit_pack(netlist.model_dump(mode="json"), report))
     return Response(
         pdf,
         media_type="application/pdf",
         headers={"Content-Disposition": 'attachment; filename="netproof-build-pack.pdf"'},
+    )
+
+
+@app.post("/fiber/check")
+def fiber_check(body: dict) -> Any:
+    """Fiber link -> optical power budget report. Deterministic, no LLM.
+
+    Body: {"title"?, "elements": [...]}, ordered laser -> ... -> detector
+    (see fiber.py for element fields and default losses).
+    """
+    from . import fiber
+
+    try:
+        link = fiber.FiberLink.model_validate(body)
+    except Exception as exc:  # pydantic ValidationError -> 422 like other routes
+        raise HTTPException(status_code=422, detail={"error": "validation_error", "message": str(exc).splitlines()[0]})
+    return JSONResponse(content=fiber.check_link(link))
+
+
+@app.post("/fiber/build-pack")
+def fiber_build_pack(body: dict) -> Response:
+    """PDF build pack for a fiber link that passed its power budget (409 on STOP)."""
+    from . import buildpack, fiber
+
+    try:
+        link = fiber.FiberLink.model_validate(body)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail={"error": "validation_error", "message": str(exc).splitlines()[0]})
+    report = fiber.check_link(link)
+    if report["verdict"] == "STOP":
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "not_buildable", "message": "This link fails its power budget (STOP). Fix it first, then get the build pack."},
+        )
+    return Response(
+        buildpack.render_pdf(buildpack.fiber_pack(report)),
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'attachment; filename="netproof-fiber-build-pack.pdf"'},
     )
 
 

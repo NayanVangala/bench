@@ -740,7 +740,14 @@ export function setupInteraction(scene, camera, renderer, meshesById, callbacks)
     let offset = new THREE.Vector3(0, 0, 0);
     if (hit && hit.point) {
       const root = meshMap.get(id);
-      if (root) offset.copy(root.position).sub(hit.point);
+      // Measure the grab offset on the same ground plane the drag moves on
+      // (not the mesh surface hit): for a tall part the surface point sits
+      // above the plane, and mixing the two made the part jump on drag start.
+      const ground = new THREE.Vector3();
+      if (root) {
+        setPointerFromEvent(event);
+        offset.copy(root.position).sub(raycaster.ray.intersectPlane(groundPlane, ground) ? ground : hit.point);
+      }
     }
     press = { x: event.clientX, y: event.clientY, id, point: hit ? hit.point : null, offset, moved: false };
     if (hit) {

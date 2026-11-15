@@ -356,19 +356,23 @@
     });
 
   // Drag on the 3D breadboard: scene units are 25 mm holes, scene -z is +y.
-  // Snap to the hole grid and re-trace once the drag settles.
+  // The drag reports the cursor's hit on the floor plane, not the part's own
+  // position (parts sit at beam height), so only the CHANGE since the drag
+  // started is used. Snap to the hole grid and re-trace once the drag settles.
   var moveTimer = null;
+  var drag = null; // { id, x0, z0, xmm, ymm } for the drag in progress
   function onMove(id, pose) {
     if (!bench || !pose) return;
     var e = bench.elements.find(function (el) { return el.id === id; });
     if (!e) return;
+    if (!drag || drag.id !== id) drag = { id: id, x0: pose.x, z0: pose.z, xmm: e.x_mm, ymm: e.y_mm };
     var W = bench.width_mm || 600, D = bench.depth_mm || 300;
-    var x = Math.round((pose.x * 25 + W / 2) / 25) * 25;
-    var y = Math.round((-pose.z * 25 + D / 2) / 25) * 25;
+    var x = Math.round((drag.xmm + (pose.x - drag.x0) * 25) / 25) * 25;
+    var y = Math.round((drag.ymm - (pose.z - drag.z0) * 25) / 25) * 25;
     e.x_mm = Math.min(W, Math.max(0, x));
     e.y_mm = Math.min(D, Math.max(0, y));
     clearTimeout(moveTimer);
-    moveTimer = setTimeout(check, 250);
+    moveTimer = setTimeout(function () { drag = null; check(); }, 250);
   }
   $('optics-pack-cta').addEventListener('click', buildPack);
 

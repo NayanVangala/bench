@@ -1,0 +1,1 @@
+{"components":[{"id":"V1","nodes":["vcc","0"],"type":"voltage_source","value":9.0},{"id":"R1","nodes":["vcc","led"],"rating_watts":0.25,"type":"resistor","value":100000.0},{"color":"red","id":"D1","nodes":["led","0"],"type":"led","value":2.0}],"title":"led_undercurrent"}

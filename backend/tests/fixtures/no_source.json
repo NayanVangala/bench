@@ -1,0 +1,1 @@
+{"components":[{"id":"R1","nodes":["a","0"],"type":"resistor","value":470.0},{"color":"red","id":"D1","nodes":["a","0"],"type":"led","value":2.0}],"title":"No power source"}

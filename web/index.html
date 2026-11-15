@@ -1,0 +1,1001 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Netproof MVP</title>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<!--
+  Netproof MVP front end. Static page, plain HTML+JS, no build step.
+  The only CDN use is the <script type="importmap"> below, which maps
+  bare specifier 'three' for web/3d/main3d.js; the flat page never
+  loads it and works with no network beyond the same-origin API.
+  File owner: web/index.html ONLY.
+
+  3D wiring (web/3d/ landed AFTER this page was first written:
+  main3d.js + scene.js + components.js + interaction.js + overlay.js
+  + edit-panel.js + history.js + README-3D.md are now present):
+  - The page does NOT assume 3D works. It renders the full flat MVP
+    on its own, plus a <div id="scene3d"> container, and a guarded
+    <script type="module"> dynamically imports ./3d/main3d.js inside
+    try/catch. If the import or init throws, the page keeps working
+    flat and the 3D container shows the failure instead of an error.
+  - Import map: 'three' MUST map to the unpkg three@0.160.0 URL that
+    scene.js / components.js import directly, because OrbitControls
+    (unpkg) imports bare 'three' and must share scene.js's instance
+    (README-3D.md). main3d.js itself imports three from jsdelivr, a
+    second copy the siblings ignore; that is the 3D layer's own
+    inconsistency, not this page's.
+  - Real entry point (read from web/3d/main3d.js):
+      init3D(container, callbacks, options), also the default export.
+    callbacks used here: onSelect(id, component), onEdit(id, updatedRow,
+    netlist), onNetlistChange(netlist), onMove(id, pose) (layout-only),
+    onError(error) (writes #scene3d-status, never the red banner),
+    editOnSelect: false (the page handles selection/editing itself in
+    the table, per main3d.js's own docstring). options carries the
+    initial {netlist, report, history}.
+    Handle methods the page calls: setNetlist(netlist, report),
+    updateReport(report), renderHistory(history), select(id),
+    clearSelection(), dispose().
+  - KNOWN ISSUE (3D owner to fix, NOT this file): init3D as landed
+    throws at enableInteraction, because it calls
+    interaction.setupInteraction with ONE options object while the
+    sibling expects 5 positional args
+    (scene, camera, renderer, meshesById, callbacks); same arity
+    mismatch for components.buildCircuit(netlist) (called with
+    3 args), edit-panel.showEditPanel(component, report, callbacks)
+    (called with 2 args), overlay.updateOverlays(report, meshesById)
+    (called with 1 object arg), and history.js exports no render
+    function main3d looks for. Until that is aligned, the bootstrap
+    below shows the 3D failure text and the flat page carries the MVP.
+  - hooks passed to the 3D entry:
+      getNetlist() -> current editable netlist (ir.py shape, see below)
+      getReport()  -> last backend Report dict, or null
+      onSelect(id) -> user clicked a component in 3D; page highlights
+                      the table row and focuses its value field
+                      (click-to-select editing)
+      onEdit(id, patch) -> 3D edited a component; page applies the patch
+                      ({value, nodes, type, ...}) and re-renders the table
+  - Page side of the bridge (also exposed as window.NetproofPage for any
+    3D module that prefers it): getNetlist, getReport, selectComponent,
+    applyEdit, applyNetlist, getRepairHistory. The page calls
+    handle.setNetlist/updateReport/renderHistory on every new
+    Report so the 3D view always mirrors the table.
+
+  Same-origin endpoints (server.py not yet landed as of 2026-11-15, so
+  these follow the MVP spec + backend/tests/test_server.py):
+    POST /run-image  multipart FormData {image: File, goal?: string}
+                      -> SSE stream, then final JSON {verdict, findings, netlist, mock}
+    POST /run-goal   JSON {goal: string}
+                      -> SSE stream, then final JSON {verdict, findings, netlist, mock}
+    POST /check      JSON Netlist (bare ir.py shape, NO wrapper, NO goal,
+                      NO LLM on the server)
+                        {"title": string, "components": [{id, type, value,
+                         nodes: [n1, n2], rating_watts?, color?}]}
+                      -> JSON Report (see below)
+    POST /repair     JSON {netlist: <Netlist as above>, findings: [...],
+                      round: number, goal?: string}
+                      -> JSON {netlist, changes: [...], round, verdict, findings, mock}
+    Downloads: POST /download/netlist and POST /download/bom, each
+                      with the bare Netlist JSON body (per test_server.py).
+                      No GET download route, no server-side state: the
+                      server renders the file from the posted Netlist.
+  SSE event lines are `data: {...}` JSON, one per line. Each event may carry:
+    agent, message|text|detail, type|level, elapsed_s|elapsed, verdict, mock,
+    error|llm_error. Any event / response with an LLM error is surfaced in
+    the red error banner and never swallowed.
+
+  Report shape (ALL numbers shown on this page come from a backend Report
+  only; the page never computes a verdict, current, voltage, or power):
+  Two Report models exist in the backend and the page adapts to both:
+  - backend/netproof/ir.py Report: verdict, findings [{severity, rule_id,
+    component_ids, message}], node_voltages {node: V},
+    branch_currents {componentId: A}, power {componentId: W},
+    netlist_used (Netlist), uncertain [string].
+  - backend/netproof/rules.py Report.to_dict(): verdict, findings
+    [{severity, code, message, component, node, details}],
+    node_voltages, branch_currents, component_power {componentId: W},
+    netlist_used {components: [{refdes, kind, nodes, value,
+    power_rating_w}], nodes: [...]}, uncertain [string].
+  The table's read-only columns are filled ONLY from those Report dicts:
+  node voltage = node_voltages[first node of the row], current =
+  branch_currents[component id], power = component_power[component id]
+  (or power[component id]). Blank until a Report arrives. Editable
+  columns are id, type, value, nodes (plus rating_watts / color when the
+  server echoes them; they are preserved round-trip, not displayed).
+-->
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; background: #f6f7f9; color: #111; }
+  header { background: #111; color: #fff; padding: 14px 20px; }
+  header h1 { margin: 0; font-size: 20px; }
+  header p { margin: 4px 0 0; color: #bbb; font-size: 13px; }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+  section { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 14px; margin-bottom: 14px; }
+  h2 { margin: 0 0 10px; font-size: 16px; }
+  label { display: block; font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+  textarea { width: 100%; min-height: 64px; padding: 8px; font: inherit; border: 1px solid #bbb; border-radius: 6px; }
+  button { font: inherit; padding: 8px 14px; border-radius: 6px; border: 1px solid #111; background: #111; color: #fff; cursor: pointer; margin: 4px 6px 4px 0; }
+  button.secondary { background: #fff; color: #111; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  #dropzone { border: 2px dashed #888; border-radius: 8px; padding: 24px; text-align: center; color: #555; cursor: pointer; margin-bottom: 10px; }
+  #dropzone.drag { border-color: #111; background: #eef; }
+  #dropzone input { display: none; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
+  .row > div { flex: 1; min-width: 220px; }
+  /* Error banner: LLM failure, never silent */
+  #error-banner { display: none; background: #b00020; color: #fff; padding: 12px 16px; border-radius: 8px; margin-bottom: 14px; font-weight: 600; }
+  #error-banner.show { display: block; }
+  #error-banner small { display: block; font-weight: 400; margin-top: 4px; }
+  /* Verdict banner */
+  #verdict { display: none; text-align: center; padding: 22px; border-radius: 8px; font-size: 34px; font-weight: 800; letter-spacing: 1px; margin-bottom: 14px; }
+  #verdict.show { display: block; }
+  #verdict.pass { background: #1a7f37; color: #fff; }
+  #verdict.warn { background: #d97706; color: #fff; }
+  #verdict.stop { background: #b00020; color: #fff; }
+  #verdict .mock-tag { display: block; font-size: 30px; font-weight: 800; margin-top: 6px; }
+  #verdict small { display: block; font-size: 14px; font-weight: 400; margin-top: 6px; }
+  /* Live console */
+  #console { background: #111; color: #eee; border-radius: 8px; padding: 10px; min-height: 140px; max-height: 320px; overflow-y: auto; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; line-height: 1.5; }
+  #console .line { white-space: pre-wrap; word-break: break-word; }
+  #console .t { color: #888; }
+  #console .agent { font-weight: 700; }
+  #console .err { color: #ff8080; }
+  .legend { font-size: 12px; color: #555; margin-top: 6px; }
+  .legend span { display: inline-block; margin-right: 12px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+  /* Findings */
+  #findings { margin: 0; padding-left: 20px; }
+  #findings li { margin-bottom: 6px; }
+  #findings .sev { font-weight: 700; text-transform: uppercase; font-size: 12px; }
+  #findings .code { font-family: ui-monospace, Menlo, Consolas, monospace; font-weight: 700; }
+  .empty { color: #777; }
+  /* Image + netlist split */
+  .split { display: grid; grid-template-columns: 1fr 1.4fr; gap: 14px; align-items: start; }
+  @media (max-width: 800px) { .split { grid-template-columns: 1fr; } }
+  #preview { max-width: 100%; border: 1px solid #ccc; border-radius: 6px; display: none; }
+  #preview.show { display: block; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { border: 1px solid #ccc; padding: 5px; text-align: left; }
+  th { background: #eee; }
+  td input { width: 100%; border: none; font: inherit; padding: 2px; background: transparent; }
+  td input:focus { outline: 2px solid #2684ff; background: #fff; }
+  td.readonly { background: #f4f4f4; color: #333; }
+  tr.selected td { background: #fff3cd; }
+  tr.selected td input { background: transparent; }
+  /* 3D view */
+  #scene3d { position: relative; min-height: 320px; height: 420px; border: 1px solid #ccc; border-radius: 8px; background: #111; color: #eee; overflow: hidden; }
+  #scene3d canvas { display: block; width: 100%; height: 100%; }
+  #scene3d .fallback { padding: 24px; color: #bbb; }
+  #scene3d-status { font-size: 13px; color: #555; margin-top: 6px; }
+  #selected-component { font-weight: 600; }
+  .controls-hint { font-size: 13px; color: #555; }
+  .controls-hint kbd { background: #eee; border: 1px solid #ccc; border-radius: 4px; padding: 1px 5px; font: inherit; }
+  #repair-history { margin: 0; padding-left: 20px; }
+  #repair-history li { margin-bottom: 8px; }
+  #status { font-size: 13px; color: #555; margin-top: 6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Netproof</h1>
+  <p>Circuit schematic checker. Upload a schematic image or describe the goal, run the agents, edit the netlist, repair, re-check.</p>
+</header>
+<main>
+
+  <div id="error-banner" role="alert"></div>
+
+  <div id="verdict" aria-live="polite"></div>
+
+  <section id="input-section">
+    <h2>1. Input</h2>
+    <div id="dropzone" tabindex="0" role="button" aria-label="Upload schematic image">
+      <strong>Drag &amp; drop a schematic image here</strong><br>
+      or click to choose a file (PNG, JPG, SVG)
+      <input type="file" id="file-input" accept="image/*">
+    </div>
+    <div class="row">
+      <div>
+        <label for="goal">Goal (text, optional if an image is uploaded)</label>
+        <textarea id="goal" placeholder="e.g. 5V regulator, 100 mA load, output ripple under 50 mV"></textarea>
+      </div>
+    </div>
+    <div>
+      <button id="run-image-btn" type="button">Run (image)</button>
+      <button id="run-goal-btn" type="button">Run (goal)</button>
+      <span id="status"></span>
+    </div>
+  </section>
+
+  <section id="console-section">
+    <h2>2. Live console</h2>
+    <div id="console" aria-live="polite"><div class="line"><span class="t">[--.--s]</span> Ready. Run an image or a goal to see agent events here.</div></div>
+    <div class="legend" id="legend">Agent colours appear here as agents speak.</div>
+  </section>
+
+  <section id="findings-section">
+    <h2>3. Findings</h2>
+    <ul id="findings"><li class="empty">No findings yet. Run a check first.</li></ul>
+    <p id="uncertain" class="empty"></p>
+  </section>
+
+  <section id="netlist-section">
+    <h2>4. Schematic &amp; netlist</h2>
+    <div class="split">
+      <div>
+        <label>Uploaded image</label>
+        <img id="preview" alt="Uploaded schematic preview">
+        <p id="no-image" class="empty">No image uploaded yet.</p>
+        <p id="file-name" class="empty"></p>
+      </div>
+      <div>
+        <label>Netlist (editable: id, type, value, nodes. Node voltage / current / power come only from the backend Report and are read-only.)</label>
+        <table>
+          <thead>
+            <tr><th>id</th><th>type</th><th>value</th><th>nodes</th><th>node voltage</th><th>current</th><th>power</th></tr>
+          </thead>
+          <tbody id="netlist-body">
+            <tr><td colspan="7" class="empty">No netlist yet. Run an image or a goal, or add a row below.</td></tr>
+          </tbody>
+        </table>
+        <div>
+          <button id="add-row-btn" type="button" class="secondary">Add row</button>
+          <button id="repair-btn" type="button">Repair</button>
+          <button id="recheck-btn" type="button">Re-check (no LLM)</button>
+        </div>
+        <p id="recheck-note" class="empty">Re-check POSTs the edited table to /check as a bare Netlist. It does not call any LLM.</p>
+        <p class="empty">Selected component: <span id="selected-component">none</span> (click a row, or click a component in the 3D view below).</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="scene3d-section">
+    <h2>5. 3D view</h2>
+    <div id="scene3d" aria-label="3D circuit view"><div class="fallback">3D view loading&hellip; If web/3d/main3d.js is not present yet, this panel stays as a placeholder and the flat table above still works.</div></div>
+    <p class="controls-hint">Orbit: drag with the left mouse button &middot; Zoom: scroll wheel &middot; Pan: drag with the right mouse button (or two-finger drag on trackpad). Click a component in 3D to select it and edit it in the netlist table above.</p>
+    <p id="scene3d-status">3D status: waiting for web/3d/main3d.js&hellip;</p>
+  </section>
+
+  <section id="repair-section">
+    <h2>6. Repair history</h2>
+    <ol id="repair-history"><li class="empty">No repairs yet. Repair runs at most 3 rounds.</li></ol>
+    <p id="repair-round-label" class="empty">Round: 0 / 3</p>
+  </section>
+
+  <section id="download-section">
+    <h2>7. Downloads</h2>
+    <button id="dl-cir-btn" type="button" class="secondary">Download netlist.cir</button>
+    <button id="dl-bom-btn" type="button" class="secondary">Download BOM.csv</button>
+    <p class="empty">Downloads POST the current netlist to /download/netlist (netlist.cir) and /download/bom (BOM.csv). No GET download route and no server-side state: the file is rendered from the posted Netlist. BOM header: id,type,value,rating,qty.</p>
+  </section>
+
+</main>
+<script>
+(function () {
+  'use strict';
+
+  var AGENT_COLORS = ['#4da3ff', '#ffb020', '#3ddc84', '#ff7ab8', '#b388ff', '#00c2a8', '#ff8a5c', '#8ecbff'];
+  var agentColor = {};
+  var colorIndex = 0;
+  var startTime = null;
+  var netlist = [];          // editable components, ir.py shape
+  var findings = [];
+  var lastReport = null;     // last backend Report dict (or null); ONLY source of numbers
+  var repairRound = 0;
+  var MAX_REPAIR_ROUNDS = 3;
+  var selectedFile = null;
+  var selectedId = null;
+  var busy = false;
+  var threeD = null;         // handle returned by the 3D module, if any
+  var threeDModule = null;   // module namespace from ./3d/main3d.js, if loaded
+
+  var $ = function (id) { return document.getElementById(id); };
+  var consoleEl = $('console');
+  var errorBanner = $('error-banner');
+  var verdictEl = $('verdict');
+  var statusEl = $('status');
+
+  function elapsed() {
+    if (!startTime) return 0;
+    return (Date.now() - startTime) / 1000;
+  }
+  function fmtElapsed(s) { return '[' + s.toFixed(2) + 's]'; }
+
+  function colorFor(agent) {
+    if (!agentColor[agent]) {
+      agentColor[agent] = AGENT_COLORS[colorIndex % AGENT_COLORS.length];
+      colorIndex++;
+      renderLegend();
+    }
+    return agentColor[agent];
+  }
+  function renderLegend() {
+    var legend = $('legend');
+    var html = Object.keys(agentColor).map(function (a) {
+      return '<span><i style="background:' + agentColor[a] + '"></i>' + escapeHtml(a) + '</span>';
+    }).join('');
+    legend.innerHTML = html || 'Agent colours appear here as agents speak.';
+  }
+  function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  // Display-only formatting of a Report number; never used to decide anything.
+  function fmtNum(v) {
+    if (v == null || v === '') return '';
+    var n = Number(v);
+    return isFinite(n) ? String(n) : escapeHtml(v);
+  }
+
+  function showError(title, detail) {
+    errorBanner.innerHTML = escapeHtml(title) +
+      (detail ? '<small>' + escapeHtml(detail) + '</small>' : '');
+    errorBanner.classList.add('show');
+  }
+  function clearError() { errorBanner.classList.remove('show'); errorBanner.textContent = ''; }
+
+  function logLine(agent, message, level) {
+    var div = document.createElement('div');
+    div.className = 'line' + (level === 'error' ? ' err' : '');
+    var color = colorFor(agent || 'system');
+    div.innerHTML = '<span class="t">' + fmtElapsed(elapsed()) + '</span> ' +
+      '<span class="agent" style="color:' + color + '">' + escapeHtml(agent || 'system') + '</span>: ' +
+      escapeHtml(message || '');
+    consoleEl.appendChild(div);
+    consoleEl.scrollTop = consoleEl.scrollHeight;
+  }
+
+  function setVerdict(verdict, mock, note) {
+    var v = String(verdict || '').toUpperCase();
+    verdictEl.className = 'show';
+    verdictEl.classList.remove('pass', 'warn', 'stop');
+    if (v === 'PASS') verdictEl.classList.add('pass');
+    else if (v === 'WARN' || v === 'WARNING') verdictEl.classList.add('warn');
+    else if (v === 'STOP' || v === 'FAIL' || v === 'ERROR') verdictEl.classList.add('stop');
+    else verdictEl.classList.add('warn');
+    var label = v === 'WARN' || v === 'WARNING' ? 'WARN' : (v || 'UNKNOWN');
+    verdictEl.innerHTML = escapeHtml(label) +
+      (mock ? '<span class="mock-tag">MOCK</span>' : '') +
+      (note ? '<small>' + escapeHtml(note) + '</small>' : '');
+  }
+
+  function renderFindings() {
+    var ul = $('findings');
+    if (!findings.length) {
+      ul.innerHTML = '<li class="empty">No findings.</li>';
+    } else {
+      ul.innerHTML = findings.map(function (f) {
+        if (typeof f === 'string') return '<li>' + escapeHtml(f) + '</li>';
+        var sev = f.severity || f.level || f.type || '';
+        var code = f.rule_id || f.code || f.rule || '';
+        var msg = f.message || f.text || f.detail || JSON.stringify(f);
+        var where = f.component || (f.component_ids && f.component_ids.join(', ')) || f.id || f.node || '';
+        return '<li><span class="code">' + escapeHtml(code) + '</span> ' +
+          '<span class="sev">' + escapeHtml(sev) + '</span> ' + escapeHtml(msg) +
+          (where ? ' (' + escapeHtml(where) + ')' : '') + '</li>';
+      }).join('');
+    }
+    var unc = lastReport && Array.isArray(lastReport.uncertain) ? lastReport.uncertain : [];
+    $('uncertain').textContent = unc.length ? 'Uncertain (from Report): ' + unc.join('; ') : '';
+  }
+
+  // Normalise one component to ir.py shape. Accepts ir.py
+  // {id, type, value, nodes, rating_watts, color}, the rules.py
+  // netlist_used row {refdes, kind, value, nodes, power_rating_w},
+  // and the legacy {name, kind, net} shape.
+  function normRow(r) {
+    r = r || {};
+    var nodes = Array.isArray(r.nodes) ? r.nodes.slice(0, 2)
+      : (typeof r.nodes === 'string' ? r.nodes.split(/[\s,]+/).filter(Boolean)
+      : (r.net ? String(r.net).split(/[\s,]+/).filter(Boolean) : []));
+    return {
+      id: r.id || r.refdes || r.name || '',
+      type: r.type || r.kind || '',
+      value: r.value != null ? r.value : '',
+      nodes: nodes,
+      rating_watts: r.rating_watts != null ? r.rating_watts : (r.power_rating_w != null ? r.power_rating_w : undefined),
+      color: r.color || undefined
+    };
+  }
+  function normNetlist(input) {
+    if (!input) return [];
+    if (Array.isArray(input)) return input.map(normRow);
+    if (Array.isArray(input.components)) return input.components.map(normRow);
+    return [];
+  }
+
+  // Read-only numbers, ONLY from the last backend Report.
+  function reportNumbers(row) {
+    if (!lastReport) return { voltage: '', current: '', power: '' };
+    var voltages = lastReport.node_voltages || {};
+    var currents = lastReport.branch_currents || {};
+    var powers = lastReport.component_power || lastReport.power || {};
+    var firstNode = row.nodes && row.nodes[0];
+    return {
+      voltage: firstNode != null && voltages[firstNode] != null ? fmtNum(voltages[firstNode]) : '',
+      current: currents[row.id] != null ? fmtNum(currents[row.id]) : '',
+      power: powers[row.id] != null ? fmtNum(powers[row.id]) : ''
+    };
+  }
+
+  function renderNetlist() {
+    var body = $('netlist-body');
+    if (!netlist.length) {
+      body.innerHTML = '<tr><td colspan="7" class="empty">No netlist yet. Run an image or a goal, or add a row below.</td></tr>';
+    } else {
+      body.innerHTML = netlist.map(function (r, i) {
+        var row = normRow(r);
+        var nums = reportNumbers(row);
+        return '<tr data-row="' + i + '" data-id="' + escapeHtml(row.id) + '"' +
+          (row.rating_watts != null ? ' data-rating-watts="' + escapeHtml(row.rating_watts) + '"' : '') +
+          (row.color ? ' data-color="' + escapeHtml(row.color) + '"' : '') +
+          (selectedId && row.id === selectedId ? ' class="selected"' : '') + '>' +
+          '<td><input data-field="id" value="' + escapeHtml(row.id) + '"></td>' +
+          '<td><input data-field="type" value="' + escapeHtml(row.type) + '"></td>' +
+          '<td><input data-field="value" value="' + escapeHtml(row.value) + '"></td>' +
+          '<td><input data-field="nodes" value="' + escapeHtml(row.nodes.join(' ')) + '"></td>' +
+          '<td class="readonly">' + escapeHtml(nums.voltage) + '</td>' +
+          '<td class="readonly">' + escapeHtml(nums.current) + '</td>' +
+          '<td class="readonly">' + escapeHtml(nums.power) + '</td></tr>';
+      }).join('');
+    }
+    $('selected-component').textContent = selectedId || 'none';
+  }
+
+  // Parse a value string to a number, accepting SI suffixes the user
+  // may type in the table ("1k" -> 1000, "2.2M" -> 2200000, "10m" ->
+  // 0.01, "100n" -> 1e-7, "10u" -> 1e-5). A trailing unit letter
+  // ("V", "ohm", "F") is ignored. Returns null when unparseable.
+  var SI_MULTIPLIERS = { '': 1, k: 1e3, K: 1e3, M: 1e6, G: 1e9, m: 1e-3, u: 1e-6, '\u00b5': 1e-6, '\u03bc': 1e-6, n: 1e-9, p: 1e-12 };
+  function parseSIValue(raw) {
+    if (typeof raw === 'number') return isFinite(raw) ? raw : null;
+    if (raw == null) return null;
+    var text = String(raw).trim();
+    if (text === '') return null;
+    var m = /^([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*([kKMGmunp\u00b5\u03bc]?)\s*(?:[a-zA-Z\u03a9]*)\s*$/.exec(text);
+    if (!m) return null;
+    var mult = SI_MULTIPLIERS[m[2]];
+    if (mult == null) return null;
+    var n = Number(m[1]) * mult;
+    return isFinite(n) ? n : null;
+  }
+
+  // Current table contents as a bare Netlist payload (ir.py shape).
+  // value is ALWAYS sent as a number when it parses (plain numbers and
+  // SI strings like "1k" alike); only an unparseable value is sent
+  // as-is, for the server to reject with a 422. rating_watts / color
+  // are preserved per row from the row's data attributes (set by
+  // (per-row rating_watts / color, otherwise from state).
+  function collectNetlist() {
+    var rows = [];
+    var trs = document.querySelectorAll('#netlist-body tr[data-row]');
+    trs.forEach(function (tr) {
+      var get = function (f) {
+        var el = tr.querySelector('input[data-field="' + f + '"]');
+        return el ? el.value.trim() : '';
+      };
+      var nodesRaw = get('nodes');
+      var valueRaw = get('value');
+      var valueNum = parseSIValue(valueRaw);
+      var comp = {
+        id: get('id'), type: get('type'),
+        value: valueNum != null ? valueNum : valueRaw,
+        nodes: nodesRaw ? nodesRaw.split(/[\s,]+/).filter(Boolean) : []
+      };
+      var ratingAttr = tr.getAttribute('data-rating-watts');
+      var colorAttr = tr.getAttribute('data-color');
+      var orig = netlist[Number(tr.getAttribute('data-row'))] || {};
+      var rating = ratingAttr != null && ratingAttr !== '' ? Number(ratingAttr)
+        : (orig.rating_watts != null ? orig.rating_watts : undefined);
+      if (rating != null && isFinite(rating)) comp.rating_watts = rating;
+      var color = colorAttr || orig.color;
+      if (color) comp.color = color;
+      rows.push(comp);
+    });
+    return rows;
+  }
+  function collectNetlistPayload() {
+    return { title: '', components: collectNetlist() };
+  }
+  // The table is the source of truth for edits; sync state before 3D reads it.
+  function syncNetlistFromTable() {
+    var rows = collectNetlist();
+    if (rows.length || netlist.length) netlist = rows.map(normRow);
+  }
+
+  function renderRepairHistory(history) {
+    var ol = $('repair-history');
+    if (!history.length) {
+      ol.innerHTML = '<li class="empty">No repairs yet. Repair runs at most 3 rounds.</li>';
+    } else {
+      ol.innerHTML = history.map(function (h) {
+        var changes = h.changes || h.what_changed || h.summary || [];
+        var changeText = Array.isArray(changes)
+          ? changes.map(function (c) { return typeof c === 'string' ? c : (c.description || c.message || JSON.stringify(c)); }).join('; ')
+          : String(changes);
+        return '<li><strong>Round ' + escapeHtml(h.round) + ':</strong> ' + escapeHtml(changeText || 'no changes reported') + '</li>';
+      }).join('');
+    }
+    $('repair-round-label').textContent = 'Round: ' + repairRound + ' / ' + MAX_REPAIR_ROUNDS;
+    $('repair-btn').disabled = repairRound >= MAX_REPAIR_ROUNDS;
+  }
+  var repairHistory = [];
+
+  function applyResult(data) {
+    if (!data) return;
+    // Accept a nested Report ({report: {...}}) as well as a flat one.
+    var report = data.report && typeof data.report === 'object' ? data.report : data;
+    if (report.verdict || report.findings || report.node_voltages) lastReport = report;
+    if (data.mock || report.mock) logLine('system', 'Mock mode: results are simulated, not from a real LLM / checker.', 'info');
+    var incoming = data.netlist || data.netlist_used || report.netlist_used || report.netlist;
+    if (incoming) { netlist = normNetlist(incoming); }
+    if (data.findings || report.findings) { findings = data.findings || report.findings; renderFindings(); }
+    if (data.verdict || report.verdict) setVerdict(data.verdict || report.verdict, !!(data.mock || report.mock), data.verdict_note || data.note || report.verdict_note || '');
+    if (data.round != null) { repairRound = data.round; }
+    renderNetlist();
+    renderRepairHistory(repairHistory);
+    sync3D();
+  }
+
+  function isLlmError(data) {
+    if (!data) return false;
+    if (data.llm_error || data.llm_failed || data.error_type === 'llm') return true;
+    var msg = String((data.error || data.message || '')).toLowerCase();
+    return msg.indexOf('llm') !== -1 || (msg.indexOf('model') !== -1 && msg.indexOf('fail') !== -1);
+  }
+
+  function handleErrorPayload(data, fallback) {
+    var msg = (data && (data.error || data.message)) || fallback || 'Unknown error';
+    var detail = (data && (data.detail || data.llm_error)) || '';
+    // Neutral title unless the payload is actually an LLM failure:
+    // download / network / HTTP errors must never be labelled "LLM failed".
+    var title = isLlmError(data) ? 'LLM failed' : 'Run failed';
+    showError(title + ': ' + msg, detail);
+    logLine('system', 'ERROR: ' + msg + (detail ? ' ' + detail : ''), 'error');
+  }
+
+  // Parse one SSE `data:` payload. Returns false when the stream is done.
+  // A done event that carries the final result (verdict / findings /
+  // netlist / report) is applied BEFORE returning false: the done event
+  // IS the result, not a signal to drop it and keep the previous event.
+  function handleSseData(raw) {
+    if (!raw) return true;
+    var data;
+    try { data = JSON.parse(raw); } catch (e) { logLine('system', raw, 'info'); return true; }
+    if (data.done === true || data.type === 'done' || data.event === 'done') {
+      if (data.verdict || data.findings || data.netlist || data.netlist_used || data.report) applyResult(data);
+      else if (data.message || data.text) logLine(data.agent || 'system', data.message || data.text, 'info');
+      return false;
+    }
+    if (data.error || data.llm_error || isLlmError(data)) { handleErrorPayload(data, 'LLM call failed'); return true; }
+    var agent = data.agent || data.source || 'agent';
+    var msg = data.message || data.text || data.detail || data.event || JSON.stringify(data);
+    logLine(agent, msg, data.level || data.type);
+    if (data.verdict || data.findings || data.netlist || data.report) applyResult(data);
+    return true;
+  }
+
+  async function streamResponse(res) {
+    var contentType = (res.headers.get('content-type') || '');
+    if (contentType.indexOf('text/event-stream') === -1) {
+      var data = await res.json().catch(function () { return null; });
+      if (!res.ok || !data) { handleErrorPayload(data, 'Request failed (' + res.status + ')'); return null; }
+      if (data.error || isLlmError(data)) { handleErrorPayload(data, 'LLM call failed'); return null; }
+      if (Array.isArray(data.events)) data.events.forEach(function (e) { handleSseData(typeof e === 'string' ? e : JSON.stringify(e)); });
+      else if (data.message) logLine(data.agent || 'server', data.message, 'info');
+      return data;
+    }
+    var reader = res.body.getReader();
+    var decoder = new TextDecoder();
+    var buf = '';
+    var last = null;
+    while (true) {
+      var chunk = await reader.read();
+      if (chunk.done) break;
+      buf += decoder.decode(chunk.value, { stream: true });
+      var parts = buf.split('\n');
+      buf = parts.pop();
+      for (var i = 0; i < parts.length; i++) {
+        var line = parts[i].trim();
+        if (line.indexOf('data:') === 0) {
+          var raw = line.slice(5).trim();
+          if (raw === '[DONE]') return last;
+          var parsed = null;
+          try { parsed = JSON.parse(raw); } catch (e) { /* non-JSON line already logged */ }
+          // handleSseData applies a done event's result itself; return
+          // THAT event (parsed), not the previous one.
+          if (handleSseData(raw) === false) return parsed || last;
+          if (parsed) last = parsed;
+        } else if (line.indexOf('event:') === 0) {
+          logLine('system', line, 'info');
+        }
+      }
+    }
+    var tail = buf.trim();
+    if (tail.indexOf('data:') === 0) {
+      var tailRaw = tail.slice(5).trim();
+      var tailParsed = null;
+      try { tailParsed = JSON.parse(tailRaw); } catch (e) { /* non-JSON line already logged */ }
+      if (handleSseData(tailRaw) === false) return tailParsed || last;
+      if (tailParsed) last = tailParsed;
+    }
+    return last;
+  }
+
+  function setBusy(b, label) {
+    busy = b;
+    $('run-image-btn').disabled = b;
+    $('run-goal-btn').disabled = b;
+    $('repair-btn').disabled = b || repairRound >= MAX_REPAIR_ROUNDS;
+    $('recheck-btn').disabled = b;
+    statusEl.textContent = label || '';
+  }
+
+  async function runImage() {
+    if (busy) return;
+    if (!selectedFile) { showError('No image selected', 'Drop or choose a schematic image first, or use Run (goal) instead.'); return; }
+    clearError();
+    startTime = Date.now();
+    setBusy(true, 'Running agents on image...');
+    logLine('system', 'Uploading ' + selectedFile.name + ' and starting run...', 'info');
+    try {
+      var form = new FormData();
+      form.append('image', selectedFile);
+      form.append('goal', $('goal').value.trim());
+      var res = await fetch('/run-image', { method: 'POST', body: form });
+      var finalData = await streamResponse(res);
+      if (finalData) { applyResult(finalData); logLine('system', 'Run finished.', 'info'); }
+      else if (res.ok) { showError('Run finished with no result', 'The server returned no verdict, findings, or netlist.'); }
+    } catch (e) {
+      handleErrorPayload(null, 'Network error calling /run-image: ' + e.message);
+    } finally { setBusy(false); }
+  }
+
+  async function runGoal() {
+    if (busy) return;
+    var goal = $('goal').value.trim();
+    if (!goal) { showError('No goal entered', 'Type a goal first, or upload an image and use Run (image).'); return; }
+    clearError();
+    startTime = Date.now();
+    setBusy(true, 'Running agents on goal...');
+    logLine('system', 'Starting run for goal: ' + goal, 'info');
+    try {
+      var res = await fetch('/run-goal', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ goal: goal })
+      });
+      var finalData = await streamResponse(res);
+      if (finalData) { applyResult(finalData); logLine('system', 'Run finished.', 'info'); }
+      else if (res.ok) { showError('Run finished with no result', 'The server returned no verdict, findings, or netlist.'); }
+    } catch (e) {
+      handleErrorPayload(null, 'Network error calling /run-goal: ' + e.message);
+    } finally { setBusy(false); }
+  }
+
+  // Re-check: POST the edited table to /check as a bare Netlist.
+  // No LLM call on the server for this route.
+  async function recheck() {
+    if (busy) return;
+    var payload = collectNetlistPayload();
+    if (!payload.components.length) { showError('Netlist is empty', 'Add at least one netlist row before re-checking.'); return; }
+    clearError();
+    startTime = Date.now();
+    setBusy(true, 'Re-checking (no LLM)...');
+    logLine('system', 'Re-check: POST /check with ' + payload.components.length + ' edited rows (no LLM).', 'info');
+    try {
+      var res = await fetch('/check', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      var data = await res.json().catch(function () { return null; });
+      if (!res.ok || !data) { handleErrorPayload(data, 'Re-check failed (' + res.status + ')'); return; }
+      if (data.error || isLlmError(data)) { handleErrorPayload(data, 'Re-check failed'); return; }
+      applyResult(data);
+      logLine('system', 'Re-check done. Verdict: ' + (data.verdict || (data.report && data.report.verdict) || 'unknown'), 'info');
+    } catch (e) {
+      handleErrorPayload(null, 'Network error calling /check: ' + e.message);
+    } finally { setBusy(false); }
+  }
+
+  async function repair() {
+    if (busy) return;
+    if (repairRound >= MAX_REPAIR_ROUNDS) { showError('Repair limit reached', 'Already at round 3 of 3. Edit the netlist manually and use Re-check.'); return; }
+    var payload = collectNetlistPayload();
+    if (!payload.components.length) { showError('Netlist is empty', 'Add at least one netlist row before repairing.'); return; }
+    clearError();
+    startTime = Date.now();
+    setBusy(true, 'Repairing (round ' + (repairRound + 1) + ')...');
+    logLine('system', 'Repair: POST /repair, round ' + (repairRound + 1) + ' of 3.', 'info');
+    try {
+      var res = await fetch('/repair', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ netlist: payload, findings: findings, round: repairRound + 1, goal: $('goal').value.trim() })
+      });
+      var data = await res.json().catch(function () { return null; });
+      if (!res.ok || !data) { handleErrorPayload(data, 'Repair failed (' + res.status + ')'); return; }
+      if (data.error || isLlmError(data)) { handleErrorPayload(data, 'Repair failed'); return; }
+      repairRound = data.round != null ? data.round : repairRound + 1;
+      var changes = data.changes || data.what_changed || [];
+      repairHistory.push({ round: repairRound, changes: changes });
+      renderRepairHistory(repairHistory);
+      applyResult(data);
+      logLine('system', 'Repair round ' + repairRound + ' done. ' + (Array.isArray(changes) ? changes.length + ' change(s).' : ''), 'info');
+    } catch (e) {
+      handleErrorPayload(null, 'Network error calling /repair: ' + e.message);
+    } finally { setBusy(false); }
+  }
+
+  // Downloads: POST ONLY. The Netlist itself is the request body
+  // (test_server.py contract); there is no GET route and no
+  // server-side state, so no GET /download/*.cir|csv is used.
+  async function download(kind) {
+    var isCir = kind === 'cir';
+    var url = isCir ? '/download/netlist' : '/download/bom';
+    var filename = isCir ? 'netlist.cir' : 'BOM.csv';
+    clearError();
+    var payload = collectNetlistPayload();
+    if (!payload.components.length) { showError('Netlist is empty', 'Add at least one netlist row before downloading.'); return; }
+    logLine('system', 'Downloading ' + filename + ' (POST ' + url + ') ...', 'info');
+    try {
+      var res = await fetch(url, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) { handleErrorPayload(null, 'Download failed (' + res.status + ') for ' + filename); return; }
+      var blob = await res.blob();
+      var cd = res.headers.get('content-disposition') || '';
+      var m = /filename="?([^";]+)"?/.exec(cd);
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = m ? m[1] : filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(function () { URL.revokeObjectURL(a.href); }, 5000);
+      logLine('system', 'Downloaded ' + a.download + '.', 'info');
+    } catch (e) {
+      handleErrorPayload(null, 'Network error downloading ' + filename + ': ' + e.message);
+    }
+  }
+
+  function setFile(file) {
+    if (!file) return;
+    selectedFile = file;
+    $('file-name').textContent = 'Selected: ' + file.name + ' (' + Math.round(file.size / 1024) + ' KB)';
+    var reader = new FileReader();
+    reader.onload = function (e) {
+      var img = $('preview');
+      img.src = e.target.result;
+      img.classList.add('show');
+      $('no-image').style.display = 'none';
+    };
+    reader.readAsDataURL(file);
+    logLine('system', 'Image selected: ' + file.name, 'info');
+  }
+
+  // ---- Selection: shared by the table and the 3D view -----------------
+  // Click-to-select editing: selecting a component highlights its table
+  // row and, when the selection came from 3D, focuses its value field
+  // so the user can edit it immediately.
+  function selectComponent(id, opts) {
+    opts = opts || {};
+    // Preserve any in-progress table edits before re-rendering.
+    syncNetlistFromTable();
+    selectedId = id || null;
+    renderNetlist();
+    var tr = selectedId ? document.querySelector('#netlist-body tr[data-id="' + selectedId + '"]') : null;
+    if (tr) {
+      tr.scrollIntoView({ block: 'nearest' });
+      if (opts.from3D) {
+        var input = tr.querySelector('input[data-field="value"]');
+        if (input) { input.focus(); input.select(); }
+      }
+    }
+    if (!opts.fromTable && threeD && typeof threeD.select === 'function') {
+      try { threeD.select(selectedId); } catch (e) { /* 3D highlight is best-effort */ }
+    } else if (!opts.fromTable && threeDModule && typeof threeDModule.select === 'function') {
+      try { threeDModule.select(selectedId); } catch (e) { /* best-effort */ }
+    }
+    if (selectedId) logLine('system', 'Selected component: ' + selectedId, 'info');
+  }
+
+  // Patch from the 3D view, e.g. {value: 470, nodes: ["vcc", "led"]}.
+  function applyEdit(id, patch) {
+    if (!id || !patch || typeof patch !== 'object') return false;
+    syncNetlistFromTable();
+    var idx = -1;
+    for (var i = 0; i < netlist.length; i++) { if (netlist[i].id === id) { idx = i; break; } }
+    if (idx === -1) return false;
+    var row = netlist[idx];
+    if (patch.value != null) row.value = patch.value;
+    if (patch.type != null) row.type = patch.type;
+    if (patch.nodes != null) row.nodes = Array.isArray(patch.nodes) ? patch.nodes.slice(0, 2) : String(patch.nodes).split(/[\s,]+/).filter(Boolean);
+    if (patch.rating_watts != null) row.rating_watts = patch.rating_watts;
+    if (patch.color != null) row.color = patch.color;
+    netlist[idx] = normRow(row);
+    renderNetlist();
+    selectComponent(id, { fromTable: true });
+    logLine('system', '3D edit applied to ' + id + ': ' + JSON.stringify(patch), 'info');
+    return true;
+  }
+
+  // Push the current netlist + Report + repair history into the 3D
+  // view, if it is loaded. setNetlist rebuilds the circuit and applies
+  // the Report overlays; renderHistory re-renders the repair list.
+  function sync3D() {
+    if (!threeD && !threeDModule) return;
+    var fn = null;
+    if (threeD && typeof threeD.setNetlist === 'function') fn = threeD.setNetlist.bind(threeD);
+    else if (threeD && typeof threeD.update === 'function') fn = threeD.update.bind(threeD);
+    else if (threeDModule && typeof threeDModule.setNetlist === 'function') fn = threeDModule.setNetlist;
+    else if (threeDModule && typeof threeDModule.update === 'function') fn = threeDModule.update;
+    if (fn) {
+      try { fn(netlist.map(normRow), lastReport); } catch (e) { logLine('system', '3D sync failed: ' + e.message, 'error'); }
+    }
+    if (threeD && typeof threeD.renderHistory === 'function') {
+      try { threeD.renderHistory(repairHistory); } catch (e) { /* history render is best-effort */ }
+    }
+  }
+
+  // Replace the page netlist wholesale from the 3D layer (main3d.js
+  // onNetlistChange, fired after an edit-panel save). No sync3D() here:
+  // the 3D view already holds this netlist, so re-pushing it would
+  // just rebuild the circuit it just built.
+  function applyNetlist(list) {
+    if (!Array.isArray(list) || !list.length) return false;
+    netlist = normNetlist(list);
+    renderNetlist();
+    logLine('system', 'Netlist updated from 3D (' + netlist.length + ' components).', 'info');
+    return true;
+  }
+
+  // The module bootstrap (bottom of file) fires 'netproof:3d-ready'
+  // once ./3d/main3d.js loads; pick the handle up here so sync3D()
+  // and selectComponent() actually reach the live 3D view.
+  window.addEventListener('netproof:3d-ready', function (e) {
+    var d = (e && e.detail) || {};
+    threeD = d.handle || null;
+    threeDModule = d.module || null;
+    sync3D();
+  });
+
+  // Bridge exposed for web/3d/*.js (see header comment for the contract).
+  window.NetproofPage = {
+    getNetlist: function () { syncNetlistFromTable(); return netlist.map(normRow); },
+    getReport: function () { return lastReport; },
+    getRepairHistory: function () { return repairHistory.slice(); },
+    selectComponent: selectComponent,
+    applyEdit: applyEdit,
+    applyNetlist: applyNetlist
+  };
+
+  // Wiring: table row click selects (and tells 3D to highlight).
+  $('netlist-body').addEventListener('click', function (e) {
+    var tr = e.target && e.target.closest ? e.target.closest('tr[data-id]') : null;
+    if (tr && tr.getAttribute('data-id')) selectComponent(tr.getAttribute('data-id'), { fromTable: true });
+  });
+  // Keep state in sync when a row is edited by hand, so 3D reads fresh data.
+  $('netlist-body').addEventListener('change', function () { syncNetlistFromTable(); sync3D(); });
+
+  // Wiring
+  var dz = $('dropzone');
+  var fi = $('file-input');
+  dz.addEventListener('click', function () { fi.click(); });
+  dz.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fi.click(); } });
+  ['dragenter', 'dragover'].forEach(function (ev) {
+    dz.addEventListener(ev, function (e) { e.preventDefault(); dz.classList.add('drag'); });
+  });
+  ['dragleave', 'drop'].forEach(function (ev) {
+    dz.addEventListener(ev, function (e) { e.preventDefault(); dz.classList.remove('drag'); });
+  });
+  dz.addEventListener('drop', function (e) {
+    var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) setFile(f);
+  });
+  fi.addEventListener('change', function () { if (fi.files[0]) setFile(fi.files[0]); });
+
+  $('run-image-btn').addEventListener('click', runImage);
+  $('run-goal-btn').addEventListener('click', runGoal);
+  $('recheck-btn').addEventListener('click', recheck);
+  $('repair-btn').addEventListener('click', repair);
+  $('dl-cir-btn').addEventListener('click', function () { download('cir'); });
+  $('dl-bom-btn').addEventListener('click', function () { download('bom'); });
+  $('add-row-btn').addEventListener('click', function () {
+    syncNetlistFromTable();
+    netlist.push({ id: '', type: '', value: '', nodes: [] });
+    renderNetlist();
+    sync3D();
+  });
+
+  renderNetlist();
+  renderFindings();
+  renderRepairHistory(repairHistory);
+})();
+</script>
+<script type="module">
+  // 3D bootstrap: guarded dynamic import. This MUST NOT break the flat
+  // page when the module is absent or init throws: it only runs if
+  // ./3d/main3d.js exists and loads, and any failure lands in the
+  // #scene3d fallback text, never in the red error banner.
+  // Real API (read from web/3d/main3d.js): init3D(container, callbacks,
+  // options). Callbacks: onSelect(id, component), onEdit(id, updatedRow,
+  // netlist), onNetlistChange(netlist), onMove(id, pose) (layout-only:
+  // dragging a mesh never changes nodes/value), onError(error),
+  // editOnSelect (default true; false here because the page handles
+  // selection/editing itself in the table, per main3d.js's docstring).
+  // Options carries the initial {netlist, report, history}.
+  (async function () {
+    var container = document.getElementById('scene3d');
+    var statusEl = document.getElementById('scene3d-status');
+    function setStatus(text) { if (statusEl) statusEl.textContent = '3D status: ' + text; }
+    var page = window.NetproofPage;
+    if (!container || !page) { setStatus('unavailable (page bridge not ready).'); return; }
+    var mod;
+    try {
+      mod = await import('./3d/main3d.js');
+    } catch (err) {
+      // Expected until the 3D agent lands main3d.js. Flat page unaffected.
+      container.innerHTML = '<div class="fallback">3D view not available yet: web/3d/main3d.js is not present. ' +
+        'Use the netlist table above; the 3D view will appear here once the 3D module lands.</div>';
+      setStatus('not available (web/3d/main3d.js not present yet). Flat table still works.');
+      return;
+    }
+    var hooks = {
+      getNetlist: page.getNetlist,
+      getReport: page.getReport,
+      onSelect: function (id) { page.selectComponent(id, { from3D: true }); },
+      onEdit: function (id, updated) { return page.applyEdit(id, updated); },
+      onNetlistChange: function (list) { page.applyNetlist(list); },
+      onMove: function (id, pose) { /* layout-only drag; never changes the netlist or verdict */ },
+      onError: function (err) {
+        var msg = err && err.message ? err.message : String(err);
+        setStatus('error: ' + msg + ' Flat table still works.');
+        if (window.console && console.error) console.error('[netproof 3D]', err);
+      },
+      editOnSelect: false
+    };
+    var entry = mod.default || mod.init3D || mod.init || mod.createScene;
+    var handle = null;
+    try {
+      if (typeof entry === 'function') {
+        handle = await entry(container, hooks, {
+          netlist: page.getNetlist(),
+          report: page.getReport(),
+          history: page.getRepairHistory()
+        });
+      } else {
+        throw new Error('main3d.js exports no init3D/init/createScene/default entry point');
+      }
+    } catch (err) {
+      container.innerHTML = '<div class="fallback">3D view failed to start: ' +
+        String(err && err.message ? err.message : err) +
+        '. The flat netlist table above still works.</div>';
+      setStatus('failed to start (' + (err && err.message ? err.message : 'unknown error') + '). Flat table still works.');
+      return;
+    }
+    // Keep the handle where the main script can reach it: the classic
+    // script above listens for 'netproof:3d-ready' and stores the
+    // handle/module in its own threeD / threeDModule vars, so sync3D()
+    // and selectComponent() reach the live 3D view. Also stashed on
+    // window for any other module that prefers it.
+    window.__netproof3d = handle || mod;
+    window.__netproof3dModule = mod;
+    window.dispatchEvent(new CustomEvent('netproof:3d-ready', { detail: { handle: handle || null, module: mod } }));
+    setStatus('ready. Drag to orbit, scroll to zoom, right-drag to pan. Click a component to select it.');
+    // First sync: if a netlist is already loaded, push it into 3D now.
+    try {
+      var sync = (handle && (handle.setNetlist || handle.update)) || mod.setNetlist || mod.update;
+      if (typeof sync === 'function') sync.call(handle || mod, page.getNetlist(), page.getReport());
+    } catch (err) { /* first sync is best-effort */ }
+  })();
+</script>
+</body>
+</html>

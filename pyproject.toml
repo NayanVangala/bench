@@ -1,0 +1,29 @@
+[project]
+name = "netproof"
+version = "0.1.0"
+description = "Netproof MVP"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "pydantic",
+    "python-multipart",
+    "sse-starlette",
+    "anthropic",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+force-include = { "backend/netproof" = "netproof" }
+
+[tool.pytest.ini_options]
+testpaths = ["backend/tests"]
+pythonpath = ["backend"]

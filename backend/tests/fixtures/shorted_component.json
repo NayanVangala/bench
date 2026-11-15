@@ -1,0 +1,1 @@
+{"components":[{"id":"V1","nodes":["vcc","0"],"type":"voltage_source","value":9.0},{"id":"R1","nodes":["vcc","vcc"],"type":"resistor","value":470.0},{"id":"R2","nodes":["vcc","0"],"type":"resistor","value":470.0}],"title":"Shorted resistor"}

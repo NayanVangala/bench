@@ -12,14 +12,25 @@
 //     createScene(container, { onPick }) -> view
 //       { scene, camera, renderer, controls, components: Map,
 //         raycaster, selectedId, pickAt, setOnPick, setSelected,
-//         frameCamera, dispose }
-//       frameCamera(view) fits the camera to the bounding box of
-//       view.components; main3d.js calls it in buildDisplayed() so
-//       the view reframes on load and on every setNetlist.
+//         frameCamera, resetToIso, setExploded, toggleExplode,
+//         isExploded, resetExplode, stepExplode, dispose }
+//       buildDisplayed() calls view.resetToIso() directly (iso
+//       direction + bounding-box fit) on load and on every
+//       setNetlist / history-round rebuild, and view.resetExplode()
+//       there too; it never calls frameCamera() (which would keep
+//       the user's orbit) and a plain updateReport never rebuilds,
+//       so it never resets the camera. handle.resetView delegates
+//       to view.resetToIso() via resetViewInternal (which falls back
+//       to an iso direction + frameCamera only when the scene
+//       module predates resetToIso). The explode tween lives in
+//       scene.js: handle.setExploded / toggleExplode delegate to
+//       view.setExploded / view.toggleExplode, with a local tween
+//       fallback only when the scene module predates them.
 //       Runs its OWN animation loop (controls.update + render) and its
 //       OWN resize handling (ResizeObserver). main3d.js therefore does
 //       NOT render and does NOT resize; its loop only drives the
-//       overlay (flow dots + label projection, see below).
+//       overlay (flow dots + label projection, see below) plus the
+//       Inspect explode tween and the callout recompute.
 //       main3d.js does not pass onPick: pointer selection callbacks
 //       come from interaction.js. scene.js still does its scale
 //       highlight on click; main3d.js keeps that in sync via
@@ -27,6 +38,11 @@
 //     Component meshes built by components.js are registered in
 //     view.components (id -> group) so scene.js raycast picking and
 //     verdict-colour helpers can find them.
+//     Orbit / pan / zoom live in scene.js (OrbitControls): left-drag
+//     rotate, right-drag pan, wheel zoom. main3d.js only applies the
+//     blueprint ortho limits (min/maxZoom, polar clamp) when the
+//     camera actually is orthographic; a perspective camera keeps
+//     scene.js's own distance limits untouched.
 //
 //   ./components.js
 //     buildCircuit(netlist) -> { group, nodePositions, meshesById: Map }
@@ -71,7 +87,41 @@
 //       callback are disabled by the panel, so main3d.js only passes
 //       onRecheck / onRepair when the page supplied them.
 //
-//   ./history.js — UMD, NOT an ES module: no exports. Importing it is a
+//   ./callouts.js — OPTIONAL, loaded only if it exists. Guarded
+//     dynamic import: the blueprint callout layer (edge-docked boxes
+//     + SVG leader lines) is a separate module owned by another
+//     agent. If it has not landed yet, 3D still works without it;
+//     a missing callouts.js is never reported as a 3D error.
+//     Expected shape (mirrors overlay.js): initCallouts({ THREE,
+//     scene, camera, container }) -> handle with
+//     updateCallouts(report, meshesById) / update(report, meshesById),
+//     a per-frame recompute — layoutCallouts(camera), also exported
+//     as updatePositions / recompute / layout — and disposeCallouts()
+//     / handle.dispose(). main3d.js
+//     adapts to whichever of those names the module actually
+//     exports; anything absent is skipped, never thrown.
+//
+// Blueprint wiring owned by this file (main3d.js):
+//   * Camera: buildDisplayed() calls view.resetToIso() directly on
+//     load and on every setNetlist / history-round / edit rebuild,
+//     and view.resetExplode() there too. A plain updateReport (no
+//     netlist change) never rebuilds, so it never resets the camera.
+//   * Inspect explode: handle.setExploded(bool) /
+//     handle.toggleExplode() delegate to view.setExploded() /
+//     view.toggleExplode() (scene.js owns the tween) + the
+//     #scene3d-section toggle button. Groups tween vertically
+//     (300 ms, easeInOutCubic, staggered 0.9 + 0.18 * index), wires/slab
+//     stay put, reduced-motion is instant, toggling mid-tween reverses
+//     from the current Y. setNetlist / buildDisplayed resets exploded
+//     to false via view.resetExplode().
+//   * Reset view: handle.resetView() + the #scene3d-section button
+//     + the R key when #scene3d itself has focus. Snaps back to iso
+//     and refits the bounding box.
+//   * Errors: init3D throws real Errors (never a generic "not
+//     present"); the page bootstrap shows the real error text in
+//     #scene3d-status and the flat table keeps working. Runtime
+//     errors inside build/overlay go to onError with the real error,
+//     which the page also surfaces verbatim in #scene3d-status.
 //     side effect that sets window.NetproofHistory, which main3d.js
 //     then reads via globalThis.
 //     NetproofHistory.renderHistory(history, { onShowRound }, mount?)
@@ -174,6 +224,34 @@ function isObject(value) {
 
 function isFiniteNumber(value) {
   return typeof value === 'number' && Number.isFinite(value);
+}
+
+// ---------------------------------------------------------------------------
+// Blueprint wiring helpers (spec §2.1, §2.4, §8)
+// ---------------------------------------------------------------------------
+
+// Classic isometric direction: elevation 35.264 deg, azimuth 45 deg,
+// so dir = (cos(el)*sin(az), sin(el), cos(el)*cos(az)) ≈ (0.577, 0.577, 0.577).
+const ISO_DIRECTION = { x: 0.5773502691896258, y: 0.5773502691896258, z: 0.5773502691896258 };
+const EXPLODE_DURATION_MS = 300;
+const EXPLODE_BASE_OFFSET = 0.9;
+const EXPLODE_STEP_OFFSET = 0.18;
+
+function easeInOutCubic(t) {
+  const clamped = Math.min(1, Math.max(0, t));
+  return clamped < 0.5
+    ? 4 * clamped * clamped * clamped
+    : 1 - Math.pow(-2 * clamped + 2, 3) / 2;
+}
+
+function prefersReducedMotion() {
+  try {
+    return typeof window !== 'undefined'
+      && typeof window.matchMedia === 'function'
+      && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  } catch (error) {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -389,7 +467,8 @@ export function normalizeHistory(input) {
  * @returns {object} handle with setNetlist, updateReport/setReport,
  *   renderHistory, appendHistory, showRound, clearHistoryView, select,
  *   clearSelection, edit, getSelected, getNetlist, getReport,
- *   getHistory, dispose/destroy, plus view/scene/camera/renderer/
+ *   getHistory, resetView, setExploded, toggleExplode, isExploded,
+ *   dispose/destroy, plus view/scene/camera/renderer/
  *   controls/historyElement.
  */
 export function init3D(container, callbacks = {}, options = {}) {
@@ -425,6 +504,22 @@ export function init3D(container, callbacks = {}, options = {}) {
   let rafId = 0;
   let lastFrameTime = 0;
 
+  // -- Blueprint Inspect state (spec §8): visual only, never touches
+  // -- netlist / verdict. exploded + the active tween live here.
+  let exploded = false;
+  let explodeTween = null; // { entries: [{group, fromY, toY}], start, duration } | null
+
+  // -- Blueprint callouts (spec §9): guarded dynamic import of
+  // -- ./callouts.js. Null until (and unless) that module lands.
+  let calloutsHandle = null; // adapted { update, recompute, dispose } | null
+  let calloutsLoading = false;
+
+  // -- Blueprint buttons + R key (spec §2.4, §8, §10): listeners
+  // -- attached by wireBlueprintButtons(), removed on dispose.
+  let buttonListeners = []; // [{ el, type, handler }]
+  let explodeButton = null;
+  let resetButton = null;
+
   // -- Scene (./scene.js). Owns the render loop + resize. ------------------
   const view = createScene(element);
   const scene = view.scene;
@@ -433,6 +528,24 @@ export function init3D(container, callbacks = {}, options = {}) {
   const controls = view.controls;
   if (!scene || !camera || !renderer) {
     throw new Error('netproof 3D: scene.js createScene did not return a scene, camera and renderer');
+  }
+
+  // Orbit / pan / zoom (spec §2.2): OrbitControls lives in scene.js
+  // and keeps its bindings (left-drag rotate, right-drag pan, wheel
+  // zoom). Blueprint limits only apply to an orthographic camera:
+  // wheel zoom changes camera.zoom there, not distance, so the
+  // perspective min/maxDistance limits are meaningless and must not
+  // clamp the fixed ortho radius — neutralise them. A perspective
+  // camera (scene.js before its ortho switch) keeps its own limits.
+  if (camera.isOrthographicCamera) {
+    controls.minZoom = 0.5;
+    controls.maxZoom = 8;
+    controls.minPolarAngle = 0.15;
+    controls.maxPolarAngle = Math.PI / 2 - 0.02; // never below the slab
+    controls.screenSpacePanning = false; // pan in the ground plane
+    controls.minDistance = 0;
+    controls.maxDistance = Infinity;
+    if (typeof controls.update === 'function') controls.update();
   }
 
   // The container ships with a loading placeholder (index.html
@@ -480,6 +593,266 @@ export function init3D(container, callbacks = {}, options = {}) {
     } catch (error) {
       onError(error);
     }
+    updateCalloutsNow();
+  }
+
+  // -- Blueprint camera reset (spec §2.4) ---------------------------------
+  // Snap back to the canonical iso direction and fit the bounding box.
+  // Prefers scene.js's view.resetToIso() when it exists; otherwise set
+  // the iso direction ourselves and let frameCamera() (which keeps the
+  // current direction) do the fit. Works with an empty scene too: the
+  // direction is still reset, frameCamera just has nothing to fit.
+  function resetViewInternal() {
+    if (disposed) return false;
+    try {
+      if (view && typeof view.resetToIso === 'function') {
+        const result = view.resetToIso();
+        return result !== false;
+      }
+    } catch (error) {
+      onError(error);
+      return false;
+    }
+    try {
+      const target = controls.target.clone();
+      camera.position.copy(target).addScaledVector(
+        new THREE.Vector3(ISO_DIRECTION.x, ISO_DIRECTION.y, ISO_DIRECTION.z),
+        50,
+      );
+      if (typeof controls.update === 'function') controls.update();
+      return frameCamera(view);
+    } catch (error) {
+      onError(error);
+      return false;
+    }
+  }
+
+  // -- Blueprint Inspect explode (spec §8) --------------------------------
+  // Visual only: writes group.position.y and nothing else. Never calls
+  // onMove / onNetlistChange / mergeEdit; wires, node dots, slab and
+  // dimension lines stay on the ground. Labels/callouts follow because
+  // they re-project from the live bounding box every frame. The tween
+  // itself lives in scene.js (view.setExploded, driven by its own
+  // animate loop); the local tween below is only a fallback for a
+  // scene module that predates view.setExploded.
+  function syncExplodeButton() {
+    if (!explodeButton) return;
+    try {
+      explodeButton.setAttribute('aria-pressed', exploded ? 'true' : 'false');
+    } catch (error) { /* button state is cosmetic; never fatal */ }
+  }
+
+  function resetExplodeState() {
+    explodeTween = null;
+    if (exploded) {
+      exploded = false;
+      syncExplodeButton();
+    }
+  }
+
+  function setExplodedInternal(value) {
+    if (disposed) return false;
+    const next = value === true;
+    // Delegate to the view when it owns explode (scene.js): its own
+    // animate loop drives the tween (same 0.9 + 0.18 * index offsets),
+    // so main3d.js must not run a second tween on the same groups.
+    // The local tween below runs only when the scene module predates
+    // view.setExploded.
+    if (view && typeof view.setExploded === 'function') {
+      try {
+        explodeTween = null;
+        exploded = view.setExploded(next) === true;
+        syncExplodeButton();
+        return exploded;
+      } catch (error) {
+        onError(error);
+        // Fall through to the local tween below.
+      }
+    }
+    const groups = [];
+    displayedNetlist.forEach((row, index) => {
+      const group = circuit && circuit.meshesById
+        ? circuit.meshesById.get(row.id)
+        : undefined;
+      if (!group) return;
+      if (group.userData.baseY === undefined) group.userData.baseY = group.position.y;
+      groups.push({
+        group,
+        fromY: group.position.y,
+        toY: group.userData.baseY + (next ? EXPLODE_BASE_OFFSET + EXPLODE_STEP_OFFSET * index : 0),
+      });
+    });
+    exploded = next;
+    syncExplodeButton();
+    if (prefersReducedMotion()) {
+      // Reduced motion: no 300 ms tween, set the end Y immediately.
+      explodeTween = null;
+      for (const entry of groups) entry.group.position.y = entry.toY;
+      return exploded;
+    }
+    if (!groups.length) {
+      explodeTween = null;
+      return exploded;
+    }
+    // Toggling mid-tween reverses from the current Y: fromY is read
+    // live above, never snapped to an endpoint first.
+    explodeTween = {
+      entries: groups,
+      start: (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now(),
+      duration: EXPLODE_DURATION_MS,
+    };
+    return exploded;
+  }
+
+  function stepExplodeTween(now) {
+    if (!explodeTween) return;
+    const elapsed = now - explodeTween.start;
+    const t = Math.min(1, Math.max(0, elapsed / explodeTween.duration));
+    const eased = easeInOutCubic(t);
+    for (const entry of explodeTween.entries) {
+      entry.group.position.y = entry.fromY + (entry.toY - entry.fromY) * eased;
+    }
+    if (t >= 1) {
+      for (const entry of explodeTween.entries) entry.group.position.y = entry.toY;
+      explodeTween = null;
+    }
+  }
+
+  // -- Blueprint callouts (spec §9) ----------------------------------------
+  // Guarded dynamic import: callouts.js may not exist yet (another
+  // agent owns it). A failed import is silently skipped — the 3D view
+  // works without callouts and this is never surfaced as a 3D error.
+  function adaptCalloutsModule(mod) {
+    if (!mod) return null;
+    const init = mod.initCallouts || mod.default || mod.createCallouts;
+    if (typeof init !== 'function') return null;
+    let raw = null;
+    try {
+      raw = init({ THREE, scene, camera, container: element });
+    } catch (error) {
+      return null; // callout init failure must not break the 3D view
+    }
+    const handle = raw || {};
+    const updateFn = handle.updateCallouts || handle.update
+      || mod.updateCallouts || mod.update;
+    const recomputeFn = handle.layoutCallouts || handle.updatePositions
+      || handle.recompute || handle.layout || handle.update
+      || mod.layoutCallouts || mod.updatePositions || mod.recompute
+      || mod.layout;
+    const disposeFn = handle.dispose || handle.destroy
+      || mod.disposeCallouts || mod.dispose;
+    return {
+      update(report, meshes, extra) {
+        if (typeof updateFn === 'function') updateFn.call(handle, report, meshes, extra);
+      },
+      recompute() {
+        if (typeof recomputeFn === 'function') recomputeFn.call(handle);
+      },
+      dispose() {
+        if (typeof disposeFn === 'function') disposeFn.call(handle);
+      },
+    };
+  }
+
+  function loadCallouts() {
+    if (calloutsLoading || calloutsHandle) return;
+    calloutsLoading = true;
+    import('./callouts.js').then((mod) => {
+      if (disposed) return;
+      calloutsHandle = adaptCalloutsModule(mod);
+      if (calloutsHandle) updateCalloutsNow();
+    }).catch(() => {
+      // callouts.js not landed yet: 3D works without it. No onError —
+      // a missing optional module is not a 3D failure and must not
+      // put real-error text (or any error) in #scene3d-status.
+      calloutsHandle = null;
+    });
+  }
+
+  function updateCalloutsNow() {
+    if (!calloutsHandle) return;
+    try {
+      calloutsHandle.update(displayedReport, meshesObject(), { selectedId });
+    } catch (error) {
+      onError(error);
+    }
+  }
+
+  function recomputeCallouts() {
+    if (!calloutsHandle) return;
+    try {
+      calloutsHandle.recompute();
+    } catch (error) {
+      onError(error);
+    }
+  }
+
+  // -- Blueprint buttons + R key (spec §2.4, §8, §10) ----------------------
+  // The two buttons live in #scene3d-section in the host page (owned by
+  // index.html). They may not exist yet when init3D runs, so lookup is
+  // tolerant: known ids first, then a text match inside the section.
+  // The handle methods (resetView / toggleExplode) are the primary
+  // wiring — the page wires the same buttons after netproof:3d-ready —
+  // this is the in-module wiring for buttons already in the DOM.
+  function findBlueprintButton(predicate) {
+    const ids = ['reset-view', 'scene3d-reset-view', 'reset-view-btn',
+      'scene3d-reset', 'inspect-explode', 'explode-toggle',
+      'scene3d-explode', 'inspect-toggle'];
+    for (const id of ids) {
+      const el = (typeof document !== 'undefined') ? document.getElementById(id) : null;
+      if (el && predicate(el)) return el;
+    }
+    const section = (typeof document !== 'undefined')
+      ? (document.getElementById('scene3d-section')
+        || (element.closest ? element.closest('section') : null)
+        || element.parentElement)
+      : null;
+    if (section && typeof section.querySelectorAll === 'function') {
+      const buttons = section.querySelectorAll('button');
+      for (const btn of buttons) {
+        if (predicate(btn)) return btn;
+      }
+    }
+    return null;
+  }
+
+  function wireBlueprintButtons() {
+    if (typeof document === 'undefined') return;
+    const isReset = (el) => /reset\s*view/i.test(el.textContent || '')
+      || /reset/i.test(el.id || '');
+    const isExplode = (el) => /inspect/i.test(el.textContent || '')
+      || el.getAttribute('aria-pressed') !== null
+      || /explode/i.test(el.id || '');
+    const resetBtn = findBlueprintButton(isReset);
+    if (resetBtn && resetBtn !== explodeButton) {
+      const onReset = () => { resetViewInternal(); };
+      resetBtn.addEventListener('click', onReset);
+      buttonListeners.push({ el: resetBtn, type: 'click', handler: onReset });
+      try { resetBtn.disabled = false; } catch (error) { /* cosmetic */ }
+      resetButton = resetBtn;
+    }
+    const explodeBtn = findBlueprintButton(isExplode);
+    if (explodeBtn && explodeBtn !== resetBtn) {
+      const onExplode = () => { handle.toggleExplode(); };
+      explodeBtn.addEventListener('click', onExplode);
+      buttonListeners.push({ el: explodeBtn, type: 'click', handler: onExplode });
+      try { explodeBtn.disabled = false; } catch (error) { /* cosmetic */ }
+      explodeButton = explodeBtn;
+      syncExplodeButton();
+    }
+  }
+
+  function onContainerKeydown(event) {
+    // R resets the iso view when #scene3d itself has focus, alongside
+    // the existing arrow-key selection (page fallback) and the
+    // interaction.js canvas handler. Only fires when the container is
+    // the event target, so typing elsewhere is never hijacked.
+    if (!event || event.target !== element) return;
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    if (event.key === 'r' || event.key === 'R') {
+      event.preventDefault();
+      resetViewInternal();
+    }
   }
 
   function disposeGroup(group) {
@@ -504,17 +877,14 @@ export function init3D(container, callbacks = {}, options = {}) {
     circuit = null;
   }
 
-  function wiresFromNodePositions(built) {
-    const wires = {};
-    for (const comp of displayedNetlist) {
-      const p1 = built.nodePositions.get(comp.nodes[0]);
-      const p2 = built.nodePositions.get(comp.nodes[1]);
-      if (p1 && p2) wires[comp.id] = [p1.clone(), p2.clone()];
-    }
-    return wires;
-  }
-
   function buildDisplayed() {
+    // A rebuild is a new drawing: never carry an exploded state across
+    // it (spec §8). Cancels any mid-tween and resets aria-pressed, and
+    // snaps the view's own explode state back too (view.resetExplode).
+    resetExplodeState();
+    if (view && typeof view.resetExplode === 'function') {
+      try { view.resetExplode(); } catch (error) { onError(error); }
+    }
     clearCircuit();
     if (!displayedNetlist.length) {
       if (interactionHandle && typeof interactionHandle.setMeshes === 'function') {
@@ -522,6 +892,10 @@ export function init3D(container, callbacks = {}, options = {}) {
       }
       try { setWires({}); } catch (error) { onError(error); }
       applyOverlays();
+      updateCalloutsNow(); // no Report yet: a no-op by design
+      // (updateCallouts early-returns; no verdict/findings exist
+      // before a check). Per-part id/type/value still show via the
+      // click-to-open detail callout, which reads mesh userData.
       return;
     }
     let built;
@@ -537,19 +911,36 @@ export function init3D(container, callbacks = {}, options = {}) {
     // these meshes (buildCircuit groups are children of circuit.group,
     // not of the scene, so addComponent's registration does not apply).
     for (const [id, mesh] of built.meshesById) view.components.set(id, mesh);
-    // Frame the camera on the new circuit's bounding box (load, every
-    // setNetlist, and every history-round / edit rebuild all come
-    // through here). No-op when there is nothing to frame; the user's
-    // orbit angle is kept, only distance/target are reset.
-    try { frameCamera(view); } catch (error) { onError(error); }
+    // Store each group's base Y now (today 0 for every group) so the
+    // explode tween always has a real rest position to return to.
+    for (const group of built.meshesById.values()) {
+      if (group && group.userData && group.userData.baseY === undefined) {
+        group.userData.baseY = group.position.y;
+      }
+    }
+    // Reset to the canonical iso view via view.resetToIso() (load,
+    // every setNetlist, and every history-round / edit rebuild all
+    // come through here). Never frameCamera() here: a rebuild is a
+    // new drawing, so the orbit is discarded, not kept. No-op when
+    // there is nothing to frame. A plain updateReport never comes
+    // through here, so it never resets the camera.
+    try {
+      if (view && typeof view.resetToIso === 'function') view.resetToIso();
+      else resetViewInternal(); // scene.js predating resetToIso
+    } catch (error) { onError(error); }
     if (selectedId && built.meshesById.has(selectedId)) {
       try { view.setSelected(selectedId); } catch (error) { /* highlight-only */ }
     }
     if (interactionHandle && typeof interactionHandle.setMeshes === 'function') {
       interactionHandle.setMeshes(built.meshesById);
     }
-    try { setWires(wiresFromNodePositions(built)); } catch (error) { onError(error); }
+    // Flow dots ride the orthogonal route: built.wirePointsById is the
+    // elbow-following polyline per component id (buildCircuit /
+    // buildWires), not a straight node-to-node line, so the dots
+    // follow the same corners the wire ribbons do.
+    try { setWires(built.wirePointsById ?? {}); } catch (error) { onError(error); }
     applyOverlays();
+    updateCalloutsNow();
   }
 
   // -- Edit panel (./edit-panel.js). ----------------------------------------
@@ -641,6 +1032,7 @@ export function init3D(container, callbacks = {}, options = {}) {
     if (componentId === undefined || componentId === null) {
       selectedId = null;
       try { view.setSelected(null); } catch (error) { /* highlight-only */ }
+      updateCalloutsNow();
       try {
         if (typeof pageCallbacks.onSelect === 'function') pageCallbacks.onSelect(null, null, event);
       } catch (error) { onError(error); }
@@ -649,6 +1041,7 @@ export function init3D(container, callbacks = {}, options = {}) {
     const id = String(componentId);
     selectedId = id;
     try { view.setSelected(id); } catch (error) { /* highlight-only */ }
+    updateCalloutsNow(); // selected callout may become interactive
     try {
       if (typeof pageCallbacks.onSelect === 'function') {
         pageCallbacks.onSelect(id, componentById(id), event);
@@ -813,6 +1206,11 @@ export function init3D(container, callbacks = {}, options = {}) {
       const currents = displayedReport ? displayedReport.branch_currents : {};
       animateFlow(deltaSeconds, currents || {});
       updateLabelPositions(camera);
+      // Blueprint tick order (spec §10): labels first, then callout
+      // recompute (leader lines track rising parts every frame during
+      // the explode tween), then the explode tween step.
+      recomputeCallouts();
+      stepExplodeTween(now);
     } catch (error) {
       onError(error);
     }
@@ -822,6 +1220,24 @@ export function init3D(container, callbacks = {}, options = {}) {
     if (disposed) return;
     disposed = true;
     cancelAnimationFrame(rafId);
+    explodeTween = null;
+    try {
+      for (const { el, type, handler } of buttonListeners) {
+        el.removeEventListener(type, handler);
+      }
+    } catch (error) { /* listener removal is best-effort */ }
+    buttonListeners = [];
+    explodeButton = null;
+    resetButton = null;
+    try {
+      element.removeEventListener('keydown', onContainerKeydown);
+    } catch (error) { /* listener removal is best-effort */ }
+    try {
+      if (calloutsHandle && typeof calloutsHandle.dispose === 'function') {
+        calloutsHandle.dispose();
+      }
+    } catch (error) { onError(error); }
+    calloutsHandle = null;
     try {
       if (interactionHandle && typeof interactionHandle.dispose === 'function') {
         interactionHandle.dispose();
@@ -999,9 +1415,61 @@ export function init3D(container, callbacks = {}, options = {}) {
       return handle;
     },
 
+    /**
+     * Blueprint reset view (spec §2.4): snap the camera back to the
+     * canonical iso direction (0.577, 0.577, 0.577) and refit the
+     * bounding box. Same action as the Reset view button and the R key.
+     * Delegates to view.resetToIso() via resetViewInternal().
+     */
+    resetView() {
+      if (disposed) return handle;
+      resetViewInternal();
+      return handle;
+    },
+
+    /**
+     * Blueprint Inspect explode (spec §8): true raises every component
+     * group on a staggered 300 ms eased tween (visual only), false
+     * returns them to their base Y. Reduced-motion is instant.
+     * Delegates to view.setExploded() (scene.js owns the tween).
+     */
+    setExploded(value) {
+      if (disposed) return handle;
+      setExplodedInternal(value === true);
+      return handle;
+    },
+
+    /**
+     * Toggle the Inspect explode state; returns the handle. Delegates
+     * to the view: the next state is read from view.isExploded(), so
+     * a toggle can never invert a stale local flag.
+     */
+    toggleExplode() {
+      if (disposed) return handle;
+      let next = !exploded;
+      if (view && typeof view.isExploded === 'function') {
+        try { next = !view.isExploded(); } catch (error) { /* use local flag */ }
+      }
+      setExplodedInternal(next);
+      return handle;
+    },
+
+    /** Whether the Inspect explode toggle is currently on. */
+    isExploded() {
+      return exploded;
+    },
+
     dispose,
     destroy: dispose,
   };
+
+  // -- Blueprint wiring: buttons + R key + callouts (spec §2.4, §8-§10).
+  // -- The page also wires the same buttons after netproof:3d-ready;
+  // -- both paths call the same handle methods, so double-wiring is
+  // -- impossible (each button gets one listener here, at most).
+  wireBlueprintButtons();
+  element.addEventListener('keydown', onContainerKeydown);
+  loadCallouts();
 
   // -- Animation loop (overlay tick; scene.js renders). ---------------------
   rafId = requestAnimationFrame(tick);

@@ -172,18 +172,18 @@ each carry their own, and they disagree, so do not claim the views
 stay in sync through one place.
 
 The 2D verdict banner (`#verdict` in `web/index.html`) uses PASS green
-`#1a7f37`, WARN amber `#d97706`, STOP red `#b00020`.
+`#1a7f37`, WARN amber `#92400E`, STOP red `#b00020`.
 
-`scene.js` `VERDICT_COLORS` (numeric hex, brightened so emissive
-meshes read on the dark scene):
+`scene.js` `VERDICT_COLORS` (numeric hex, the mesh edge/tint colours —
+the 3D render is flat blueprint white/pale-blue, no emissive, no dark scene):
 
 | Verdict / severity | `scene.js` |
 | --- | --- |
-| `PASS` | `#2ea043` |
-| `WARN` | `#d97706` |
-| `STOP` | `#e5484d` |
-| `INFO` | `#4da3ff` |
-| `UNKNOWN` (no verdict yet) | `#8b949e` |
+| `PASS` | `#1a7f37` |
+| `WARN` | `#92400E` |
+| `STOP` | `#d92d20` |
+| `INFO` | `#667085` |
+| `UNKNOWN` (no verdict yet) | `#0B3D91` (blueprint blue: no glow, no signal) |
 
 `overlay.js` `SEVERITY_COLORS` (the table on the live tinting path —
 `main3d.js` tints through `updateOverlays`, not through
@@ -192,13 +192,19 @@ meshes read on the dark scene):
 | Verdict / severity | `overlay.js` |
 | --- | --- |
 | `PASS` | `#1a7f37` (the 2D green, not brightened) |
-| `WARN` | `#d97706` |
-| `STOP` | `#d92d20` (not `scene.js`'s `#e5484d`) |
+| `WARN` | `#92400E` |
+| `STOP` | `#d92d20` (same as `scene.js`) |
 | `INFO` | `#667085` (grey; never used for tinting — INFO findings never colour a part) |
-| `UNKNOWN` | `#8b949e` |
+| `UNKNOWN` | `#4B5563` |
 
 `history.js` has a third, internal table using the 2D banner hexes
-(`PASS #1a7f37`, `WARN #d97706`, `STOP #b00020`, unknown `#777777`).
+(`PASS #1a7f37`, `WARN #92400E`, `STOP #b00020`, unknown `#4B5563`).
+
+STOP is split by surface: `#b00020` is the canonical STOP for text and
+borders (2D banner, `history.js`); `#d92d20` is only the 3D mesh
+edge/tint red in `scene.js` `VERDICT_COLORS` and `overlay.js`
+`SEVERITY_COLORS`. Do not use `#d92d20` for text or borders, and do not
+use `#b00020` for a mesh edge or tint.
 
 Do not invent new verdict hues, and do not change one table expecting
 the others to follow: any colour change has to be made in each table

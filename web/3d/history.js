@@ -69,7 +69,11 @@
  * and the callback fires only on a real click / select() call.
  *
  * Colours match web/index.html verdict colours: PASS #1a7f37,
- * WARN #d97706, STOP #b00020, unknown/no report #777777.
+ * WARN #92400E, STOP #b00020, unknown/no report #4B5563.
+ * Coordinator token fix (2026-11-15, all three verdict-colour
+ * tables together — this file, scene.js VERDICT_COLORS,
+ * overlay.js SEVERITY_COLORS): WARN was #d97706 (3.19:1 on white,
+ * fails AA as text) and unknown was #777777 (4.48:1, fails).
  */
 
 (function (root, factory) {
@@ -85,13 +89,13 @@
   var MAX_ROUNDS = 3; // backend cap, see web/index.html MAX_REPAIR_ROUNDS
   var VERDICT_COLORS = {
     PASS: '#1a7f37',
-    WARN: '#d97706',
-    WARNING: '#d97706',
+    WARN: '#92400E',
+    WARNING: '#92400E',
     STOP: '#b00020',
     FAIL: '#b00020',
     ERROR: '#b00020'
   };
-  var UNKNOWN_COLOR = '#777777';
+  var UNKNOWN_COLOR = '#4B5563';
   var NODE_SPACING = 2.2; // Three.js world units between round nodes
   var NODE_RADIUS = 0.32;
 
@@ -395,7 +399,7 @@
       '.np-history-verdict { font-weight: 800; }',
       '.np-history-changes, .np-history-findings, .np-history-components { margin: 6px 0; padding-left: 20px; }',
       '.np-history-changes li, .np-history-findings li, .np-history-components li { margin-bottom: 4px; }',
-      '.np-history-empty { color: #777; }',
+      '.np-history-empty { color: #595959; }', // muted text, AA (was #777, 4.48:1)
       '.np-history-note { font-size: 12px; color: #555; margin-top: 8px; }'
     ].join('\n');
     document.head.appendChild(style);

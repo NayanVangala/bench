@@ -23,7 +23,7 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%231a7f37'/%3E%3Ctext x='16' y='22' font-size='18' text-anchor='middle' fill='white' font-family='monospace'%3EN%3C/text%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&family=IBM+Plex+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="styles.css">
 <script type="importmap">
 {
@@ -36,7 +36,7 @@
 <!--
   Netproof front end. Static page, plain HTML+CSS+JS, no build step, no
   framework, no npm. Styling lives in web/styles.css (served by the
-  server's web/ static mount). Fonts are IBM Plex Sans (UI) and IBM Plex
+  server's web/ static mount). Fonts are Inter Tight (UI) and JetBrains
   Mono (every value, node name, unit and rule ID).
   File owner: web/index.html + web/styles.css ONLY. Do not touch web/3d/
   (P2 owns it) or backend/.
@@ -125,6 +125,36 @@
   the component selection, Enter focuses the selected row's value field,
   Escape deselects. The container handler only fires when the container
   itself is the event target, so it never fights interaction.js.
+  Findings have NO sidebar list: each finding is a callout on the 3D
+  canvas (web/3d/callouts.js, fed by sync3D) and, on small screens, an
+  item in the #callout-sheet bottom sheet (renderSheet, same `findings`
+  array). There is no #findings-section and no renderFindings().
+  Repair diffs: repair() passes its diffNetlists(before, after) strings
+  to showRepairDiffs() from web/3d/overlay.js (stashed on
+  window.__netproofOverlay by the module bootstrap below; the 3D handle
+  does not expose it) and calls setRepairRechecking(true/false) around
+  the re-sim applyResult(). Callout clicks dispatch bubbling
+  netproof:callout-select / netproof:callout-activate CustomEvents on
+  #scene3d; the page listens on the container to sync the table
+  selection and open editing on Enter.
+  Selection announcements: #selected-announcer (visually hidden, role
+  status, aria-live polite) is the live region interaction.js writes
+  the settled selection into (debounced); without the element its
+  announceSelection() silently no-ops.
+  Blueprint buttons: #reset-view ("Reset view") and #inspect-explode
+  ("Inspect", aria-pressed) live in #scene3d-section, disabled until
+  3D wires them. main3d.js wireBlueprintButtons() finds them by those
+  ids and attaches resetView / toggleExplode; the page must NOT add its
+  own listeners (that would double-toggle Inspect). main3d enables
+  them on wiring, so a failed 3D load leaves them disabled, not dead.
+  Colour tokens: STOP is #b00020 everywhere for text and borders
+  (styles.css --stop, this page's VERDICT_COLOR and sweep threshold
+  lines, callouts/history/edit-panel). #d92d20 survives ONLY inside
+  web/3d/scene.js + overlay.js SEVERITY_COLORS as the 3D mesh edge /
+  tint colour (overlay.js tintMesh), never as page text or a border.
+  WARN is #92400E on this page (the old #d97706 is gone); callouts use
+  #b45309 for their WARN borders, which is their own token, not this
+  page's.
 
   Example picker: the four fixture circuits are copied inline from
   backend/tests/fixtures/ (good_led, led_overcurrent, resistor_warn,
@@ -138,58 +168,135 @@
 </head>
 <body>
 <a class="skip-link" href="#main">Skip to main content</a>
-<header>
-  <h1>Netproof <span class="mono">/ bench check</span></h1>
-  <p>Describe or upload a circuit.</p>
-  <button id="theme-toggle" type="button" class="secondary" aria-pressed="false">Dark theme</button>
-</header>
-<main id="main">
-  <noscript><p><strong>Netproof needs JavaScript.</strong> The checks run on the server, but this page drives them from the browser.</p></noscript>
-
+<div class="frame" id="app-frame">
+  <header class="topbar">
+    <div class="brand">
+      <svg width="28" height="28" viewBox="0 0 28 28" aria-hidden="true" fill="none" stroke="#1c1a17" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 14 H9" />
+        <path d="M9 14 l2.5 -4 l2.5 8 l2.5 -8 l2.5 8 l2.5 -4" />
+        <path d="M22 14 H24" />
+        <path d="M14 14 V24" />
+        <circle cx="4" cy="14" r="1.6" fill="#1c1a17" stroke="none" />
+        <circle cx="24" cy="14" r="1.6" fill="#1c1a17" stroke="none" />
+        <circle cx="14" cy="24" r="1.6" fill="#1c1a17" stroke="none" />
+        <circle cx="14" cy="14" r="1.6" fill="#1c1a17" stroke="none" />
+      </svg>
+      <span class="wordmark">Netproof</span>
+      <span class="wordmark-suffix mono">/ bench check</span>
+    </div>
+    <div class="command-wrap">
+      <input type="text" id="goal" placeholder="Describe a circuit or drop a schematic…" aria-label="Describe a circuit or drop a schematic" autocomplete="off">
+      <span id="attached-file" class="attached-file" hidden><span id="attached-name"></span><button id="remove-file" type="button" aria-label="Remove attached image">&times;</button></span>
+      <span id="status" role="status" aria-live="polite"></span>
+    </div>
+    <div class="top-actions">
+      <button id="upload-btn" type="button" class="icon-btn" aria-label="Upload a schematic image" title="Upload a schematic image">
+        <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M21 15 l-3.5 -3.5 L6 23" /></svg>
+        <span class="file-dot" aria-hidden="true"></span>
+      </button>
+      <button id="drawer-toggle" type="button" class="icon-btn" aria-label="Toggle details panel" aria-expanded="false" aria-controls="drawer">
+        <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="15" y1="4" x2="15" y2="20"/></svg>
+      </button>
+      <button id="theme-toggle" type="button" class="icon-btn" aria-pressed="false" aria-label="Toggle dark theme">
+        <svg class="icon-moon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8 A9 9 0 1 1 11.2 3 A7 7 0 0 0 21 12.8 Z"/></svg>
+        <svg class="icon-sun" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2 V4 M12 20 V22 M4.9 4.9 L6.3 6.3 M17.7 17.7 L19.1 19.1 M2 12 H4 M20 12 H22 M4.9 19.1 L6.3 17.7 M17.7 6.3 L19.1 4.9"/></svg>
+      </button>
+      <button id="check-btn" type="button">Check &rarr;</button>
+    </div>
+    <input type="file" id="file-input" accept="image/*" hidden>
+  </header>
   <div id="error-banner" role="alert"></div>
-
-  <div class="layout">
-    <div class="col-left">
-
-      <section id="input-section">
-        <h2>Input</h2>
-        <div id="dropzone" tabindex="0" role="button" aria-label="Drag &amp; drop a schematic image here, or click to choose a file (PNG, JPG, SVG)">
-          <strong>Drag &amp; drop a schematic image here</strong><br>
-          or click to choose a file (PNG, JPG, SVG)
-          <input type="file" id="file-input" accept="image/*">
-        </div>
-        <div class="row">
-          <div>
-            <label for="goal">Goal (text, optional if an image is uploaded)</label>
-            <textarea id="goal" placeholder="e.g. 5V regulator, 100 mA load, output ripple under 50 mV"></textarea>
-          </div>
-        </div>
-        <div>
-          <button id="run-image-btn" type="button">Run (image)</button>
-          <button id="run-goal-btn" type="button">Run (goal)</button>
-          <span id="status" role="status" aria-live="polite"></span>
-        </div>
+  <main id="main">
+    <noscript><p><strong>Netproof needs JavaScript.</strong> The checks run on the server, but this page drives them from the browser.</p></noscript>
+    <div id="canvas" class="is-empty">
+      <div id="empty-state">
+        <svg class="placeholder-circuit" viewBox="0 0 360 180" width="360" height="180" aria-hidden="true">
+          <path d="M40 140 V110" />
+          <path d="M40 90 V60" />
+          <path d="M28 90 H52" />
+          <path d="M34 110 H46" />
+          <path d="M40 60 H140 l10 -12 l10 24 l10 -24 l10 24 l10 -24 l10 12 H320" />
+          <path d="M320 60 V100" />
+          <path d="M320 100 L300 130 L340 130 Z" />
+          <path d="M320 130 V140" />
+          <path d="M348 96 l8 -8" />
+          <path d="M356 108 l8 -8" />
+          <path d="M320 140 H40" />
+          <path d="M180 140 V152" />
+          <path d="M168 152 H192" />
+          <path d="M174 158 H186" />
+          <path d="M178 164 H182" />
+        </svg>
+        <p class="empty-eyebrow">Try an example</p>
         <div class="examples">
-          <p class="examples-label" id="examples-label">Try an example</p>
           <div id="examples" role="group" aria-labelledby="examples-label">
-            <button type="button" class="secondary example-btn" data-example="good_led">Good LED &mdash; expect PASS</button>
-            <button type="button" class="secondary example-btn" data-example="led_overcurrent">LED overcurrent &mdash; expect STOP</button>
-            <button type="button" class="secondary example-btn" data-example="resistor_warn">Resistor running hot &mdash; expect WARN</button>
-            <button type="button" class="secondary example-btn" data-example="shorted_source">Shorted source &mdash; expect STOP</button>
+            <span id="examples-label" class="visually-hidden">Try an example</span>
+            <button type="button" class="secondary example-btn" data-example="good_led">Good LED &middot; PASS</button>
+            <button type="button" class="secondary example-btn" data-example="led_overcurrent">LED overcurrent &middot; STOP</button>
+            <button type="button" class="secondary example-btn" data-example="resistor_warn">Resistor running hot &middot; WARN</button>
+            <button type="button" class="secondary example-btn" data-example="shorted_source">Shorted source &middot; STOP</button>
           </div>
-          <p class="empty">Each example loads the example circuit and runs a real check. Verdicts are judged on the verdict plus the rule codes: some circuits trip more than one rule.</p>
+          <p class="empty-note">Each example loads a real circuit and runs a real check.</p>
+        </div>
+      </div>
+
+      <div class="preview-card">
+        <div id="image-col" hidden>
+          <label>Uploaded image</label>
+          <img id="preview" alt="Uploaded schematic preview">
+          <p id="no-image" class="empty">No image uploaded yet.</p>
+          <p id="file-name" class="empty"></p>
+        </div>
+      </div>
+
+      <section id="scene3d-section">
+        <h2 class="visually-hidden">3D view</h2>
+        <div id="verdict-callout">
+          <p class="callout-eyebrow">Verdict</p>
+          <div id="verdict" aria-live="polite"></div>
+          <p class="verdict-empty" id="verdict-empty">No check yet. Load an example or run a goal to see the verdict here.</p>
+          <dl id="key-readings" aria-label="Key measured values">
+            <div class="reading"><dt>LED current</dt><dd id="key-led">&mdash;</dd></div>
+            <div class="reading"><dt>Resistor power</dt><dd id="key-power">&mdash;</dd></div>
+            <div class="reading"><dt>Supply rail</dt><dd id="key-rail">&mdash;</dd></div>
+          </dl>
+        </div>
+        <div id="scene3d" tabindex="0" role="img" aria-label="3D circuit view. Focus and use arrow keys to move between components, Enter to edit the selected component, Escape to deselect."><div class="fallback">3D view loading&hellip; The netlist table still works.</div></div>
+        <p id="selected-announcer" class="visually-hidden" role="status" aria-live="polite"></p>
+        <p class="controls-hint">Orbit: drag with the left mouse button &middot; Zoom: scroll wheel &middot; Pan: drag with the right mouse button (or two-finger drag on trackpad). Click a component in 3D to select it and edit it in the netlist table. Keyboard: focus this panel, arrow keys move between components, Enter edits, Escape deselects.</p>
+        <p id="scene3d-status">3D status: loading&hellip;</p>
+        <div>
+          <button id="reset-view" type="button" class="secondary" disabled>Reset view</button>
+          <button id="inspect-explode" type="button" class="secondary" aria-pressed="false" disabled>Inspect</button>
         </div>
       </section>
 
-      <section id="netlist-section" class="no-image">
-        <h2>Netlist</h2>
-        <div class="split">
-          <div id="image-col" hidden>
-            <label>Uploaded image</label>
-            <img id="preview" alt="Uploaded schematic preview">
-            <p id="no-image" class="empty">No image uploaded yet.</p>
-            <p id="file-name" class="empty"></p>
-          </div>
+      <section id="verdict-section" aria-label="Check pipeline">
+        <h2>Check</h2>
+        <ol id="pipeline" aria-label="Check pipeline">
+          <li data-step="simulate"><span class="dot" aria-hidden="true"></span><span>Simulate</span></li>
+          <li data-step="rules"><span class="dot" aria-hidden="true"></span><span>Rules</span></li>
+          <li data-step="repair"><span class="dot" aria-hidden="true"></span><span>Repair</span></li>
+          <li data-step="resimulate"><span class="dot" aria-hidden="true"></span><span>Re-simulate</span></li>
+        </ol>
+        <p class="empty" id="pipeline-note">Idle. Run a check to see each step.</p>
+        <p id="uncertain" class="empty"></p>
+      </section>
+
+      <p class="canvas-trust">Verdicts come from ngspice + fixed rules, never the AI.</p>
+    </div>
+
+    <aside id="drawer" role="complementary" aria-label="Details">
+      <div class="drawer-tabs" role="tablist" aria-label="Details panels">
+        <button type="button" class="drawer-tab" role="tab" id="tab-netlist" aria-selected="true" aria-controls="panel-netlist">Netlist</button>
+        <button type="button" class="drawer-tab" role="tab" id="tab-sweep" aria-selected="false" aria-controls="panel-sweep" tabindex="-1">Sweep</button>
+        <button type="button" class="drawer-tab" role="tab" id="tab-repairs" aria-selected="false" aria-controls="panel-repairs" tabindex="-1">Repairs</button>
+        <button type="button" class="drawer-tab" role="tab" id="tab-export" aria-selected="false" aria-controls="panel-export" tabindex="-1">Export</button>
+        <button type="button" class="drawer-tab" role="tab" id="tab-log" aria-selected="false" aria-controls="panel-log" tabindex="-1">Log</button>
+      </div>
+      <div class="drawer-panel active" id="panel-netlist" role="tabpanel" aria-labelledby="tab-netlist" tabindex="0">
+        <section id="netlist-section" class="no-image">
+          <h2>Netlist</h2>
           <div>
             <label>Netlist (editable: id, type, value, nodes, rating, color. Node voltage / current / power come only from the backend Report and are read-only.)</label>
             <div class="table-wrap" tabindex="0" aria-label="Netlist table, scrollable">
@@ -210,111 +317,111 @@
             <p id="recheck-note" class="empty">Re-check runs the edited table again, without AI.</p>
             <p class="empty">Selected component: <span id="selected-component">none</span> (click a row, or click a component in the 3D view).</p>
           </div>
-        </div>
-      </section>
-
-    </div>
-    <div class="col-right">
-
-      <section id="verdict-section" aria-label="Verdict">
-        <h2>Verdict</h2>
-        <div id="verdict" aria-live="polite"></div>
-        <p class="verdict-empty" id="verdict-empty">No check yet. Load an example or run a goal to see the verdict here.</p>
-        <dl id="key-readings" aria-label="Key measured values">
-          <div class="reading"><dt>LED current</dt><dd id="key-led">&mdash;</dd></div>
-          <div class="reading"><dt>Resistor power</dt><dd id="key-power">&mdash;</dd></div>
-          <div class="reading"><dt>Supply rail</dt><dd id="key-rail">&mdash;</dd></div>
-        </dl>
-        <ol id="pipeline" aria-label="Check pipeline">
-          <li data-step="simulate"><span class="dot" aria-hidden="true"></span><span>Simulate</span></li>
-          <li data-step="rules"><span class="dot" aria-hidden="true"></span><span>Rules</span></li>
-          <li data-step="repair"><span class="dot" aria-hidden="true"></span><span>Repair</span></li>
-          <li data-step="resimulate"><span class="dot" aria-hidden="true"></span><span>Re-simulate</span></li>
-        </ol>
-        <p class="empty" id="pipeline-note">Idle. Run a check to see each step.</p>
-      </section>
-
-      <section id="findings-section">
-        <h2>Findings</h2>
-        <ul id="findings" aria-live="polite" aria-label="Findings"><li class="empty">No findings yet. Run a check first.</li></ul>
-        <p id="uncertain" class="empty"></p>
-      </section>
-
-      <section id="sweep-section">
-        <h2>Resistor sweep</h2>
-        <div class="sweep-form">
-          <label for="sweep-resistor">Resistor</label>
-          <select id="sweep-resistor"></select>
-          <button id="sweep-btn" type="button">Run sweep</button>
-        </div>
-        <p class="sweep-meta empty">LED <span id="sweep-led">&mdash;</span> &middot; Values <span class="mono" id="sweep-values">&mdash;</span> <span id="sweep-status" role="status" aria-live="polite"></span></p>
-        <p id="sweep-hint" class="empty">Pick an example or run a check first, then choose a resistor. Each point is verified the same way as a check; the sweep never changes the netlist or the 3D view.</p>
-        <div id="sweep-results" hidden>
-          <div class="sweep-charts">
-            <div>
-              <label>LED current vs R</label>
-              <div id="sweep-chart-current"></div>
-              <p id="sweep-legend-current" class="empty"></p>
-              <p id="sweep-safe-band" class="empty"></p>
-            </div>
-            <div>
-              <label>Resistor power vs R</label>
-              <div id="sweep-chart-power"></div>
-              <p id="sweep-legend-power" class="empty"></p>
-            </div>
-          </div>
-          <div class="table-wrap" tabindex="0" aria-label="Sweep points table, scrollable">
-            <table>
-              <thead>
-                <tr><th>R</th><th>LED current</th><th>Resistor power</th><th>Verdict</th></tr>
-              </thead>
-              <tbody id="sweep-body"></tbody>
-            </table>
-          </div>
-          <p id="sweep-mock" class="empty"></p>
-        </div>
-      </section>
-
-      <section id="scene3d-section">
-        <h2>3D view</h2>
-        <div id="scene3d" tabindex="0" role="img" aria-label="3D circuit view. Focus and use arrow keys to move between components, Enter to edit the selected component, Escape to deselect."><div class="fallback">3D view loading&hellip; The netlist table still works.</div></div>
-        <p class="controls-hint">Orbit: drag with the left mouse button &middot; Zoom: scroll wheel &middot; Pan: drag with the right mouse button (or two-finger drag on trackpad). Click a component in 3D to select it and edit it in the netlist table. Keyboard: focus this panel, arrow keys move between components, Enter edits, Escape deselects.</p>
-        <p id="scene3d-status">3D status: loading&hellip;</p>
-      </section>
-
-      <section id="repair-section">
-        <h2>Repair history</h2>
-        <ol id="repair-history"><li class="empty">No repairs yet. Repair runs at most 3 rounds.</li></ol>
-        <p id="repair-round-label" class="empty">Round: 0 / 3</p>
-      </section>
-
-    </div>
-  </div>
-
-  <section id="console-section" class="full">
-    <h2><button id="console-toggle" type="button" aria-expanded="false" aria-controls="console-body">Live console</button></h2>
-    <div id="console-body" hidden>
-      <div class="console-wrap">
-        <div id="console" role="log" aria-live="off" aria-label="Agent console log"><div class="line"><span class="t">[--.--s]</span> Ready. Run an image or a goal to see agent events here.</div></div>
-        <div class="legend" id="legend">Agent colours appear here as agents speak.</div>
+        </section>
       </div>
-      <p class="empty">The console log is not announced line by line; run status is announced in the status line next to the Run buttons.</p>
+      <div class="drawer-panel" id="panel-sweep" role="tabpanel" aria-labelledby="tab-sweep" tabindex="0">
+        <section id="sweep-section">
+          <h2>Resistor sweep</h2>
+          <div class="sweep-form">
+            <label for="sweep-resistor">Resistor</label>
+            <select id="sweep-resistor"></select>
+            <button id="sweep-btn" type="button">Run sweep</button>
+          </div>
+          <p class="sweep-meta empty">LED <span id="sweep-led">&mdash;</span> &middot; Values <span class="mono" id="sweep-values">&mdash;</span> <span id="sweep-status" role="status" aria-live="polite"></span></p>
+          <p id="sweep-hint" class="empty">Pick an example or run a check first, then choose a resistor. Each point is verified the same way as a check; the sweep never changes the netlist or the 3D view.</p>
+          <div id="sweep-results" hidden>
+            <div class="sweep-charts">
+              <div>
+                <label>LED current vs R</label>
+                <div id="sweep-chart-current"></div>
+                <p id="sweep-legend-current" class="empty"></p>
+                <p id="sweep-safe-band" class="empty"></p>
+              </div>
+              <div>
+                <label>Resistor power vs R</label>
+                <div id="sweep-chart-power"></div>
+                <p id="sweep-legend-power" class="empty"></p>
+              </div>
+            </div>
+            <div class="table-wrap" tabindex="0" aria-label="Sweep points table, scrollable">
+              <table>
+                <thead>
+                  <tr><th>R</th><th>LED current</th><th>Resistor power</th><th>Verdict</th></tr>
+                </thead>
+                <tbody id="sweep-body"></tbody>
+              </table>
+            </div>
+            <p id="sweep-mock" class="empty"></p>
+          </div>
+        </section>
+      </div>
+      <div class="drawer-panel" id="panel-repairs" role="tabpanel" aria-labelledby="tab-repairs" tabindex="0">
+        <section id="repair-section">
+          <h2>Repair history</h2>
+          <ol id="repair-history"><li class="empty">No repairs yet. Repair runs at most 3 rounds.</li></ol>
+          <p id="repair-round-label" class="empty">Round: 0 / 3</p>
+        </section>
+      </div>
+      <div class="drawer-panel" id="panel-export" role="tabpanel" aria-labelledby="tab-export" tabindex="0">
+        <section id="download-section">
+          <h2>Export</h2>
+          <button id="dl-cir-btn" type="button" class="secondary">Download netlist.cir</button>
+          <button id="dl-bom-btn" type="button" class="secondary">Download bom.csv</button>
+          <button id="share-btn" type="button" class="secondary">Copy share link</button>
+          <p id="share-status" class="empty" role="status" aria-live="polite"></p>
+          <p class="empty">Shares the netlist only (no title, no result). Opening the link re-checks the circuit on the server; no result is stored in the link. Anyone with the link can see the circuit, so do not put secrets in node names.</p>
+        </section>
+      </div>
+      <div class="drawer-panel" id="panel-log" role="tabpanel" aria-labelledby="tab-log" tabindex="0">
+        <section id="console-section">
+          <h2><button id="console-toggle" type="button" class="console-toggle" aria-expanded="false" aria-controls="console-body">Live console</button></h2>
+          <div id="console-body" hidden>
+            <div class="console-wrap">
+              <div id="console" role="log" aria-live="off" aria-label="Agent console log"><div class="line"><span class="t">[--.--s]</span> Ready. Run an image or a goal to see agent events here.</div></div>
+              <div class="legend" id="legend">Agent colours appear here as agents speak.</div>
+            </div>
+            <p class="empty">The console log is not announced line by line; run status is announced in the status line next to the Run buttons.</p>
+          </div>
+        </section>
+      </div>
+    </aside>
+    <div id="drawer-backdrop" aria-hidden="true"></div>
+
+    <div id="callout-sheet" aria-label="Check results">
+      <button type="button" id="sheet-peek" aria-expanded="false" aria-controls="sheet-body">
+        <span class="sheet-handle" aria-hidden="true"></span>
+        <span class="sheet-peek-row">
+          <span id="sheet-peek-verdict" class="sheet-peek-verdict">No check yet</span>
+          <span id="sheet-peek-count" class="sheet-peek-count">No findings yet</span>
+          <span class="sheet-peek-chevron" aria-hidden="true">&#9662;</span>
+        </span>
+      </button>
+      <div id="sheet-body">
+        <div class="sheet-readings">
+          <div><span>LED current</span><b id="sheet-led">&mdash;</b></div>
+          <div><span>Resistor power</span><b id="sheet-power">&mdash;</b></div>
+          <div><span>Supply rail</span><b id="sheet-rail">&mdash;</b></div>
+        </div>
+        <ul id="sheet-findings"></ul>
+        <button type="button" id="sheet-close" class="secondary">Close</button>
+      </div>
     </div>
-  </section>
-
-  <section id="download-section" class="full">
-    <h2>Downloads</h2>
-    <button id="dl-cir-btn" type="button" class="secondary">Download netlist.cir</button>
-    <button id="dl-bom-btn" type="button" class="secondary">Download bom.csv</button>
-    <button id="share-btn" type="button" class="secondary">Copy share link</button>
-    <p id="share-status" class="empty" role="status" aria-live="polite"></p>
-    <p class="empty">Shares the netlist only (no title, no result). Opening the link re-checks the circuit on the server; no result is stored in the link. Anyone with the link can see the circuit, so do not put secrets in node names.</p>
-  </section>
-
-</main>
-<footer>
-  <p>Verdicts come from ngspice + fixed rules, never the AI.</p>
-</footer>
+  </main>
+</div>
+<div id="status-strip">
+  <span class="status-chip" id="chip-checks">00 &middot; CHECK</span>
+  <span class="status-chip" id="chip-ngspice">NGSPICE &middot; DC OP</span>
+  <span class="status-chip" id="chip-parts">0 PARTS &middot; 0 NODES</span>
+  <span class="status-chip" id="chip-verdict" aria-live="polite"><span class="vdot" id="verdict-dot" aria-hidden="true"></span><span id="verdict-chip-text">VERDICT &middot; &mdash;</span></span>
+</div>
+<div hidden>
+  <div id="dropzone" tabindex="0" role="button" aria-label="Drag &amp; drop a schematic image here, or click to choose a file (PNG, JPG, SVG)">
+    <strong>Drag &amp; drop a schematic image here</strong><br>
+    or click to choose a file (PNG, JPG, SVG)
+  </div>
+  <button id="run-image-btn" type="button">Run (image)</button>
+  <button id="run-goal-btn" type="button">Run (goal)</button>
+</div>
 <script>
 (function () {
   'use strict';
@@ -467,6 +574,10 @@
     verdictEl.innerHTML = escapeHtml(label) +
       (mock ? '<span class="mock-tag">MOCK</span>' : '') +
       (note ? '<small>' + escapeHtml(note) + '</small>' : '');
+    // The on-canvas callout border carries the severity (ink word on
+    // white, not white on a colour block); mirror it via data-verdict.
+    var callout = $('verdict-callout');
+    if (callout) callout.setAttribute('data-verdict', label);
     var empty = $('verdict-empty');
     if (empty) empty.style.display = 'none';
   }
@@ -523,31 +634,17 @@
     return null;
   }
 
-  function renderFindings() {
-    var ul = $('findings');
-    if (!findings.length) {
-      ul.innerHTML = '<li class="empty">No findings.</li>';
-    } else {
-      ul.innerHTML = findings.map(function (f) {
-        if (typeof f === 'string') return '<li>' + escapeHtml(f) + '</li>';
-        var sev = String(f.severity || f.level || f.type || 'INFO').toUpperCase();
-        var sevClass = sev === 'STOP' ? 'sev-stop' : sev === 'WARN' ? 'sev-warn' : sev === 'PASS' ? 'sev-pass' : 'sev-info';
-        var code = f.rule_id || f.code || f.rule || '';
-        var msg = f.message || f.text || f.detail || JSON.stringify(f);
-        var where = f.component || (f.component_ids && f.component_ids.join(', ')) || f.id || f.node || '';
-        var measured = parseMeasured(String(msg));
-        return '<li class="' + sevClass + '">' +
-          '<div class="findings-head"><span class="sev ' + sevClass + '">' + escapeHtml(sev) + '</span> ' +
-          '<span class="findings-code">' + escapeHtml(code) + '</span>' +
-          (where ? '<span>' + escapeHtml(where) + '</span>' : '') + '</div>' +
-          '<p class="findings-msg">' + escapeHtml(msg) + '</p>' +
-          (measured ? '<span class="measured">Measured <b>' + escapeHtml(measured.measured) + '</b> &middot; Limit <b>' + escapeHtml(measured.limit) + '</b></span>' : '') +
-          '</li>';
-      }).join('');
-    }
+  // The old sidebar findings list (#findings-section / renderFindings)
+  // is gone: findings are displayed as callouts on the 3D canvas
+  // (web/3d/callouts.js, fed by sync3D -> updateCallouts) and, on small
+  // screens, in the #callout-sheet bottom sheet (renderSheet, fed from
+  // the same `findings` array). What remains of renderFindings is only
+  // the non-list half: the "Uncertain (from Report)" line under the
+  // pipeline. renderKeyReadings() / renderSheet() are called directly
+  // by applyResult() and the other call sites below.
+  function updateUncertain() {
     var unc = lastReport && Array.isArray(lastReport.uncertain) ? lastReport.uncertain : [];
     $('uncertain').textContent = unc.length ? 'Uncertain (from Report): ' + unc.join('; ') : '';
-    renderKeyReadings();
   }
 
   // Key measured numbers for the verdict panel, pulled from the Report
@@ -823,15 +920,19 @@
     if (data.mock || report.mock) logLine('system', 'Mock mode: this result is simulated, not checked.', 'info');
     var incoming = data.netlist || data.netlist_used || report.netlist_used || report.netlist;
     if (incoming) { netlist = normNetlist(incoming); }
-    if (data.findings || report.findings) { findings = data.findings || report.findings; renderFindings(); }
+    if (data.findings || report.findings) { findings = data.findings || report.findings; updateUncertain(); }
     if (data.verdict || report.verdict) {
       setVerdict(data.verdict || report.verdict, !!(data.mock || report.mock), data.verdict_note || data.note || report.verdict_note || '');
+      checkCount++;
       pipelineDone();
     }
     if (data.round != null) { repairRound = data.round; }
     renderNetlist();
     renderRepairHistory(repairHistory);
     renderKeyReadings();
+    updateStatusStrip();
+    updateEmptyState();
+    renderSheet();
     sync3D();
   }
 
@@ -959,6 +1060,12 @@
     $('repair-btn').disabled = b || repairRound >= MAX_REPAIR_ROUNDS;
     $('recheck-btn').disabled = b;
     $('share-btn').disabled = b;
+    var checkBtn = $('check-btn');
+    if (checkBtn) { checkBtn.disabled = b; checkBtn.textContent = b ? 'Checking\u2026' : 'Check \u2192'; }
+    var goalEl = $('goal');
+    if (goalEl) goalEl.disabled = b;
+    var upBtn = $('upload-btn');
+    if (upBtn) upBtn.disabled = b;
     statusEl.textContent = label || '';
   }
 
@@ -977,7 +1084,7 @@
 
   async function runImage() {
     if (busy) return;
-    if (!selectedFile) { showError('No image selected', 'Drop or choose a schematic image first, or use Run (goal) instead.'); return; }
+    if (!selectedFile) { showError('No image selected', 'Drop or choose a schematic image first, or type a goal and press Check.'); return; }
     clearError();
     startTime = Date.now();
     pipelineReset();
@@ -1004,7 +1111,7 @@
   async function runGoal() {
     if (busy) return;
     var goal = $('goal').value.trim();
-    if (!goal) { showError('No goal entered', 'Type a goal first, or upload an image and use Run (image).'); return; }
+    if (!goal) { showError('No goal entered', 'Type a goal first, or upload an image.'); return; }
     clearError();
     startTime = Date.now();
     pipelineReset();
@@ -1053,6 +1160,29 @@
     } catch (e) {
       handleErrorPayload(null, 'Network error during re-check: ' + e.message);
     } finally { setBusy(false); }
+  }
+
+  // Repair diff callouts (web/3d/overlay.js re-exports showRepairDiffs /
+  // setRepairRechecking from callouts.js). This classic script cannot
+  // import an ES module, so the module bootstrap below dynamically
+  // imports ./3d/overlay.js and stashes the functions on
+  // window.__netproofOverlay (the 3D handle from main3d.js does not
+  // expose them, and overlay.js shares the callouts.js singleton with
+  // main3d, so the diffs land on the same callout layer main3d
+  // initialized). Everything here is guarded: when 3D or the overlay
+  // import is unavailable the repair still lands in the table +
+  // history, just without the in-canvas diff callouts.
+  function showRepairDiffsIn3D(diffs) {
+    var ov = window.__netproofOverlay;
+    if (ov && typeof ov.showRepairDiffs === 'function') {
+      try { ov.showRepairDiffs(diffs); } catch (e) { /* callouts are best-effort */ }
+    }
+  }
+  function setRepairRecheckingIn3D(rechecking) {
+    var ov = window.__netproofOverlay;
+    if (ov && typeof ov.setRepairRechecking === 'function') {
+      try { ov.setRepairRechecking(rechecking); } catch (e) { /* best-effort */ }
+    }
   }
 
   async function repair() {
@@ -1104,7 +1234,20 @@
       renderRepairHistory(repairHistory);
       pipelineSet('repair', 'done');
       pipelineSet('resimulate', 'running');
-      applyResult(data);
+      // In-canvas repair diffs: the diffNetlists(before, after) strings
+      // go to the 3D callout layer, with the "re-checking…" badge on
+      // while the repaired netlist is re-simulated (applyResult below;
+      // the server already re-simulated it, so this is the page-side
+      // re-sim step). The finally guarantees the badge clears even if
+      // applyResult throws. Unverified repairs never reach here, so
+      // no diff is ever shown for a repair that was not applied.
+      showRepairDiffsIn3D(diffs);
+      setRepairRecheckingIn3D(true);
+      try {
+        applyResult(data);
+      } finally {
+        setRepairRecheckingIn3D(false);
+      }
       pipelineSet('resimulate', 'done');
       $('pipeline-note').textContent = 'Repair round ' + repairRound + ' done and re-simulated.';
       logLine('system', 'Repair round ' + repairRound + ' done. ' + (Array.isArray(changes) ? changes.length + ' change(s).' : ''), 'info');
@@ -1228,7 +1371,7 @@
     var logMin = Math.log10(xMin), logMax = Math.log10(xMax);
     function X(v) { return ML + (Math.log10(v) - logMin) / (logMax - logMin) * (W - ML - MR); }
     function Y(v) { return H - MB - (v / cfg.yMax) * (H - MT - MB); }
-    var VERDICT_COLOR = { PASS: '#1a7f37', WARN: '#d97706', STOP: '#b00020' };
+    var VERDICT_COLOR = { PASS: '#1a7f37', WARN: '#92400E', STOP: '#b00020' };
     var s = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' + escapeHtml(cfg.ariaLabel) + '">';
     var i, j;
     for (i = 0; i <= 4; i++) {
@@ -1318,7 +1461,7 @@
     var yMaxCurrent = Math.max(0.035, 1.1 * maxCurrent);
     var currentLines = [];
     if (ledStop) currentLines.push({ y: ledStop.threshold, color: '#b00020', dash: '6 3', label: 'STOP ' + ledStop.comparator + ' ' + ledStop.threshold_display });
-    if (ledWarn) currentLines.push({ y: ledWarn.threshold, color: '#d97706', dash: '6 3', label: 'WARN ' + ledWarn.comparator + ' ' + ledWarn.threshold_display });
+    if (ledWarn) currentLines.push({ y: ledWarn.threshold, color: '#92400E', dash: '6 3', label: 'WARN ' + ledWarn.comparator + ' ' + ledWarn.threshold_display });
     var minCurrent = null;
     currentPts.forEach(function (p) { if (p.y != null) minCurrent = minCurrent == null ? Number(p.y) : Math.min(minCurrent, Number(p.y)); });
     if (ledUnder && minCurrent != null && minCurrent < 0.002)
@@ -1350,7 +1493,7 @@
     if (resStop && t.resistor_stop_w != null)
       powerLines.push({ y: t.resistor_stop_w, color: '#b00020', dash: '6 3', label: 'STOP > ' + resStop.threshold_display + ' (' + fmtPower(t.resistor_stop_w) + ')' });
     if (resWarn && t.resistor_warn_w != null)
-      powerLines.push({ y: t.resistor_warn_w, color: '#d97706', dash: '6 3', label: 'WARN > ' + resWarn.threshold_display + ' (' + fmtPower(t.resistor_warn_w) + ')' });
+      powerLines.push({ y: t.resistor_warn_w, color: '#92400E', dash: '6 3', label: 'WARN > ' + resWarn.threshold_display + ' (' + fmtPower(t.resistor_warn_w) + ')' });
     buildSweepChart($('sweep-chart-power'), {
       points: powerPts, yMax: yMaxPower,
       yFormat: function (v) { return (v * 1000).toFixed(0) + ' mW'; },
@@ -1596,7 +1739,8 @@
     verdictEl.textContent = '';
     var empty = $('verdict-empty');
     if (empty) empty.style.display = '';
-    renderFindings();
+    updateUncertain();
+    renderSheet();
     renderRepairHistory(repairHistory);
     renderKeyReadings();
     var netlistObj;
@@ -1607,7 +1751,7 @@
       return true; // link was present but bad: empty page, NO /check POST
     }
     netlist = normNetlist(netlistObj); // table shows the circuit immediately
-    renderNetlist(); sync3D();
+    renderNetlist(); updateEmptyState(); sync3D();
     setBusy(true, 'Shared circuit loaded. Re-checking…');
     setConsoleOpen(true);
     try {
@@ -1644,6 +1788,13 @@
       if (netlistSection) netlistSection.classList.remove('no-image');
     };
     reader.readAsDataURL(file);
+    var chip = $('attached-file');
+    if (chip) { chip.hidden = false; var an = $('attached-name'); if (an) an.textContent = file.name; }
+    var ub = $('upload-btn');
+    if (ub) ub.classList.add('has-file');
+    var cw = document.querySelector('.command-wrap');
+    if (cw) cw.classList.add('has-file');
+    updateEmptyState();
     logLine('system', 'Image selected: ' + file.name, 'info');
   }
 
@@ -1677,8 +1828,10 @@
     lastReport = null;
     selectedId = null;
     renderNetlist();
-    renderFindings();
+    updateUncertain();
+    renderSheet();
     renderKeyReadings();
+    updateEmptyState();
     $('verdict-empty').style.display = '';
     verdictEl.className = '';
     verdictEl.textContent = '';
@@ -1813,7 +1966,7 @@
   function syncThemeToggle() {
     var dark = document.documentElement.getAttribute('data-theme') === 'dark';
     themeToggle.setAttribute('aria-pressed', dark ? 'true' : 'false');
-    themeToggle.textContent = dark ? 'Light theme' : 'Dark theme';
+    themeToggle.setAttribute('aria-label', dark ? 'Switch to light theme' : 'Switch to dark theme');
   }
   themeToggle.addEventListener('click', function () {
     var next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
@@ -1856,18 +2009,239 @@
     else if (e.key === 'Escape') { e.preventDefault(); selectComponent(null); }
   });
 
-  // Wiring
-  var dz = $('dropzone');
+  // Callout events (web/3d/callouts.js dispatches these bubbling
+  // CustomEvents on the #scene3d container itself, so listening here
+  // catches them at the container): a callout click selects its
+  // component in the netlist table, and Enter on a detail callout
+  // opens editing on that component (focuses its value field, same as
+  // the container's own Enter hook above). The mesh-click path already
+  // reaches selectComponent via main3d's onSelect hook; this is the
+  // callout path, which otherwise would not sync the table at all
+  // (callouts.js calls no page callback for these; the event is the
+  // whole interface). A null componentId deselects.
+  scene3dEl.addEventListener('netproof:callout-select', function (e) {
+    var d = (e && e.detail) || {};
+    selectComponent(d.componentId || null);
+  });
+  scene3dEl.addEventListener('netproof:callout-activate', function (e) {
+    var d = (e && e.detail) || {};
+    if (d.componentId) {
+      selectComponent(d.componentId);
+      focusSelectedValueInput();
+    }
+  });
+
+
+  // ---- Blueprint shell: status strip, empty state, drawer, sheet ----
+  var checkCount = 0;      // completed checks this page session
+  var ngspiceOk = true;    // from GET /health; no version is reported
+
+  function updateStatusStrip() {
+    var checks = $('chip-checks');
+    if (checks) checks.textContent = (checkCount < 10 ? '0' + checkCount : String(checkCount)) + ' \u00b7 CHECK';
+    var ng = $('chip-ngspice');
+    if (ng) ng.textContent = ngspiceOk ? 'NGSPICE \u00b7 DC OP' : 'NGSPICE \u2014 \u00b7 DC OP';
+    var parts = $('chip-parts');
+    if (parts) {
+      var nodes = {};
+      netlist.forEach(function (r) {
+        (r.nodes || []).forEach(function (n) { nodes[String(n)] = true; });
+      });
+      parts.textContent = netlist.length + ' PARTS \u00b7 ' + Object.keys(nodes).length + ' NODES';
+    }
+    var vText = $('verdict-chip-text');
+    var vDot = $('verdict-dot');
+    if (vText) {
+      var v = lastReport && lastReport.verdict ? String(lastReport.verdict).toUpperCase() : null;
+      var mock = !!(lastReport && lastReport.mock);
+      vText.textContent = mock ? 'VERDICT \u00b7 MOCK' : (v ? 'VERDICT \u00b7 ' + v : 'VERDICT \u00b7 \u2014');
+      if (vDot) vDot.className = 'vdot' + (mock || !v ? '' : ' ' + v.toLowerCase());
+    }
+  }
+  // /health reports only a boolean ngspice flag, never a version, so
+  // the chip never claims one. Best-effort: a failed fetch keeps the
+  // default "NGSPICE · DC OP" rather than erroring the page.
+  function fetchHealth() {
+    fetch('/health').then(function (res) { return res.json(); }).then(function (d) {
+      ngspiceOk = !!(d && d.status !== 'degraded' && d.ngspice !== false);
+      updateStatusStrip();
+    }).catch(function () { /* keep the default chip */ });
+  }
+
+  function updateEmptyState() {
+    var canvas = $('canvas');
+    if (!canvas) return;
+    canvas.classList.toggle('is-empty', !netlist.length && !lastReport && !selectedFile);
+  }
+
+  // Single Check pill: file present -> image path, else goal path,
+  // else an error and no endpoint call. #recheck-btn is a different
+  // button (drawer Netlist tab, POST /check on the edited table).
+  async function runCheck() {
+    if (busy) return;
+    if (selectedFile) { runImage(); return; }
+    if ($('goal').value.trim()) { runGoal(); return; }
+    showError('Nothing to check', 'Describe a circuit or drop a schematic first.');
+    $('goal').focus();
+  }
+
+  function clearSelectedFile() {
+    selectedFile = null;
+    var fi = $('file-input');
+    if (fi) fi.value = '';
+    var chip = $('attached-file');
+    if (chip) chip.hidden = true;
+    var ub = $('upload-btn');
+    if (ub) ub.classList.remove('has-file');
+    var cw = document.querySelector('.command-wrap');
+    if (cw) cw.classList.remove('has-file');
+    var img = $('preview');
+    if (img) { img.classList.remove('show'); img.removeAttribute('src'); }
+    var noImg = $('no-image');
+    if (noImg) noImg.style.display = '';
+    var fn = $('file-name');
+    if (fn) fn.textContent = '';
+    var imageCol = $('image-col');
+    if (imageCol) imageCol.hidden = true;
+    var ns = $('netlist-section');
+    if (ns) ns.classList.add('no-image');
+    updateEmptyState();
+  }
+
+  // Drawer: collapsed by default; toggle in the top bar. Pushes the
+  // canvas on wide screens, overlays with a backdrop at <=900px.
+  // A run start never opens it (the console body opens on its own
+  // inside the Log tab; see setConsoleOpen).
+  var drawerToggle = $('drawer-toggle');
+  function setDrawerOpen(open) {
+    var main = $('main');
+    if (!main) return;
+    main.classList.toggle('drawer-open', !!open);
+    // BUGFIX 2026-11-15: styles.css only ever shows the drawer via
+    // #drawer.open (display:flex); the drawer-open class on <main> matches
+    // no CSS rule, so the toggle previously did nothing visible.
+    var drawer = $('drawer');
+    if (drawer) drawer.classList.toggle('open', !!open);
+    if (drawerToggle) drawerToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (!open && drawerToggle) drawerToggle.focus();
+  }
+  function isDrawerOpen() {
+    var main = $('main');
+    return !!(main && main.classList.contains('drawer-open'));
+  }
+  if (drawerToggle) {
+    drawerToggle.addEventListener('click', function () { setDrawerOpen(!isDrawerOpen()); });
+  }
+  var drawerBackdrop = $('drawer-backdrop');
+  if (drawerBackdrop) {
+    drawerBackdrop.addEventListener('click', function () { setDrawerOpen(false); });
+  }
+  var drawerTabs = Array.prototype.slice.call(document.querySelectorAll('.drawer-tab'));
+  function selectDrawerTab(tab) {
+    drawerTabs.forEach(function (t) {
+      var selected = t === tab;
+      t.setAttribute('aria-selected', selected ? 'true' : 'false');
+      t.tabIndex = selected ? 0 : -1;
+      var panel = document.getElementById(t.getAttribute('aria-controls'));
+      if (panel) panel.classList.toggle('active', selected);
+    });
+  }
+  drawerTabs.forEach(function (tab, i) {
+    tab.addEventListener('click', function () { selectDrawerTab(tab); });
+    tab.addEventListener('keydown', function (e) {
+      var next = null;
+      if (e.key === 'ArrowRight') next = drawerTabs[(i + 1) % drawerTabs.length];
+      else if (e.key === 'ArrowLeft') next = drawerTabs[(i - 1 + drawerTabs.length) % drawerTabs.length];
+      else if (e.key === 'Home') next = drawerTabs[0];
+      else if (e.key === 'End') next = drawerTabs[drawerTabs.length - 1];
+      if (next) { e.preventDefault(); selectDrawerTab(next); next.focus(); }
+    });
+  });
+
+  // Mobile bottom sheet (<=768px): verdict + findings count peek,
+  // expanded list of key readings and findings. Never invents a verdict.
+  function renderSheet() {
+    var peek = $('sheet-peek-verdict');
+    if (!peek) return;
+    var v = lastReport && lastReport.verdict ? String(lastReport.verdict).toUpperCase() : null;
+    peek.textContent = v || 'No check yet';
+    peek.className = 'sheet-peek-verdict' + (v ? ' ' + v.toLowerCase() : '');
+    var count = $('sheet-peek-count');
+    if (count) count.textContent = findings.length
+      ? findings.length + (findings.length === 1 ? ' finding' : ' findings')
+      : 'No findings yet';
+    var led = $('sheet-led'), pow = $('sheet-power'), rail = $('sheet-rail');
+    if (led) led.textContent = $('key-led') ? $('key-led').textContent : '\u2014';
+    if (pow) pow.textContent = $('key-power') ? $('key-power').textContent : '\u2014';
+    if (rail) rail.textContent = $('key-rail') ? $('key-rail').textContent : '\u2014';
+    var list = $('sheet-findings');
+    if (list) {
+      if (!findings.length) {
+        list.innerHTML = '<li class="empty">No findings yet. Run a check first.</li>';
+      } else {
+        list.innerHTML = findings.map(function (f) {
+          if (typeof f === 'string') return '<li>' + escapeHtml(f) + '</li>';
+          var sev = String(f.severity || f.level || f.type || 'INFO').toUpperCase();
+          var sevClass = sev === 'STOP' ? 'sev-stop' : sev === 'WARN' ? 'sev-warn' : sev === 'PASS' ? 'sev-pass' : 'sev-info';
+          var code = f.rule_id || f.code || f.rule || '';
+          var msg = f.message || f.text || f.detail || '';
+          var measured = parseMeasured(String(msg));
+          return '<li class="' + sevClass + '">' +
+            '<div class="findings-head"><span class="sev ' + sevClass + '">' + escapeHtml(sev) + '</span> ' +
+            '<span class="findings-code">' + escapeHtml(code) + '</span></div>' +
+            '<p class="findings-msg">' + escapeHtml(msg) + '</p>' +
+            (measured ? '<span class="measured">Measured <b>' + escapeHtml(measured.measured) + '</b> &middot; Limit <b>' + escapeHtml(measured.limit) + '</b></span>' : '') +
+            '</li>';
+        }).join('');
+      }
+    }
+  }
+  function setSheetOpen(open) {
+    var sheet = $('callout-sheet');
+    var peek = $('sheet-peek');
+    if (!sheet || !peek) return;
+    sheet.classList.toggle('open', !!open);
+    peek.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open) { renderSheet(); var close = $('sheet-close'); if (close) close.focus(); }
+    else peek.focus();
+  }
+  var sheetPeek = $('sheet-peek');
+  if (sheetPeek) {
+    sheetPeek.addEventListener('click', function () {
+      var sheet = $('callout-sheet');
+      setSheetOpen(!(sheet && sheet.classList.contains('open')));
+    });
+  }
+  var sheetClose = $('sheet-close');
+  if (sheetClose) sheetClose.addEventListener('click', function () { setSheetOpen(false); });
+  // Escape closes the drawer first, then the bottom sheet.
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape') return;
+    if (isDrawerOpen()) { setDrawerOpen(false); return; }
+    var sheet = $('callout-sheet');
+    if (sheet && sheet.classList.contains('open')) setSheetOpen(false);
+  });
+
+  updateStatusStrip();
+  updateEmptyState();
+  fetchHealth();
+
+  // Wiring: the whole canvas is the drop target; the top-bar
+  // upload button opens the file picker. #dropzone stays in the DOM
+  // (hidden) so the id is preserved, but it is no longer the target.
   var fi = $('file-input');
-  dz.addEventListener('click', function () { fi.click(); });
-  dz.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fi.click(); } });
+  var uploadBtn = $('upload-btn');
+  if (uploadBtn) uploadBtn.addEventListener('click', function () { fi.click(); });
+  var removeFileBtn = $('remove-file');
+  if (removeFileBtn) removeFileBtn.addEventListener('click', clearSelectedFile);
+  var canvasEl = $('canvas');
   ['dragenter', 'dragover'].forEach(function (ev) {
-    dz.addEventListener(ev, function (e) { e.preventDefault(); dz.classList.add('drag'); });
+    canvasEl.addEventListener(ev, function (e) { e.preventDefault(); canvasEl.classList.add('drag'); });
   });
   ['dragleave', 'drop'].forEach(function (ev) {
-    dz.addEventListener(ev, function (e) { e.preventDefault(); dz.classList.remove('drag'); });
+    canvasEl.addEventListener(ev, function (e) { e.preventDefault(); canvasEl.classList.remove('drag'); });
   });
-  dz.addEventListener('drop', function (e) {
+  canvasEl.addEventListener('drop', function (e) {
     var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
     if (f) setFile(f);
   });
@@ -1881,8 +2255,10 @@
       setConsoleOpen($('console-body').hidden);
     });
   }
-  $('run-image-btn').addEventListener('click', runImage);
-  $('run-goal-btn').addEventListener('click', runGoal);
+  $('check-btn').addEventListener('click', runCheck);
+  $('goal').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); runCheck(); }
+  });
   $('recheck-btn').addEventListener('click', recheck);
   $('repair-btn').addEventListener('click', repair);
   $('sweep-btn').addEventListener('click', runSweep);
@@ -1908,8 +2284,11 @@
   });
 
   renderNetlist();
-  renderFindings();
+  updateUncertain();
+  renderSheet();
   renderRepairHistory(repairHistory);
+  updateStatusStrip();
+  updateEmptyState();
   // Share link in the URL hash, if any: decode + re-check (async,
   // does not block the separate 3D module bootstrap below).
   loadFromHash();
@@ -1936,6 +2315,23 @@
     function setStatus(text) { if (statusEl) statusEl.textContent = '3D status: ' + text; }
     var page = window.NetproofPage;
     if (!container || !page) { setStatus('unavailable (page bridge not ready).'); return; }
+    // Repair-diff wiring for the classic script above: stash
+    // overlay.js's showRepairDiffs / setRepairRechecking on
+    // window.__netproofOverlay, where repair() reaches them via
+    // showRepairDiffsIn3D / setRepairRecheckingIn3D. Imported
+    // separately from main3d.js because the 3D handle does not expose
+    // them; overlay.js shares the callouts.js singleton with main3d,
+    // so the diffs land on the same callout layer main3d initializes.
+    // A failed import only loses the in-canvas diffs; repair still
+    // lands in the table + history, and 3D still boots below.
+    try {
+      var overlayMod = await import('./3d/overlay.js');
+      window.__netproofOverlay = {
+        showRepairDiffs: overlayMod.showRepairDiffs,
+        setRepairRechecking: overlayMod.setRepairRechecking,
+        closeRepairDiffs: overlayMod.closeRepairDiffs
+      };
+    } catch (err) { /* repair diff callouts unavailable; flat page + 3D unaffected */ }
     var mod;
     try {
       mod = await import('./3d/main3d.js');
@@ -1948,11 +2344,22 @@
       // as HTML.
       var errName = err && err.name ? err.name : 'Error';
       var errMsg = err && err.message ? err.message : String(err);
-      var missingFile = /main3d\.js/.test(errMsg) &&
-        /(failed to fetch|404|not found|ERR_MODULE_NOT_FOUND|cannot find module)/i.test(errMsg);
+      // Do NOT infer "missing" from the message: Chromium reports a failed
+      // dependency fetch as "Failed to fetch dynamically imported module:
+      // <main3d.js URL>", which mentions main3d.js even though the file
+      // exists (here the real failure is the three.js CDN import). HEAD
+      // the file itself; only a non-OK response means genuinely missing.
+      var missingFile = false;
+      try {
+        var probe = await fetch('./3d/main3d.js', { method: 'HEAD' });
+        missingFile = !probe.ok;
+      } catch (probeErr) { missingFile = false; }
+      var cdnHint = (!missingFile && /Failed to fetch dynamically imported module/i.test(errMsg))
+        ? ' (the 3D module was reached, but one of its imports failed to fetch; three.js comes from the unpkg CDN, so check network access to unpkg.com)'
+        : '';
       var reason = missingFile
         ? 'web/3d/main3d.js is not present yet. Use the netlist table above; the 3D view will appear here once the 3D module lands.'
-        : errName + ': ' + errMsg + ' The flat netlist table above still works.';
+        : errName + ': ' + errMsg + cdnHint + ' The flat netlist table above still works.';
       var fb = document.createElement('div');
       fb.className = 'fallback';
       fb.textContent = '3D view ' + (missingFile ? 'not available yet: ' : 'failed to load: ') + reason;

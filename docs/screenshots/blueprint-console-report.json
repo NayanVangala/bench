@@ -1,0 +1,63 @@
+{
+  "desktop_pass_verdict": "PASS",
+  "desktop_stop_verdict": "STOP",
+  "desktop_repair_pass_verdict": "PASS",
+  "repair_llm_banner": "AI failed: LLM repair failed: ImportError: LLM_PROVIDER=gemini needs the google-genai SDK, which is not installed (install the optional dependency: `uv sync --extra gemini`)",
+  "reset_view_present": 1,
+  "inspect_present": 1,
+  "announcer_present": 1,
+  "desktop_console_errors": [
+    "[error] Failed to load resource: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "[error] Failed to load resource: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "[error] Failed to load resource: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "[error] Failed to load resource: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "[error] Failed to load resource: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "[error] Failed to load resource: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "[error] Failed to load resource: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "[error] Failed to load resource: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "[error] Failed to load resource: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "[error] Failed to load resource: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "[error] Failed to load resource: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "[error] Failed to load resource: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "[error] Failed to load resource: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "[error] Failed to load resource: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "[error] Failed to load resource: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "[error] Failed to load resource: the server responded with a status of 502 (Bad Gateway)"
+  ],
+  "desktop_failed_requests": [
+    "https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap :: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap :: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "https://unpkg.com/three@0.160.0/build/three.module.js :: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "http://127.0.0.1:8000/3d/main3d.js :: net::ERR_ABORTED",
+    "https://unpkg.com/three@0.160.0/examples/jsm/geometries/RoundedBoxGeometry.js :: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js :: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap :: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap :: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "https://unpkg.com/three@0.160.0/build/three.module.js :: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "http://127.0.0.1:8000/3d/main3d.js :: net::ERR_ABORTED",
+    "https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js :: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "https://unpkg.com/three@0.160.0/examples/jsm/geometries/RoundedBoxGeometry.js :: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap :: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap :: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "https://unpkg.com/three@0.160.0/build/three.module.js :: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "http://127.0.0.1:8000/3d/main3d.js :: net::ERR_ABORTED",
+    "https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js :: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "https://unpkg.com/three@0.160.0/examples/jsm/geometries/RoundedBoxGeometry.js :: net::ERR_TUNNEL_CONNECTION_FAILED"
+  ],
+  "mobile_stop_verdict": "STOP",
+  "mobile_console_errors": [
+    "[error] Failed to load resource: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "[error] Failed to load resource: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "[error] Failed to load resource: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "[error] Failed to load resource: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "[error] Failed to load resource: net::ERR_TUNNEL_CONNECTION_FAILED"
+  ],
+  "mobile_failed_requests": [
+    "https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap :: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap :: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "https://unpkg.com/three@0.160.0/build/three.module.js :: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "http://127.0.0.1:8000/3d/main3d.js :: net::ERR_ABORTED",
+    "https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js :: net::ERR_TUNNEL_CONNECTION_FAILED",
+    "https://unpkg.com/three@0.160.0/examples/jsm/geometries/RoundedBoxGeometry.js :: net::ERR_TUNNEL_CONNECTION_FAILED"
+  ]
+}

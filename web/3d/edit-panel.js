@@ -1,13 +1,81 @@
 /**
  * Netproof 3D edit panel — web/3d/edit-panel.js
  *
- * Plain JS module (no build step, no CDN, no LLM calls, no ngspice).
- * One same-origin GET /parts for the standard-value catalog (see
- * fetchPartsCatalog); no POST, no LLM, no ngspice. The picker suggests
- * standard values from backend/netproof/parts.py; it never computes a
- * verdict, current, voltage, or power, and it never silently rewrites
- * a non-standard value — Custom… always keeps free-text entry.
- * Shows an edit panel for the component selected in the 3D view.
+ * Blueprint rebuild (2026-11-15). Plain JS module (no build step, no CDN,
+ * no LLM calls, no ngspice). One same-origin GET /parts for the
+ * standard-value catalog (see fetchPartsCatalog); no POST, no LLM, no
+ * ngspice. The picker suggests standard values from
+ * backend/netproof/parts.py; it never computes a verdict, current,
+ * voltage, or power, and it never silently rewrites a non-standard
+ * value — Custom… always keeps free-text entry. Shows an edit panel for
+ * the component selected in the 3D view.
+ *
+ * CORRECTION (coordinator, 2026-11-15): the panel had NO dialog
+ * semantics before this rebuild — no role="dialog", no focus trap, no
+ * Escape handler, no focus return anywhere in the file. Everything in
+ * the "Dialog contract" below was added from scratch here.
+ *
+ * ---------------------------------------------------------------------------
+ * Dialog contract (blueprint a11y spec §6)
+ * ---------------------------------------------------------------------------
+ * - Container: <section id="netproof-edit-panel" role="dialog"
+ *   aria-modal="true" aria-labelledby="netproof-edit-panel-title">.
+ *   The title announces the component id ("Edit component R1").
+ * - Focus IN on open: focus goes to the Close button first (the safe
+ *   landing: orientation + exit before the first input).
+ * - Focus TRAP while open: Tab from the last focusable control wraps
+ *   to Close; Shift+Tab from Close wraps to the last control. A keydown
+ *   handler on the panel implements the trap (no `inert` on the page:
+ *   the panel lives inside #scene3d, which is inside <main>, so making
+ *   the background inert would make the panel itself inert).
+ * - Focus RETURN on close: focus returns to the exact control that
+ *   opened the panel (the invoking callout, table row, or #scene3d),
+ *   captured at showEditPanel time. If the invoker is gone (row or
+ *   callout re-rendered), fall back to the part's callout, then #scene3d.
+ * - Escape closes from anywhere inside the panel. From inside a
+ *   <select>, the first Escape closes the native dropdown and the
+ *   second Escape closes the panel (the native dropdown eats the
+ *   first one; the panel handler must not fight it).
+ * - Tabs (WAI-ARIA, automatic activation): Edit | Measurements |
+ *   Findings. Roving tabindex (only the selected tab is 0), arrows
+ *   move + select with wrap, Home/End jump, Enter/Space select.
+ *   Tab panels are tabindex="0" so a keyboard user can enter and
+ *   scroll a long read-only panel. A re-check never auto-switches
+ *   tabs; the user stays on the tab they chose.
+ * - Save validates, calls onSave, then closes the panel and returns
+ *   focus. Re-check / Repair validate and call their handler and leave
+ *   the panel open (their results update the Measurements / Findings
+ *   panels in place). On validation error, focus stays and the error
+ *   is announced in the role="status" line.
+ *
+ * ---------------------------------------------------------------------------
+ * Callout-card chrome (blueprint callouts spec §8)
+ * ---------------------------------------------------------------------------
+ * The panel is a callout card, not a fixed top-right dialog: same
+ * tokens as every other callout (white, 1px border, 8px radius, mono
+ * values), border in the part's worst-finding severity colour
+ * (STOP #b00020 / WARN #b45309 / PASS #1a7f37, blue #1d4ed8 when the
+ * part has no findings). It is positioned inside #scene3d, anchored
+ * to the part's callout (right of it, flipped left when there is no
+ * room, clamped inside the canvas), with the same thin leader line
+ * and dot as a finding callout while it is open. The leader tracks
+ * the callout per frame (rAF) so orbit / zoom does not strand it;
+ * under prefers-reduced-motion it is drawn once, statically. When
+ * #scene3d does not exist (panel opened without the 3D view) it
+ * falls back to the old fixed top-right placement.
+ *
+ * ---------------------------------------------------------------------------
+ * Targets, focus, motion
+ * ---------------------------------------------------------------------------
+ * - Every control is at least 44x44 CSS px (a11y spec §3).
+ * - Focus ring is #FFD166 (coordinator decision, 2026-11-15), 3px,
+ *   2px offset, plus a dark #0A2A5E keyline so the ring reads on both
+ *   the white card and blueprint blue.
+ * - Mobile (max-width: 768px): the panel becomes a bottom sheet —
+ *   full width, max-height 85vh, drag handle (visual only, never the
+ *   sole close control), safe-area padding. Same DOM, same focus
+ *   order, same tabs; only positioning changes.
+ * - Reduced motion: no transitions, no slide, leader drawn once.
  *
  * Usage (from the page, e.g. web/index.html):
  *
@@ -50,6 +118,7 @@
  *     builds the edited component object, and hands it to the caller.
  *     The caller (the page) is responsible for updating the netlist
  *     and POSTing /check. This module never POSTs anything itself.
+ *     The panel closes after a successful save.
  *   onRecheck(editedComponent) — optional. Re-check button.
  *   onRepair(editedComponent)  — optional. Repair button.
  *   onClose()                  — optional. Called when the panel closes.
@@ -59,7 +128,6 @@
 'use strict';
 
 var PANEL_ID = 'netproof-edit-panel';
-var STYLE_ID = 'netproof-edit-panel-style';
 
 var COMPONENT_TYPES = [
   'resistor',
@@ -75,9 +143,32 @@ var LED_COLORS = ['red', 'green', 'blue', 'white', 'yellow'];
 
 var SEVERITY_ORDER = { STOP: 0, WARN: 1, INFO: 2 };
 
+// Callout-card border: the part's worst-finding severity colour
+// (callouts spec §8). Blue is the default when the part has no
+// findings; it is never a severity claim.
+var SEVERITY_BORDER = {
+  STOP: '#b00020',
+  WARN: '#b45309',
+  PASS: '#1a7f37',
+  INFO: '#1d4ed8',
+  UNKNOWN: '#1d4ed8',
+};
+
+var TAB_NAMES = ['edit', 'measure', 'findings'];
+
 var currentComponent = null; // original component object passed to showEditPanel
 var currentReport = null;
 var currentCallbacks = {};
+
+// Focus return (a11y spec §6.1): the element that opened the panel,
+// captured at showEditPanel time; null when the opener was not a
+// focusable element (e.g. a double-click, where focus sits on <body>).
+var invoker = null;
+var lastComponentId = null; // fallback: focus this part's callout
+var activeTab = 'edit';
+var selectEscArmed = false; // first Escape from a <select> closes the dropdown only
+var leaderSvg = null; // SVG leader line + dot, while the panel is open
+var leaderRaf = 0;
 
 // Parts catalog (GET /parts) — fetched lazily on first showEditPanel,
 // never at import time (this module never touches the DOM at import).
@@ -187,6 +278,13 @@ function escapeHtml(s) {
 
 function isFiniteNumber(v) {
   return typeof v === 'number' && Number.isFinite(v);
+}
+
+// Escape a value for use inside a [data-component-id="..."] selector.
+function cssEscapeAttr(s) {
+  var v = String(s == null ? '' : s);
+  if (typeof CSS !== 'undefined' && CSS && typeof CSS.escape === 'function') return CSS.escape(v);
+  return v.replace(/["\\]/g, '\\$&');
 }
 
 // Case-insensitive map lookup. Report keys are not one case: ngspice
@@ -308,74 +406,310 @@ function findingsFor(component, report) {
   });
 }
 
+// Worst severity in a findings list, for the callout-card border
+// (STOP > WARN > INFO). 'INFO' when the list is empty: blue default,
+// never a severity claim.
+function worstSeverity(list) {
+  var worst = null;
+  var worstRank = 99;
+  (list || []).forEach(function (f) {
+    var sev = String((f && (f.severity || f.level)) || '').toUpperCase();
+    var rank = SEVERITY_ORDER[sev];
+    if (rank != null && rank < worstRank) { worstRank = rank; worst = sev; }
+  });
+  return worst || 'INFO';
+}
+
 /* ------------------------------------------------------------------ */
-/* Panel DOM                                                           */
+/* Panel DOM: dialog, tabs, focus trap, callout-card anchoring         */
 /* ------------------------------------------------------------------ */
 
-function injectStyle() {
-  if (el(STYLE_ID)) return;
-  var style = document.createElement('style');
-  style.id = STYLE_ID;
-  style.textContent = [
-    '#' + PANEL_ID + ' {',
-    '  position: fixed; top: 16px; right: 16px; z-index: 1000;',
-    '  width: 320px; max-height: calc(100vh - 32px); overflow-y: auto;',
-    '  background: #fff; color: #111; border: 1px solid #bbb; border-radius: 8px;',
-    '  box-shadow: 0 4px 24px rgba(0,0,0,.25); padding: 14px;',
-    '  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; font-size: 13px;',
-    '}',
-    '#' + PANEL_ID + ' h2 { margin: 0 0 4px; font-size: 16px; }',
-    '#' + PANEL_ID + ' h3 { margin: 12px 0 6px; font-size: 13px; }',
-    '#' + PANEL_ID + ' .ep-sub { color: #555; margin: 0 0 8px; }',
-    '#' + PANEL_ID + ' label { display: block; font-weight: 600; font-size: 12px; margin: 8px 0 3px; }',
-    '#' + PANEL_ID + ' input, #' + PANEL_ID + ' select {',
-    '  width: 100%; padding: 6px 8px; font: inherit; font-size: 13px;',
-    '  border: 1px solid #bbb; border-radius: 6px; background: #fff; color: #111;',
-    '}',
-    '#' + PANEL_ID + ' input:disabled, #' + PANEL_ID + ' select:disabled { background: #f4f4f4; color: #777; }',
-    '#' + PANEL_ID + ' .ep-nodes { display: flex; gap: 8px; }',
-    '#' + PANEL_ID + ' .ep-nodes > div { flex: 1; min-width: 0; }',
-    '#' + PANEL_ID + ' .ep-hint { color: #777; font-size: 12px; font-weight: 400; }',
-    '#' + PANEL_ID + ' table.ep-measure { border-collapse: collapse; width: 100%; font-size: 13px; }',
-    '#' + PANEL_ID + ' table.ep-measure td { border: 1px solid #ddd; padding: 5px 7px; }',
-    '#' + PANEL_ID + ' table.ep-measure td:first-child { font-weight: 600; width: 45%; background: #f6f7f9; }',
-    '#' + PANEL_ID + ' ul.ep-findings { margin: 0; padding-left: 18px; }',
-    '#' + PANEL_ID + ' ul.ep-findings li { margin-bottom: 6px; }',
-    '#' + PANEL_ID + ' .ep-sev { font-weight: 700; font-size: 12px; text-transform: uppercase; }',
-    '#' + PANEL_ID + ' .ep-sev-stop { color: #b00020; }',
-    '#' + PANEL_ID + ' .ep-sev-warn { color: #b45309; }',
-    '#' + PANEL_ID + ' .ep-sev-info { color: #555; }',
-    '#' + PANEL_ID + ' .ep-empty { color: #777; }',
-    '#' + PANEL_ID + ' .ep-actions { margin-top: 14px; }',
-    '#' + PANEL_ID + ' button {',
-    '  font: inherit; font-size: 13px; padding: 8px 12px; border-radius: 6px;',
-    '  border: 1px solid #111; background: #111; color: #fff; cursor: pointer; margin: 4px 6px 4px 0;',
-    '}',
-    '#' + PANEL_ID + ' button.secondary { background: #fff; color: #111; }',
-    '#' + PANEL_ID + ' button:disabled { opacity: .45; cursor: not-allowed; }',
-    '#' + PANEL_ID + ' .ep-status { min-height: 18px; margin-top: 8px; font-size: 12px; color: #555; }',
-    '#' + PANEL_ID + ' .ep-status.ep-error { color: #b00020; font-weight: 600; }',
-    '#' + PANEL_ID + ' .ep-led-hint { margin-top: 6px; }',
-    '#' + PANEL_ID + ' .ep-led-hint button { padding: 4px 8px; font-size: 12px; margin: 4px 0 0 6px; }',
-    '#' + PANEL_ID + ' .ep-close { float: right; background: #fff; color: #111; border: 1px solid #bbb; padding: 2px 8px; margin: 0; }',
-  ].join('\n');
-  document.head.appendChild(style);
+// Focusable controls inside the open panel, in DOM order: Close,
+// the selected tab (roving tabindex), the active tabpanel, then the
+// active panel's controls. Hidden tabpanels (display:none) have no
+// offsetParent and are excluded; disabled buttons are excluded.
+function focusableElements() {
+  var panel = el(PANEL_ID);
+  if (!panel) return [];
+  var nodes = panel.querySelectorAll(
+    'button:not([disabled]), select:not([disabled]), input:not([disabled]), [tabindex="0"]');
+  var out = [];
+  for (var i = 0; i < nodes.length; i++) {
+    var n = nodes[i];
+    if (n.offsetParent !== null || n === document.activeElement) out.push(n);
+  }
+  return out;
+}
+
+// Switch tabs (automatic activation): update aria-selected, roving
+// tabindex, and which tabpanel is shown. Focus the tab when asked
+// (arrow-key navigation); clicks focus it natively.
+function selectTab(name, focusTab) {
+  if (TAB_NAMES.indexOf(name) === -1) name = 'edit';
+  activeTab = name;
+  TAB_NAMES.forEach(function (n) {
+    var tab = el(PANEL_ID + '-tab-' + n);
+    var tabpanel = el(PANEL_ID + '-panel-' + n);
+    var selected = n === name;
+    if (tab) {
+      tab.setAttribute('aria-selected', selected ? 'true' : 'false');
+      tab.tabIndex = selected ? 0 : -1;
+    }
+    if (tabpanel) {
+      if (selected) tabpanel.removeAttribute('hidden');
+      else tabpanel.setAttribute('hidden', '');
+    }
+  });
+  if (focusTab) {
+    var tab = el(PANEL_ID + '-tab-' + name);
+    if (tab) tab.focus();
+  }
+}
+
+// Panel keydown: tablist arrows/Home/End, focus trap, Escape.
+// The trap wraps Tab from the last control to Close and Shift+Tab
+// from Close to the last control; focus can never leave the dialog
+// by Tab while it is open.
+function onPanelKeyDown(e) {
+  if (!e || !e.key) return;
+  var tabEl = (e.target && e.target.closest) ? e.target.closest('[role="tab"]') : null;
+  if (tabEl && (e.key === 'ArrowRight' || e.key === 'ArrowDown' ||
+      e.key === 'ArrowLeft' || e.key === 'ArrowUp' ||
+      e.key === 'Home' || e.key === 'End')) {
+    e.preventDefault();
+    var i = TAB_NAMES.indexOf(activeTab);
+    var next;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = TAB_NAMES[(i + 1) % TAB_NAMES.length];
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = TAB_NAMES[(i - 1 + TAB_NAMES.length) % TAB_NAMES.length];
+    else if (e.key === 'Home') next = TAB_NAMES[0];
+    else next = TAB_NAMES[TAB_NAMES.length - 1];
+    selectTab(next, true);
+    return;
+  }
+  if ((e.key === 'Enter' || e.key === ' ') && tabEl) {
+    // Enter/Space on a focused tab selects it (redundant under
+    // automatic activation, but harmless).
+    e.preventDefault();
+    selectTab(tabEl.getAttribute('data-tab'), true);
+    selectEscArmed = false;
+    return;
+  }
+  if (e.key === 'Escape') {
+    // A native <select> dropdown eats the first Escape to close the
+    // dropdown; the drawer closes on the second Escape from a select.
+    // Anywhere else, Escape closes immediately.
+    if (e.target && e.target.tagName === 'SELECT' && !selectEscArmed) {
+      selectEscArmed = true;
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    hideEditPanel();
+    return;
+  }
+  if (e.key === 'Tab') {
+    var focusables = focusableElements();
+    if (!focusables.length) { e.preventDefault(); return; }
+    var first = focusables[0];
+    var last = focusables[focusables.length - 1];
+    var idx = focusables.indexOf(e.target);
+    if (idx === -1) {
+      e.preventDefault();
+      (e.shiftKey ? last : first).focus();
+    } else if (e.shiftKey && idx === 0) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && idx === focusables.length - 1) {
+      e.preventDefault();
+      first.focus();
+    }
+    selectEscArmed = false;
+    return;
+  }
+  selectEscArmed = false;
+}
+
+// Return focus to the exact control that opened the panel. Fallbacks,
+// in order: the part's callout button (when the invoker was re-rendered
+// away), then #scene3d. Never steals focus when the panel never opened.
+function focusInvoker() {
+  var target = null;
+  if (invoker && invoker.isConnected && !invoker.disabled &&
+      typeof invoker.focus === 'function' &&
+      (invoker.offsetParent !== null || invoker.id === 'scene3d')) {
+    target = invoker;
+  }
+  if (!target && lastComponentId) {
+    var callout = document.querySelector(
+      '.netproof-callout[data-component-id="' + cssEscapeAttr(lastComponentId) + '"]');
+    if (callout && callout.offsetParent !== null) target = callout;
+  }
+  if (!target) target = document.getElementById('scene3d');
+  if (target && typeof target.focus === 'function') {
+    try { target.focus(); } catch (e) { /* focus is best-effort */ }
+  }
+}
+
+// Remove the leader line + dot and stop its tracking loop.
+function clearLeader() {
+  if (leaderRaf) {
+    try { cancelAnimationFrame(leaderRaf); } catch (e) { /* already gone */ }
+    leaderRaf = 0;
+  }
+  if (leaderSvg && leaderSvg.parentNode) leaderSvg.parentNode.removeChild(leaderSvg);
+  leaderSvg = null;
+}
+
+// Draw the thin leader line + dot from the panel edge to the part's
+// callout anchor (callouts spec §8). Tracks the callout per frame so
+// orbit / zoom does not strand it; under reduced motion it is drawn
+// once, statically.
+function drawLeader(anchor) {
+  clearLeader();
+  var panel = el(PANEL_ID);
+  if (!panel || !anchor) return;
+  var host = panel.parentElement;
+  if (!host || host.id !== 'scene3d') return;
+  var svgNS = 'http://www.w3.org/2000/svg';
+  var svg = document.createElementNS(svgNS, 'svg');
+  svg.setAttribute('class', 'ep-leader');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:5;overflow:visible;';
+  var line = document.createElementNS(svgNS, 'line');
+  var dot = document.createElementNS(svgNS, 'circle');
+  var color = panel.style.borderColor || '#1d4ed8';
+  line.setAttribute('stroke', color);
+  line.setAttribute('stroke-width', '1');
+  dot.setAttribute('r', '3');
+  dot.setAttribute('fill', color);
+  dot.setAttribute('stroke', '#fff');
+  dot.setAttribute('stroke-width', '1');
+  svg.appendChild(line);
+  svg.appendChild(dot);
+  host.appendChild(svg);
+  leaderSvg = svg;
+  var reduceMotion = false;
+  try {
+    reduceMotion = !!(window.matchMedia &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  } catch (e) { /* assume motion is fine */ }
+  function update() {
+    if (!leaderSvg || !el(PANEL_ID) || el(PANEL_ID).style.display === 'none') return;
+    var hostRect = host.getBoundingClientRect();
+    var a = anchor.getBoundingClientRect();
+    var ax = a.left - hostRect.left + a.width / 2;
+    var ay = a.top - hostRect.top + a.height / 2;
+    var pr = el(PANEL_ID).getBoundingClientRect();
+    var px = pr.left - hostRect.left;
+    var py = pr.top - hostRect.top;
+    var cx = Math.max(px, Math.min(ax, px + pr.width));
+    var cy = Math.max(py, Math.min(ay, py + pr.height));
+    line.setAttribute('x1', String(cx));
+    line.setAttribute('y1', String(cy));
+    line.setAttribute('x2', String(ax));
+    line.setAttribute('y2', String(ay));
+    dot.setAttribute('cx', String(ax));
+    dot.setAttribute('cy', String(ay));
+  }
+  update();
+  if (!reduceMotion) {
+    (function tick() {
+      if (!leaderSvg) return;
+      update();
+      leaderRaf = requestAnimationFrame(tick);
+    })();
+  }
+}
+
+// Anchor the callout card inside #scene3d: right of the part's
+// callout, flipped left when there is no room, clamped inside the
+// canvas and below the verdict callout's corner. Below 768px the
+// bottom-sheet stylesheet owns placement, so no inline offsets are
+// set. Without #scene3d, the fixed top-right fallback applies.
+function positionPanel() {
+  var panel = el(PANEL_ID);
+  if (!panel) return;
+  var host = panel.parentElement;
+  var inScene = !!host && host.id === 'scene3d';
+  panel.classList.toggle('ep-in-scene', inScene);
+  if (!inScene) {
+    panel.style.position = 'fixed';
+    panel.style.top = '16px';
+    panel.style.right = '16px';
+    panel.style.left = 'auto';
+    panel.style.bottom = 'auto';
+    clearLeader();
+    return;
+  }
+  panel.style.position = 'absolute';
+  var narrow = false;
+  try {
+    narrow = !!(window.matchMedia && window.matchMedia('(max-width: 768px)').matches);
+  } catch (e) { /* desktop layout */ }
+  if (narrow) {
+    panel.style.top = '';
+    panel.style.right = '';
+    panel.style.left = '';
+    panel.style.bottom = '';
+    clearLeader();
+    return;
+  }
+  var anchor = null;
+  if (currentComponent) {
+    anchor = host.querySelector(
+      '.netproof-callout[data-component-id="' + cssEscapeAttr(currentComponent.id) + '"]');
+    if (anchor && anchor.offsetParent === null) anchor = null; // not projected
+  }
+  var hostRect = host.getBoundingClientRect();
+  var pw = panel.offsetWidth;
+  var ph = panel.offsetHeight;
+  var x;
+  var y;
+  if (anchor) {
+    var r = anchor.getBoundingClientRect();
+    var ax = r.left - hostRect.left;
+    var ay = r.top - hostRect.top;
+    x = ax + r.width + 12;
+    y = ay;
+    if (x + pw > hostRect.width - 12) x = ax - pw - 12;
+    if (x < 12) x = 12;
+  } else {
+    x = hostRect.width - pw - 12;
+    y = 12;
+    anchor = null;
+  }
+  if (y + ph > hostRect.height - 12) y = Math.max(12, hostRect.height - ph - 12);
+  if (y < 12) y = 12;
+  panel.style.left = Math.round(x) + 'px';
+  panel.style.top = Math.round(y) + 'px';
+  panel.style.right = 'auto';
+  panel.style.bottom = 'auto';
+  drawLeader(anchor);
 }
 
 function buildPanel() {
-  injectStyle();
   wireTypeChange();
   var panel = el(PANEL_ID);
   if (panel) return panel;
 
   panel = document.createElement('section');
   panel.id = PANEL_ID;
+  panel.className = 'bp-drawer';
+  panel.setAttribute('role', 'dialog');
+  panel.setAttribute('aria-modal', 'true');
+  panel.setAttribute('aria-labelledby', PANEL_ID + '-title');
   panel.setAttribute('aria-label', 'Edit selected component');
   panel.innerHTML = [
     '<button type="button" class="ep-close" data-action="close" aria-label="Close edit panel">✕</button>',
-    '<h2>Edit component</h2>',
+    '<h2 id="' + PANEL_ID + '-title">Edit component</h2>',
     '<p class="ep-sub" id="' + PANEL_ID + '-sub"></p>',
     '<div><label>ID</label><div id="' + PANEL_ID + '-id"></div></div>',
+    '<div class="ep-tabs" role="tablist" aria-label="Edit component panels">',
+    '<button type="button" role="tab" class="ep-tab" data-tab="edit" id="' + PANEL_ID + '-tab-edit" aria-selected="true" aria-controls="' + PANEL_ID + '-panel-edit" tabindex="0">Edit</button>',
+    '<button type="button" role="tab" class="ep-tab" data-tab="measure" id="' + PANEL_ID + '-tab-measure" aria-selected="false" aria-controls="' + PANEL_ID + '-panel-measure" tabindex="-1">Measurements</button>',
+    '<button type="button" role="tab" class="ep-tab" data-tab="findings" id="' + PANEL_ID + '-tab-findings" aria-selected="false" aria-controls="' + PANEL_ID + '-panel-findings" tabindex="-1">Findings</button>',
+    '</div>',
+    '<div role="tabpanel" id="' + PANEL_ID + '-panel-edit" aria-labelledby="' + PANEL_ID + '-tab-edit" tabindex="0">',
     '<div><label for="' + PANEL_ID + '-type">Type</label>',
     '<select id="' + PANEL_ID + '-type">',
     COMPONENT_TYPES.map(function (t) {
@@ -404,20 +738,27 @@ function buildPanel() {
     '<span class="ep-hint" id="' + PANEL_ID + '-led-hint-text"></span>' +
     '<button type="button" class="secondary" data-action="use-vf" id="' + PANEL_ID + '-led-use-vf">Use Vf</button>' +
     '</div></div>',
-    '<h3>Latest simulation</h3>',
-    '<div id="' + PANEL_ID + '-measure"></div>',
-    '<h3>Findings for this component</h3>',
-    '<div id="' + PANEL_ID + '-findings"></div>',
     '<div class="ep-actions">',
     '<button type="button" data-action="save">Save</button>',
     '<button type="button" class="secondary" data-action="recheck">Re-check</button>',
     '<button type="button" class="secondary" data-action="repair">Repair</button>',
     '</div>',
     '<p class="ep-status" id="' + PANEL_ID + '-status" role="status"></p>',
+    '</div>',
+    '<div role="tabpanel" id="' + PANEL_ID + '-panel-measure" aria-labelledby="' + PANEL_ID + '-tab-measure" tabindex="0" hidden>',
+    '<h3>Latest simulation</h3>',
+    '<div id="' + PANEL_ID + '-measure"></div>',
+    '</div>',
+    '<div role="tabpanel" id="' + PANEL_ID + '-panel-findings" aria-labelledby="' + PANEL_ID + '-tab-findings" tabindex="0" hidden>',
+    '<h3>Findings for this component</h3>',
+    '<div id="' + PANEL_ID + '-findings"></div>',
+    '</div>',
   ].join('');
 
   panel.addEventListener('click', function (e) {
-    var btn = e.target.closest('[data-action]');
+    var tab = (e.target && e.target.closest) ? e.target.closest('[role="tab"]') : null;
+    if (tab) { selectTab(tab.getAttribute('data-tab'), true); return; }
+    var btn = (e.target && e.target.closest) ? e.target.closest('[data-action]') : null;
     if (!btn) return;
     var action = btn.getAttribute('data-action');
     if (action === 'close') hideEditPanel();
@@ -427,7 +768,25 @@ function buildPanel() {
     else if (action === 'use-vf') onUseVfClick();
   });
 
-  document.body.appendChild(panel);
+  panel.addEventListener('keydown', onPanelKeyDown);
+
+  // Keep the anchored card inside the canvas when the viewport
+  // changes (a shrink below 768px hands placement to the sheet CSS).
+  window.addEventListener('resize', function () {
+    var p = el(PANEL_ID);
+    if (p && p.style.display !== 'none' && currentComponent) positionPanel();
+  });
+
+  // The callout card lives inside #scene3d so it moves with the
+  // canvas on scroll and never covers the page; without a 3D view it
+  // falls back to document.body (fixed top-right, as before).
+  var host = document.getElementById('scene3d') || document.body;
+  if (host !== document.body) {
+    try {
+      if (window.getComputedStyle(host).position === 'static') host.style.position = 'relative';
+    } catch (e) { /* labels misplace without it; panel still works */ }
+  }
+  host.appendChild(panel);
   return panel;
 }
 
@@ -714,6 +1073,9 @@ function renderPanel() {
   var panel = buildPanel();
   panel.style.display = 'block';
 
+  // Dialog title announces the component id on open.
+  var title = el(PANEL_ID + '-title');
+  if (title) title.textContent = 'Edit component ' + (c.id || '');
   el(PANEL_ID + '-sub').textContent = 'Editing the selected 3D component. ' +
     'Save hands the edited component back to the page, which POSTs /check.';
   el(PANEL_ID + '-id').textContent = c.id || '';
@@ -736,6 +1098,7 @@ function renderPanel() {
   // it is not), then upgrade in place when the fetch lands.
   valueCustomMode = false;
   ratingCustomMode = false;
+  selectEscArmed = false;
   refreshPickers();
   var openedId = c.id;
   fetchPartsCatalog().then(function (catalog) {
@@ -749,6 +1112,18 @@ function renderPanel() {
 
   renderMeasurements(c, currentReport);
   renderFindings(c, currentReport);
+
+  // Callout-card border: the part's worst-finding severity colour.
+  var findings = findingsFor(c, currentReport);
+  panel.style.borderColor = SEVERITY_BORDER[worstSeverity(findings)] || '#1d4ed8';
+  // Findings tab badge: text count of STOP findings, never a colour
+  // dot alone.
+  var stops = findings.filter(function (f) {
+    return String((f && (f.severity || f.level)) || '').toUpperCase() === 'STOP';
+  }).length;
+  var findingsTab = el(PANEL_ID + '-tab-findings');
+  if (findingsTab) findingsTab.textContent = stops > 0 ? 'Findings (' + stops + ')' : 'Findings';
+
   setStatus('');
 
   // Re-check / Repair need a handler from the page; disable otherwise.
@@ -758,6 +1133,16 @@ function renderPanel() {
   if (repairBtn) repairBtn.disabled = typeof currentCallbacks.onRepair !== 'function';
   var saveBtn = panel.querySelector('[data-action="save"]');
   if (saveBtn) saveBtn.disabled = typeof currentCallbacks.onSave !== 'function';
+
+  // Fresh open always lands on the Edit tab; a re-check never
+  // auto-switches tabs while the panel is already open.
+  selectTab('edit', false);
+
+  // Anchor the card, then focus IN: Close first (orientation + exit
+  // before the first input), per a11y spec §6.1.
+  positionPanel();
+  var closeBtn = panel.querySelector('[data-action="close"]');
+  if (closeBtn) closeBtn.focus();
 }
 
 /* ------------------------------------------------------------------ */
@@ -832,6 +1217,10 @@ function onSaveClick() {
   }
   setStatus('');
   currentCallbacks.onSave(result.component);
+  // Save closes the dialog (a11y spec §5.4) and returns focus to the
+  // invoking callout / row / #scene3d. Re-check / Repair leave it
+  // open so their results update the panels in place.
+  hideEditPanel();
 }
 
 function onButtonClick(name) {
@@ -941,6 +1330,14 @@ export function showEditPanel(component, report, callbacks) {
   if (!callbacks || typeof callbacks.onSave !== 'function') {
     throw new Error('showEditPanel: callbacks.onSave is required');
   }
+  // Capture the invoker BEFORE rendering: whichever control had focus
+  // when the panel opened is where focus returns on close. A
+  // double-click leaves focus on <body>, which is not a useful
+  // invoker — the callout / #scene3d fallbacks cover that.
+  var active = (typeof document !== 'undefined') ? document.activeElement : null;
+  invoker = (active && active !== document.body &&
+    active !== document.documentElement) ? active : null;
+  lastComponentId = String(component.id);
   // Copy so later panel edits never mutate the caller's object.
   currentComponent = {
     id: component.id,
@@ -959,13 +1356,23 @@ export function showEditPanel(component, report, callbacks) {
   renderPanel();
 }
 
-/** Hide the edit panel and clear the selected component. */
+/** Hide the edit panel, clear the selected component, and return focus. */
 export function hideEditPanel() {
   var panel = el(PANEL_ID);
+  clearLeader();
   if (panel) panel.style.display = 'none';
   var onClose = currentCallbacks && currentCallbacks.onClose;
+  var hadComponent = currentComponent != null;
   currentComponent = null;
   currentReport = null;
   currentCallbacks = {};
-  if (typeof onClose === 'function') onClose();
+  // Focus returns even if onClose throws; the error still propagates.
+  try {
+    if (typeof onClose === 'function') onClose();
+  } finally {
+    if (hadComponent) focusInvoker();
+    invoker = null;
+    lastComponentId = null;
+    selectEscArmed = false;
+  }
 }

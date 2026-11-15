@@ -1,13 +1,19 @@
 /**
  * Netproof 3D interaction module — web/3d/interaction.js
  *
- * Owns ONLY pointer interaction for the Netproof 3D schematic view:
+ * Blueprint rebuild (2026-11-15). Owns pointer AND keyboard interaction
+ * for the Netproof 3D schematic view:
  *   - click a component mesh to select it (raycast + emissive highlight
  *     + selection outline)
  *   - drag a selected component on the ground plane to move it (node
- *     positions and wire tubes are updated in the scene)
+ *     positions and wire tubes are updated in the scene). Dragging is
+ *     layout-only: onMove never changes nodes / value / verdict, and
+ *     the netlist table is the keyboard path to every value that
+ *     matters, so drag has no keyboard equivalent.
  *   - double-click a component to open the edit panel (via callback)
  *   - hover a component to show a tooltip with its id / type / value
+ *   - keyboard: arrows / Home / End cycle parts with wrap, Enter opens
+ *     the edit panel, Escape deselects (see "Keyboard map" below)
  *
  * This module NEVER invents numbers. It displays only the component data
  * already attached to the meshes (see contract below) and it never fetches,
@@ -18,7 +24,8 @@
  * Three.js is expected to resolve via the page's import map
  * (`import * as THREE from 'three'`). The scene-building module
  * (scene.js) owns creating meshes, wires, and the renderer loop; this
- * module only attaches pointer handlers to the renderer's DOM element.
+ * module only attaches pointer/keyboard handlers to the renderer's DOM
+ * element and to the callout buttons inside its container.
  *
  * ---------------------------------------------------------------------------
  * Contract
@@ -29,7 +36,9 @@
  *              when a component moves (see "Wire / node update" below).
  *   camera     THREE.Camera used for raycasting.
  *   renderer   THREE.WebGLRenderer — pointer listeners attach to
- *              renderer.domElement.
+ *              renderer.domElement; keyboard listeners attach to the
+ *              canvas (programmatic focus only) and, by delegation, to
+ *              the callout buttons inside the canvas's parent (#scene3d).
  *   meshesById Map<string, THREE.Object3D> or plain object
  *              { [componentId]: meshOrGroup }. A value may be a single Mesh
  *              or a Group; raycast hits on any descendant resolve to the
@@ -47,7 +56,7 @@
  *                                                // final call on drag end if
  *                                                // the position changed since
  *                                                // the last live call
- *                onEdit(componentId),           // double-click: open edit panel
+ *                onEdit(componentId),           // double-click / Enter: open edit panel
  *                onDragStart?(componentId),     // optional: e.g. disable OrbitControls
  *                onDragEnd?(componentId, {x, y, z}) // optional
  *              }
@@ -68,7 +77,69 @@
  *     refreshWires(componentId) // re-run the wire/node update for one component
  *                                     (optional 2nd/3rd args: newPosition, delta,
  *                                      used internally while dragging)
+ *     focusCallout(componentId),// focus the callout button for a part (bool)
+ *     cycleSelection(dir),      // step selection +1 / -1 with wrap (returns id)
  *   }
+ *
+ * ---------------------------------------------------------------------------
+ * Keyboard map (blueprint a11y spec §4.2 / §5.3)
+ * ---------------------------------------------------------------------------
+ * Tab / Shift+Tab moves through the callouts in netlist (DOM) order —
+ * one Tab stop per callout. Callouts are real <button> elements owned
+ * by the overlay/callouts layer; this module never reorders them and
+ * never assigns a positive tabindex.
+ *
+ * Canvas (renderer.domElement, when it holds focus — it is
+ * tabindex="-1", programmatic focus only, never a Tab stop):
+ *   ArrowRight / ArrowDown  next part, wraps
+ *   ArrowLeft / ArrowUp     previous part, wraps
+ *   Home                    first part
+ *   End                     last part
+ *   Enter                   edit the selected part (or select the first
+ *                           part when nothing is selected)
+ *   Escape                  deselect
+ *   Space                   nothing (page scroll is left alone)
+ *
+ * Callout button (delegated keydown on the #scene3d container; the
+ * container handler in index.html only fires when the container
+ * itself is the target, so the two never double-step):
+ *   ArrowRight / ArrowDown  next callout, wraps; focus moves and the
+ *                           selection follows
+ *   ArrowLeft / ArrowUp     previous callout, wraps
+ *   Home / End              first / last callout
+ *   Enter / Space           open the edit panel for that part
+ *   Escape                  deselect and return focus to #scene3d
+ *
+ * Window: Escape deselects, except when focus is inside the edit
+ * panel (the panel owns that Escape: it closes the dialog and returns
+ * focus) or inside a text input / select / textarea (those own Escape
+ * themselves). A defaultPrevented Escape is never re-handled here.
+ *
+ * NOT handled here, on purpose:
+ *   - "R" / Reset view and the Inspect (explode) toggle: main3d.js
+ *     owns the R key on the container and wires the Inspect / Reset
+ *     view buttons. This module never claims those keys.
+ *   - Arrow keys on the #scene3d container itself: index.html owns
+ *     them (target === container guard). This module's handlers only
+ *     fire when the target is the canvas or a callout.
+ *   - Typing: no other key is hijacked; anything not listed above is
+ *     ignored.
+ *
+ * Selection announcements: every settled selection change is written
+ * (debounced 150 ms, so holding an arrow key does not spam) to
+ * #selected-announcer when that live region exists (owned by
+ * index.html). Nothing is announced when it does not exist.
+ *
+ * Focus ring: callout buttons get a visible #FFD166 ring (3px, 2px
+ * offset, dark #0A2A5E keyline) from the small injected stylesheet
+ * below — the blueprint focus colour, which reads on blueprint blue
+ * where the page's #1D4ED8 ring is 1.50:1 and effectively invisible.
+ * Callouts are also 44px minimum targets (a11y spec §3).
+ *
+ * Reduced motion: this module animates nothing (selection highlight
+ * is static, the tooltip does not animate), so there is nothing to
+ * disable; the injected stylesheet still kills callout transitions
+ * under prefers-reduced-motion.
  *
  * Wire / node update (on drag):
  *   1. The dragged mesh/group itself is moved (x/z from the ground-plane
@@ -102,6 +173,8 @@ const OUTLINE_COLOR = 0x2684ff;
 const CLICK_THRESHOLD_PX = 6;
 const EPSILON = 1e-6;
 const GROUND_Y = 0;
+const ANNOUNCE_DEBOUNCE_MS = 150;
+const CALLOUT_STYLE_ID = 'netproof-callout-focus-style';
 
 function isPlainPosition(v) {
   return v != null && typeof v === 'object' &&
@@ -122,6 +195,36 @@ function escapeText(value) {
   return String(value == null ? '' : value);
 }
 
+/**
+ * Visible keyboard focus for callout buttons, injected once. The
+ * blueprint focus colour #FFD166 (6.97:1 on blueprint blue #0B3D91)
+ * plus a dark keyline so the ring also reads where amber meets white.
+ * 44px minimum target per a11y spec §3. No transition under reduced
+ * motion. This only styles the callout buttons this module drives
+ * keyboard for; the overlay layer owns the rest of callout layout.
+ */
+function injectCalloutFocusStyle() {
+  if (typeof document === 'undefined') return null;
+  if (document.getElementById(CALLOUT_STYLE_ID)) {
+    return document.getElementById(CALLOUT_STYLE_ID);
+  }
+  const style = document.createElement('style');
+  style.id = CALLOUT_STYLE_ID;
+  style.textContent = [
+    '.netproof-callout { min-height: 44px; min-width: 44px; }',
+    '.netproof-callout:focus-visible {',
+    '  outline: 3px solid #FFD166; outline-offset: 2px;',
+    '  box-shadow: 0 0 0 4px #0A2A5E; border-radius: 4px; scroll-margin: 72px;',
+    '}',
+    '.netproof-callout:focus:not(:focus-visible) { outline: none; }',
+    '@media (prefers-reduced-motion: reduce) {',
+    '  .netproof-callout { transition: none !important; }',
+    '}',
+  ].join('\n');
+  document.head.appendChild(style);
+  return style;
+}
+
 export function setupInteraction(scene, camera, renderer, meshesById, callbacks) {
   if (!scene || !camera || !renderer || !renderer.domElement) {
     throw new Error('setupInteraction: scene, camera and renderer (with domElement) are required');
@@ -131,6 +234,15 @@ export function setupInteraction(scene, camera, renderer, meshesById, callbacks)
   const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -GROUND_Y);
   const raycaster = new THREE.Raycaster();
   const pointerNdc = new THREE.Vector2();
+  // The canvas is programmatically focusable only (never a Tab stop):
+  // the #scene3d container and the callout buttons own Tab order.
+  try { dom.tabIndex = -1; } catch (e) { /* non-DOM renderer in tests */ }
+  injectCalloutFocusStyle();
+  // Callouts live in the label layer inside the canvas's parent
+  // (#scene3d). Delegating here keeps one listener for callouts that
+  // are rebuilt on every Report; if the canvas has no parent yet,
+  // fall back to the document.
+  const keyHost = dom.parentElement || (typeof document !== 'undefined' ? document : null);
 
   // --- mesh registry -------------------------------------------------------
   let meshMap = new Map(); // componentId -> Object3D (mesh or group)
@@ -232,6 +344,7 @@ export function setupInteraction(scene, camera, renderer, meshesById, callbacks)
   // componentId -> [{ mesh, material, emissiveHex, emissiveIntensity }]
   const savedMaterials = new Map();
   let controls = null; // optional OrbitControls-like object, set via setControls()
+  let announceTimer = null;
 
   function materialUsageCounts() {
     const counts = new Map();
@@ -301,6 +414,31 @@ export function setupInteraction(scene, camera, renderer, meshesById, callbacks)
     savedMaterials.clear();
   }
 
+  // Announce the settled selection to #selected-announcer (a11y spec
+  // §9.1), debounced so holding an arrow key does not spam the screen
+  // reader. Silent no-op when the live region does not exist yet.
+  // Text comes only from the mesh's own userData (id / type / value);
+  // no verdict or measurement is derived here.
+  function announceSelection() {
+    if (typeof document === 'undefined') return;
+    const region = document.getElementById('selected-announcer');
+    if (!region) return;
+    if (announceTimer) clearTimeout(announceTimer);
+    announceTimer = setTimeout(() => {
+      announceTimer = null;
+      if (!selectedId) {
+        region.textContent = 'No component selected.';
+        return;
+      }
+      const data = componentData(selectedId, meshMap.get(selectedId));
+      const bits = [selectedId + ' selected.'];
+      if (data.type != null) {
+        bits.push(String(data.type) + (data.value != null ? ', ' + escapeText(data.value) : '') + '.');
+      }
+      region.textContent = bits.join(' ');
+    }, ANNOUNCE_DEBOUNCE_MS);
+  }
+
   function select(id, emit = true) {
     if (id != null && !meshMap.has(String(id))) id = null;
     if (id === selectedId) return selectedId;
@@ -309,11 +447,184 @@ export function setupInteraction(scene, camera, renderer, meshesById, callbacks)
     selectedRoot = selectedId ? meshMap.get(selectedId) : null;
     if (selectedRoot) applyHighlight(selectedRoot, selectedId);
     if (emit && typeof cb.onSelect === 'function') cb.onSelect(selectedId);
+    announceSelection();
     return selectedId;
   }
 
   function deselect(emit = true) {
     return select(null, emit);
+  }
+
+  // --- callouts (keyboard) -------------------------------------------------
+  // Callouts are real <button class="netproof-callout"> elements owned
+  // by the overlay/callouts layer, one per component, in netlist (DOM)
+  // order. They are rebuilt on every Report, so they are always queried
+  // fresh — never cached. Hidden callouts (display:none until projected)
+  // are not keyboard reachable and are filtered out.
+
+  function calloutElements() {
+    const scope = keyHost || (typeof document !== 'undefined' ? document : null);
+    if (!scope || typeof scope.querySelectorAll !== 'function') return [];
+    return Array.from(scope.querySelectorAll('.netproof-callout'))
+      .filter((el) => !el.disabled && el.offsetParent !== null);
+  }
+
+  function componentIdsInOrder() {
+    return Array.from(meshMap.keys());
+  }
+
+  // The component id a callout stands for: its data-component-id, or
+  // — if the layer did not stamp one — the netlist id at the same index
+  // in DOM order (callout order is netlist order by contract).
+  function idForCallout(callout, index) {
+    const stamped = callout && callout.getAttribute
+      ? callout.getAttribute('data-component-id') : null;
+    if (stamped) return stamped;
+    const ids = componentIdsInOrder();
+    return (index >= 0 && index < ids.length) ? ids[index] : null;
+  }
+
+  function focusCallout(id) {
+    if (id == null) return false;
+    const wanted = String(id);
+    const list = calloutElements();
+    for (let i = 0; i < list.length; i++) {
+      if (idForCallout(list[i], i) === wanted) {
+        list[i].focus();
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Next / previous component id with wrap. From no selection, an
+  // arrow forward lands on the first part, backward on the last.
+  function stepId(fromId, dir) {
+    const ids = componentIdsInOrder();
+    if (!ids.length) return null;
+    let idx = fromId == null ? -1 : ids.indexOf(String(fromId));
+    if (idx === -1) return dir >= 0 ? ids[0] : ids[ids.length - 1];
+    return ids[(idx + dir + ids.length) % ids.length];
+  }
+
+  function cycleSelection(dir) {
+    const next = stepId(selectedId, dir >= 0 ? 1 : -1);
+    if (next == null) return null;
+    return select(next);
+  }
+
+  function openEdit(id) {
+    if (id == null) return;
+    if (String(id) !== selectedId) select(id);
+    if (typeof cb.onEdit === 'function') cb.onEdit(String(id));
+  }
+
+  function focusSceneContainer() {
+    const host = dom.parentElement;
+    if (host && host.tabIndex >= 0 && typeof host.focus === 'function') {
+      host.focus();
+      return;
+    }
+    // The container is not focusable (or has no parent): the canvas
+    // itself is programmatically focusable, so focus never gets lost.
+    dom.focus();
+  }
+
+  // Canvas keys: only when the canvas itself is the target. The
+  // #scene3d container handler in index.html only fires when the
+  // container is the target, so this never double-steps with it.
+  // "R" is deliberately not handled here: main3d.js owns Reset view.
+  function onCanvasKeyDown(event) {
+    if (!event || event.target !== dom) return;
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    const key = event.key;
+    if (key === 'ArrowRight' || key === 'ArrowDown') {
+      event.preventDefault();
+      cycleSelection(1);
+    } else if (key === 'ArrowLeft' || key === 'ArrowUp') {
+      event.preventDefault();
+      cycleSelection(-1);
+    } else if (key === 'Home') {
+      event.preventDefault();
+      const ids = componentIdsInOrder();
+      if (ids.length) select(ids[0]);
+    } else if (key === 'End') {
+      event.preventDefault();
+      const ids = componentIdsInOrder();
+      if (ids.length) select(ids[ids.length - 1]);
+    } else if (key === 'Enter') {
+      event.preventDefault();
+      if (selectedId) openEdit(selectedId);
+      else cycleSelection(1);
+    } else if (key === 'Escape') {
+      event.preventDefault();
+      deselect();
+    }
+    // Space and every other key: ignored, never hijacked.
+  }
+
+  // Callout keys, delegated on the #scene3d container (or the document
+  // when the canvas has no parent). Fires only when the event target
+  // is a callout button, so it never fights the container handler.
+  function onSceneKeyDown(event) {
+    if (!event || !event.target || typeof event.target.closest !== 'function') return;
+    const callout = event.target.closest('.netproof-callout');
+    if (!callout) return;
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    const key = event.key;
+    const list = calloutElements();
+    const index = list.indexOf(callout);
+    if (key === 'ArrowRight' || key === 'ArrowDown') {
+      event.preventDefault();
+      if (!list.length) return;
+      const next = list[(index + 1) % list.length];
+      const id = idForCallout(next, (index + 1) % list.length);
+      if (id) select(id);
+      next.focus();
+    } else if (key === 'ArrowLeft' || key === 'ArrowUp') {
+      event.preventDefault();
+      if (!list.length) return;
+      const prev = list[(index - 1 + list.length) % list.length];
+      const id = idForCallout(prev, (index - 1 + list.length) % list.length);
+      if (id) select(id);
+      prev.focus();
+    } else if (key === 'Home') {
+      event.preventDefault();
+      if (!list.length) return;
+      const id = idForCallout(list[0], 0);
+      if (id) select(id);
+      list[0].focus();
+    } else if (key === 'End') {
+      event.preventDefault();
+      if (!list.length) return;
+      const last = list[list.length - 1];
+      const id = idForCallout(last, list.length - 1);
+      if (id) select(id);
+      last.focus();
+    } else if (key === 'Enter' || key === ' ') {
+      event.preventDefault();
+      const id = idForCallout(callout, index);
+      openEdit(id != null ? id : selectedId);
+    } else if (key === 'Escape') {
+      event.preventDefault();
+      deselect();
+      focusSceneContainer();
+    }
+    // Tab / Shift+Tab are native (one stop per callout, DOM order);
+    // every other key is ignored.
+  }
+
+  // Window Escape: deselects, unless the edit panel owns this Escape
+  // (focus inside #netproof-edit-panel — the panel closes itself and
+  // returns focus), the key was already handled (defaultPrevented),
+  // or focus is in a typing control (inputs / selects own Escape).
+  function onKeyDown(event) {
+    if (!event || event.key !== 'Escape' || !selectedId) return;
+    if (event.defaultPrevented) return;
+    const t = event.target;
+    if (t && typeof t.closest === 'function' && t.closest('#netproof-edit-panel')) return;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA')) return;
+    deselect();
   }
 
   // --- raycasting ----------------------------------------------------------
@@ -520,8 +831,7 @@ export function setupInteraction(scene, camera, renderer, meshesById, callbacks)
     if (Date.now() < suppressDblClickUntil) return;
     const hit = pick(event);
     if (hit && hit.id) {
-      if (hit.id !== selectedId) select(hit.id);
-      if (typeof cb.onEdit === 'function') cb.onEdit(hit.id);
+      openEdit(hit.id);
     }
   }
 
@@ -530,16 +840,14 @@ export function setupInteraction(scene, camera, renderer, meshesById, callbacks)
     if (!dragging) dom.style.cursor = '';
   }
 
-  function onKeyDown(event) {
-    if (event.key === 'Escape' && selectedId) deselect();
-  }
-
   dom.addEventListener('pointerdown', onPointerDown);
   dom.addEventListener('pointermove', onPointerMove);
   dom.addEventListener('pointerup', onPointerUp);
   dom.addEventListener('pointercancel', onPointerUp);
   dom.addEventListener('dblclick', onDoubleClick);
   dom.addEventListener('pointerleave', onPointerLeave);
+  dom.addEventListener('keydown', onCanvasKeyDown);
+  if (keyHost) keyHost.addEventListener('keydown', onSceneKeyDown);
   window.addEventListener('keydown', onKeyDown);
   dom.style.touchAction = 'none';
 
@@ -550,7 +858,10 @@ export function setupInteraction(scene, camera, renderer, meshesById, callbacks)
     dom.removeEventListener('pointercancel', onPointerUp);
     dom.removeEventListener('dblclick', onDoubleClick);
     dom.removeEventListener('pointerleave', onPointerLeave);
+    dom.removeEventListener('keydown', onCanvasKeyDown);
+    if (keyHost) keyHost.removeEventListener('keydown', onSceneKeyDown);
     window.removeEventListener('keydown', onKeyDown);
+    if (announceTimer) { clearTimeout(announceTimer); announceTimer = null; }
     clearHighlight();
     hideTooltip();
     if (tooltip.parentElement) tooltip.parentElement.removeChild(tooltip);
@@ -568,6 +879,8 @@ export function setupInteraction(scene, camera, renderer, meshesById, callbacks)
     setMeshes,
     setControls(next) { controls = next || null; },
     refreshWires,
+    focusCallout,
+    cycleSelection,
   };
 }
 

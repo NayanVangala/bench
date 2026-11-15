@@ -1,13 +1,25 @@
 /**
  * Netproof 3D overlay — web/3d/overlay.js
  *
- * Floating live-data labels + current-flow animation for the Netproof 3D
- * circuit view. Three.js for the dots, plain DOM elements for the labels.
+ * Blueprint callout system + current-flow animation for the Netproof
+ * 3D circuit view. Three.js for the dots, plain DOM elements for the
+ * callouts. The callout DOM/SVG/layout lives in ./callouts.js; this
+ * module owns the Report feed, the mesh tinting, the flow dots, and
+ * the pointer/keyboard wiring that opens a detail callout when a
+ * part is clicked.
  *
- * This module NEVER invents numbers. Every value it shows comes from the
- * Report object handed to updateOverlays(), which the page fills from
- * ngspice via the server. A value that is absent, null, or non-finite in
- * the Report is simply omitted from the label, never guessed or defaulted.
+ * WHAT WAS REMOVED (wholesale rebuild, 2026-11-15): the old floating
+ * `.netproof-label` system is gone entirely — no label divs, no
+ * label stacking, no per-part live-number labels, no
+ * `.netproof-label-nodata`. Findings are no longer a sidebar list
+ * rendered elsewhere; each finding is a callout box on the canvas
+ * (see callouts.js). Nothing in this file renders a findings list.
+ *
+ * This module NEVER invents numbers. Every value it shows comes from
+ * the Report object handed to updateOverlays(), which the page fills
+ * from ngspice via the server. A value that is absent, null, or
+ * non-finite in the Report is simply omitted (or shown as "—" by the
+ * callout that owns the line), never guessed or defaulted.
  *
  * Report shape (backend/netproof/ir.py — Report):
  *   {
@@ -22,8 +34,11 @@
  * component_power, and a plain `netlist` array in place of netlist_used.
  *
  * Required exports:
- *   updateOverlays(report, meshesById) — refresh labels + component colours.
+ *   updateOverlays(report, meshesById) — refresh callouts + component colours.
  *   animateFlow(deltaTime, branchCurrents) — advance the flow dots one frame.
+ *   updateLabelPositions(camera?) — re-project callouts (kept name:
+ *     main3d.js calls it every frame; it now drives the callout
+ *     edge-lane layout in callouts.js).
  *
  * Wiring (the 3D scene module owns the renderer / camera / meshes):
  *   import { initOverlays, updateOverlays, animateFlow, updateLabelPositions }
@@ -33,34 +48,92 @@
  *   updateOverlays(report, meshesById);
  *   // inside the render loop:
  *   animateFlow(deltaTimeSeconds, report.branch_currents);
- *   updateLabelPositions();   // re-project labels after the camera moves
+ *   updateLabelPositions();   // re-project callouts after the camera moves
+ *
+ * Click a part (single click, under the 6 px threshold shared with
+ * interaction.js) opens its detail callout; clicking empty space
+ * closes the detail and any Repair diff callout. Escape closes the
+ * detail callout first (interaction.js then deselects on the same
+ * press). Callout activations dispatch a bubbling
+ * "netproof:callout-select" CustomEvent on the container and call
+ * options.onCalloutSelect when supplied; the page / main3d.js owns
+ * table selection and the edit panel and listens for the event.
  *
  * Notes for the integrator:
  * - THREE is NOT imported here. Pass it to initOverlays() or leave it on
- *   window.THREE; without it, labels still get text + colours, but
- *   projection and flow dots are skipped.
+ *   window.THREE; without it, callouts still render (stacked, no
+ *   leaders) and flow dots are skipped.
  * - meshesById: { [componentId]: THREE.Object3D } — a Mesh or a Group.
- * - wiresById:  { [componentId]: [Vector3, ...] | THREE.Curve | { points } }
+ * - wiresById:  { [branchId]: [Vector3, ...] | THREE.Curve | { points } }
  *   A wire's point order defines "positive" flow direction: a positive
  *   branch current moves dots from the first point to the last, a negative
  *   current reverses them. Keep the order matching nodes [n1, n2].
  * - This file is standalone: it does not touch web/index.html or the
  *   backend, and it makes no network calls.
+ * - Callout API (initCallouts, updateCallouts, layoutCallouts,
+ *   openDetailCallout, closeDetailCallout, showRepairDiffs,
+ *   closeRepairDiffs, diffNetlists, parseMeasured, fmtValueForType)
+ *   is implemented in ./callouts.js and re-exported here so existing
+ *   import sites keep working.
  */
+
+// ---------------------------------------------------------------------------
+// Callout system (./callouts.js) — re-exported for existing import sites
+// ---------------------------------------------------------------------------
+
+import {
+  initCallouts,
+  updateCallouts,
+  layoutCallouts,
+  openDetailCallout,
+  closeDetailCallout,
+  getDetailComponentId,
+  showRepairDiffs,
+  closeRepairDiffs,
+  setRepairRechecking,
+  disposeCallouts,
+  diffNetlists,
+  parseMeasured,
+  fmtValueForType,
+} from './callouts.js';
+
+export {
+  initCallouts,
+  updateCallouts,
+  layoutCallouts,
+  openDetailCallout,
+  closeDetailCallout,
+  getDetailComponentId,
+  showRepairDiffs,
+  closeRepairDiffs,
+  setRepairRechecking,
+  disposeCallouts,
+  diffNetlists,
+  parseMeasured,
+  fmtValueForType,
+};
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
+// Severity -> mesh tint colour. Coordinator token fix (2026-11-15,
+// applied to all three verdict-colour tables together — this file,
+// scene.js VERDICT_COLORS, history.js VERDICT_COLORS):
+// WARN was #d97706 (3.19:1 on white, fails AA as text) -> #92400E
+// (7.09:1); UNKNOWN was #8b949e (3.08:1, fails) -> #4B5563 (7.56:1).
+// STOP #d92d20 (4.83:1) and PASS #1a7f37 (5.08:1) already pass AA as
+// text and are unchanged; INFO #667085 (4.97:1) passes and is
+// unchanged. The mesh tint is dimmer for WARN now — that is the
+// token set, and the blueprint direction replaces emissive tint with
+// edge colour anyway (scene.js / callouts.js own that branch).
 export const SEVERITY_COLORS = {
   STOP: '#d92d20', // red
-  WARN: '#d97706', // amber
+  WARN: '#92400E', // amber, AA text token (was #d97706)
   PASS: '#1a7f37', // green
   INFO: '#667085', // grey (never used for tinting; INFO never colours a part)
-  UNKNOWN: '#8b949e', // grey, matches scene.js VERDICT_COLORS.UNKNOWN
+  UNKNOWN: '#4B5563', // grey, AA text token (was #8b949e)
 };
-
-const SEVERITY_RANK = { STOP: 0, WARN: 1, INFO: 2 };
 
 const DOTS_PER_BRANCH = 3;
 const DOT_COLOR = 0xffb020;
@@ -71,6 +144,7 @@ const FLOW_BASE_RATE = 0.05;
 const FLOW_RATE_PER_DECADE = 0.12;
 const FLOW_REFERENCE_CURRENT_A = 0.001; // 1 mA
 const MAX_DELTA_TIME_S = 0.25;
+const CLICK_MOVE_THRESHOLD_PX = 6; // mirrors interaction.js
 
 // ---------------------------------------------------------------------------
 // Module state (set by initOverlays; everything else degrades gracefully)
@@ -79,19 +153,25 @@ const MAX_DELTA_TIME_S = 0.25;
 let THREE = null;
 let scene = null;
 let camera = null;
-let labelLayer = null;
-let styleInjected = false;
+let container = null;
+let calloutHandle = null;
 
 let wiresById = {}; // { [branchId]: wire definition }
 let nodesById = {}; // { [componentId]: [n1, n2] } — optional integrator override
 
-const labels = new Map(); // componentId -> { el, bodyEl, anchor: Vector3|null }
 const flows = new Map(); // branchId -> { points, cumLen, total, dots, phase }
 const tintedMaterials = new Set(); // materials we recoloured, for restore
+
+let lastMeshes = {};
+let lastReport = null;
+let lastNodesById = {};
 
 let dotGeometry = null;
 let dotMaterial = null;
 let dotRadius = DOT_RADIUS_DEFAULT;
+
+let pickDown = null; // { x, y } of the last pointerdown, for click detection
+let listenersAttached = false;
 
 // ---------------------------------------------------------------------------
 // Small helpers — numbers only ever come from the Report, never made up
@@ -157,16 +237,20 @@ function findKeyCI(map, key) {
 
 /**
  * Wire the overlay into the scene. All options are optional except that
- * labels need a camera to be positioned and dots need a scene + THREE.
+ * callouts need a camera to be positioned and dots need a scene + THREE.
  *
  * options: {
  *   THREE,            // the Three.js namespace (else window.THREE)
  *   scene,            // THREE.Scene — flow dots are added here
- *   camera,           // THREE.Camera — labels are projected with this
- *   container,        // element the label layer is appended to (default: document.body)
+ *   camera,           // THREE.Camera — callouts are projected with this
+ *   container,        // element the callout layer is appended to (default: document.body)
  *   wiresById,        // { [branchId]: [Vector3...] | Curve | { points } }
  *   nodesById,        // { [componentId]: [n1, n2] } (else taken from report.netlist_used)
  *   dotRadius,        // world-units radius of a flow dot
+ *   onCalloutSelect,  // (componentId | null, source) — a callout was activated
+ *   onSelect,         // alias of onCalloutSelect
+ *   onCalloutActivate, // (componentId, kind) — Enter on a detail callout
+ *   onActivate,       // alias of onCalloutActivate
  * }
  */
 export function initOverlays(options) {
@@ -175,14 +259,27 @@ export function initOverlays(options) {
   else if (typeof window !== 'undefined' && window.THREE) THREE = window.THREE;
   if (opts.scene) scene = opts.scene;
   if (opts.camera) camera = opts.camera;
+  if (opts.container) container = opts.container;
   if (opts.wiresById) wiresById = opts.wiresById;
   if (opts.nodesById) nodesById = opts.nodesById;
   if (isNum(opts.dotRadius) && opts.dotRadius > 0) {
     dotRadius = opts.dotRadius;
     dotGeometry = null; // rebuild at the new size on next use
   }
-  ensureLabelLayer(opts.container);
-  return { labelLayer };
+  const onSelect = typeof opts.onCalloutSelect === 'function' ? opts.onCalloutSelect
+    : (typeof opts.onSelect === 'function' ? opts.onSelect : null);
+  const onActivate = typeof opts.onCalloutActivate === 'function' ? opts.onCalloutActivate
+    : (typeof opts.onActivate === 'function' ? opts.onActivate : null);
+  calloutHandle = initCallouts({
+    THREE,
+    scene,
+    camera,
+    container,
+    onSelect,
+    onActivate,
+  });
+  attachPickListeners();
+  return { labelLayer: calloutHandle ? calloutHandle.element : null, callouts: calloutHandle };
 }
 
 /** Register / replace wire paths after init. Drops cached dots for changed branches. */
@@ -200,40 +297,89 @@ export function setWires(nextWiresById) {
   }
 }
 
-function ensureLabelLayer(container) {
-  if (typeof document === 'undefined') return null;
-  if (labelLayer) return labelLayer;
-  injectLabelStyles();
-  const layer = document.createElement('div');
-  layer.className = 'netproof-label-layer';
-  const host = container || document.body;
-  layer.style.position = host === document.body ? 'fixed' : 'absolute';
-  layer.style.left = '0';
-  layer.style.top = '0';
-  layer.style.right = '0';
-  layer.style.bottom = '0';
-  layer.style.overflow = 'hidden';
-  layer.style.pointerEvents = 'none';
-  layer.style.zIndex = '5';
-  host.appendChild(layer);
-  labelLayer = layer;
-  return layer;
+// ---------------------------------------------------------------------------
+// Click a part -> detail callout (pointer pick, 6 px threshold)
+// ---------------------------------------------------------------------------
+
+function isInteractiveTarget(event) {
+  const t = event.target;
+  if (!t || typeof t.closest !== 'function') return false;
+  return !!t.closest('.netproof-callout, button, input, select, a, .np-history');
 }
 
-function injectLabelStyles() {
-  if (styleInjected || typeof document === 'undefined') return;
-  const style = document.createElement('style');
-  style.textContent =
-    '.netproof-label{position:absolute;left:0;top:0;display:none;min-width:92px;' +
-    'padding:4px 7px;border:2px solid #1a7f37;border-radius:6px;' +
-    'background:rgba(255,255,255,0.92);color:#111;' +
-    'font:12px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;' +
-    'pointer-events:none;white-space:pre-line;box-shadow:0 1px 4px rgba(0,0,0,0.25);}' +
-    '.netproof-label-title{font-weight:700;font-size:12px;}' +
-    '.netproof-label-body{font-size:11px;color:#222;}' +
-    '.netproof-label-nodata{color:#777;font-style:italic;}';
-  document.head.appendChild(style);
-  styleInjected = true;
+function onPointerDown(event) {
+  if (isInteractiveTarget(event)) {
+    pickDown = null;
+    return;
+  }
+  pickDown = { x: event.clientX, y: event.clientY };
+}
+
+function onPointerUp(event) {
+  if (!pickDown) return;
+  const dx = event.clientX - pickDown.x;
+  const dy = event.clientY - pickDown.y;
+  pickDown = null;
+  // A drag is not a click (same 6 px threshold as interaction.js).
+  if (dx * dx + dy * dy > CLICK_MOVE_THRESHOLD_PX * CLICK_MOVE_THRESHOLD_PX) return;
+  if (isInteractiveTarget(event)) return;
+  const id = pickComponentId(event);
+  if (id) {
+    openDetailCallout(id);
+  } else {
+    // Clicking empty space closes the detail callout and any Repair
+    // diff callout; interaction.js deselects on the same press.
+    closeDetailCallout();
+    closeRepairDiffs();
+  }
+}
+
+function pickComponentId(event) {
+  if (!THREE || !camera || !container) return null;
+  const rect = container.getBoundingClientRect();
+  if (!rect.width || !rect.height) return null;
+  const nx = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  const ny = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+  const raycaster = new THREE.Raycaster();
+  raycaster.setFromCamera(new THREE.Vector2(nx, ny), camera);
+  const roots = Object.values(lastMeshes).filter(Boolean);
+  if (!roots.length) return null;
+  const hits = raycaster.intersectObjects(roots, true);
+  for (const hit of hits) {
+    let obj = hit.object;
+    while (obj) {
+      const cid = obj.userData && obj.userData.componentId;
+      if (cid && lastMeshes[cid]) return String(cid);
+      obj = obj.parent;
+    }
+  }
+  return null;
+}
+
+// Escape closes the detail callout first; the event is left to
+// propagate so interaction.js deselects on the same press.
+function onKeyDown(event) {
+  if (event.key !== 'Escape') return;
+  if (getDetailComponentId()) closeDetailCallout();
+}
+
+function attachPickListeners() {
+  if (listenersAttached || typeof window === 'undefined' || !container) return;
+  container.addEventListener('pointerdown', onPointerDown);
+  container.addEventListener('pointerup', onPointerUp);
+  window.addEventListener('keydown', onKeyDown);
+  listenersAttached = true;
+}
+
+function detachPickListeners() {
+  if (!listenersAttached) return;
+  if (container) {
+    container.removeEventListener('pointerdown', onPointerDown);
+    container.removeEventListener('pointerup', onPointerUp);
+  }
+  if (typeof window !== 'undefined') window.removeEventListener('keydown', onKeyDown);
+  listenersAttached = false;
+  pickDown = null;
 }
 
 // ---------------------------------------------------------------------------
@@ -362,7 +508,7 @@ function restoreMaterials() {
 }
 
 // ---------------------------------------------------------------------------
-// Labels
+// Report values per component (Report-only; handed to the callouts)
 // ---------------------------------------------------------------------------
 
 function nodesFromReport(report) {
@@ -381,24 +527,18 @@ function nodesFromReport(report) {
   return out;
 }
 
-function ensureLabel(id) {
-  let label = labels.get(id);
-  if (label) return label;
-  ensureLabelLayer();
-  const el = document.createElement('div');
-  el.className = 'netproof-label';
-  el.dataset.componentId = id;
-  const titleEl = document.createElement('div');
-  titleEl.className = 'netproof-label-title';
-  titleEl.textContent = id;
-  const bodyEl = document.createElement('div');
-  bodyEl.className = 'netproof-label-body';
-  el.appendChild(titleEl);
-  el.appendChild(bodyEl);
-  if (labelLayer) labelLayer.appendChild(el);
-  label = { el, bodyEl, anchor: null };
-  labels.set(id, label);
-  return label;
+// Measured values for one component, straight from the Report.
+// A missing value stays undefined here; the callout renders "—".
+function componentMeasurements(id, nodes, nodeVoltages, branchCurrents, power) {
+  const voltages = [];
+  for (const node of nodes || []) {
+    voltages.push({ node, value: lookupCI(nodeVoltages, node) });
+  }
+  return {
+    voltages,
+    current: lookupCI(branchCurrents, id),
+    power: lookupCI(power, id),
+  };
 }
 
 /**
@@ -406,56 +546,37 @@ function ensureLabel(id) {
  * Report are shown; a missing value leaves its line out entirely.
  * Line 1: node voltages, e.g. "vcc 9.00 V · led 2.00 V"
  * Line 2: current and power, e.g. "14.9 mA · 104.3 mW"
+ * Kept for callers that still render a one-line summary; the canvas
+ * callouts in callouts.js read componentMeasurements() instead.
  */
-function buildLabelLines(id, nodes, nodeVoltages, branchCurrents, power) {
+export function buildLabelLines(id, nodes, nodeVoltages, branchCurrents, power) {
+  const m = componentMeasurements(id, nodes, nodeVoltages, branchCurrents, power);
   const lines = [];
   const voltParts = [];
-  for (const node of nodes || []) {
-    const v = lookupCI(nodeVoltages, node);
-    if (isNum(v)) voltParts.push(node + ' ' + fmtVolts(v));
+  for (const v of m.voltages) {
+    if (isNum(v.value)) voltParts.push(v.node + ' ' + fmtVolts(v.value));
   }
   if (voltParts.length) lines.push(voltParts.join(' · '));
   const ipParts = [];
-  const i = lookupCI(branchCurrents, id);
-  if (isNum(i)) ipParts.push(fmtAmps(i));
-  const p = lookupCI(power, id);
-  if (isNum(p)) ipParts.push(fmtWatts(p));
+  if (isNum(m.current)) ipParts.push(fmtAmps(m.current));
+  if (isNum(m.power)) ipParts.push(fmtWatts(m.power));
   if (ipParts.length) lines.push(ipParts.join(' · '));
   return lines;
 }
 
-/** World-space anchor for a label: top-centre of the mesh's bounding box. */
-function computeAnchor(mesh) {
-  if (!THREE || !mesh) return null;
-  try {
-    if (typeof THREE.Box3 === 'function') {
-      const box = new THREE.Box3().setFromObject(mesh);
-      const center = box.getCenter(new THREE.Vector3());
-      return new THREE.Vector3(center.x, box.max.y + 0.15, center.z);
-    }
-    if (typeof mesh.getWorldPosition === 'function') {
-      return mesh.getWorldPosition(new THREE.Vector3());
-    }
-  } catch (e) {
-    // A mesh with no geometry (or not yet in the scene) has no anchor;
-    // its label stays hidden rather than piling up at the origin.
-    return null;
-  }
-  return null;
-}
-
 /**
- * Refresh all labels and component colours from a Report.
+ * Refresh callouts and component colours from a Report.
  *
  *   updateOverlays(report, meshesById)
  *
- * meshesById: { [componentId]: THREE.Object3D }. Labels are created for
- * every mesh present and removed for components that disappeared. An
- * optional third argument { nodesById } overrides node lookup for a call.
+ * meshesById: { [componentId]: THREE.Object3D }. An optional third
+ * argument { nodesById } overrides node lookup for a call.
  */
 export function updateOverlays(report, meshesById, extra) {
   if (!report || typeof report !== 'object') return;
   const meshes = meshesById || {};
+  lastMeshes = meshes;
+  lastReport = report;
   const findings = Array.isArray(report.findings) ? report.findings : [];
   const nodeVoltages = report.node_voltages || report.nodeVoltages || {};
   const branchCurrents = report.branch_currents || report.branchCurrents || {};
@@ -466,12 +587,11 @@ export function updateOverlays(report, meshesById, extra) {
     nodesFromReport(report),
     (extra && extra.nodesById) || {}
   );
+  lastNodesById = nodes;
 
-  const seen = new Set();
   for (const id of Object.keys(meshes)) {
     const mesh = meshes[id];
     if (!mesh) continue;
-    seen.add(id);
 
     // Colour: worst finding touching this component. An untouched
     // component is PASS green only when the backend verdict is PASS
@@ -483,115 +603,41 @@ export function updateOverlays(report, meshesById, extra) {
     const sev = severityForComponent(id, findings, report.verdict) || 'UNKNOWN';
     const color = SEVERITY_COLORS[sev];
     tintMesh(mesh, color);
-
-    // Label text — numbers straight from the Report, nothing invented.
-    const label = ensureLabel(id);
-    label.el.style.borderColor = color;
-    label.el.dataset.severity = sev;
-    const lines = buildLabelLines(id, nodes[id], nodeVoltages, branchCurrents, power);
-    if (lines.length) {
-      label.bodyEl.textContent = lines.join('\n');
-      label.bodyEl.classList.remove('netproof-label-nodata');
-    } else {
-      label.bodyEl.textContent = 'no sim data';
-      label.bodyEl.classList.add('netproof-label-nodata');
-    }
-    label.anchor = computeAnchor(mesh);
   }
 
-  // Drop labels for components no longer in the scene.
-  for (const [id, label] of labels) {
-    if (!seen.has(id)) {
-      if (label.el && typeof label.el.remove === 'function') label.el.remove();
-      labels.delete(id);
-    }
+  // Per-component measured values for the detail callouts, straight
+  // from the Report (current/power looked up case-insensitively:
+  // ngspice lowercases branch-current keys while power keeps the id).
+  const measuredById = {};
+  for (const id of Object.keys(meshes)) {
+    measuredById[id] = componentMeasurements(
+      id, nodes[id], nodeVoltages, branchCurrents, power);
   }
 
+  try {
+    updateCallouts(report, meshes, { nodesById: nodes, measuredById });
+  } catch (error) {
+    // A callout failure must never break tinting or flow dots.
+    if (typeof console !== 'undefined' && console.error) {
+      console.error('[netproof 3D] callout update failed', error);
+    }
+  }
   updateLabelPositions();
 }
 
 // ---------------------------------------------------------------------------
-// Label projection (call every frame after the camera moves)
+// Callout projection (call every frame after the camera moves)
 // ---------------------------------------------------------------------------
 
 /**
- * Re-project every label from its 3D anchor to screen pixels.
- * Pass the camera, or rely on the one given to initOverlays().
- * Labels whose anchor is behind the camera are hidden.
- *
- * Overlap: the LED circuit's parts sit 1.5 scene units apart on one
- * line (V1, R1, D1), so their full labels (~170 px wide at the framed
- * distance) land on the same screen row and overlap. Labels are
- * therefore placed left-to-right and any label whose box would overlap
- * an already-placed one is stacked one label-height up (and, if there
- * is no room above the container, below its anchor instead) until it
- * is clear. Full label text is kept for every part; nothing is
- * shortened to a tag. Recomputed from scratch every frame, so a
- * camera move re-stacks the labels for the new projection.
+ * Re-project every callout from its 3D anchor to screen pixels and
+ * re-run the edge-lane layout from scratch, so orbit / zoom / pan
+ * move the boxes and leader lines with the parts. Pass the camera,
+ * or rely on the one given to initOverlays(). Kept name:
+ * main3d.js calls updateLabelPositions(camera) in its render loop.
  */
 export function updateLabelPositions(cam) {
-  const activeCam = cam || camera;
-  if (!THREE || !activeCam || !labelLayer) return;
-  const width = labelLayer.clientWidth || (typeof window !== 'undefined' ? window.innerWidth : 0);
-  const height = labelLayer.clientHeight || (typeof window !== 'undefined' ? window.innerHeight : 0);
-  if (!width || !height) return;
-  const GAP = 6; // px kept clear between stacked labels
-  const LIFT = 8; // px between a label's bottom edge and its anchor
-  const v = new THREE.Vector3();
-  const projected = [];
-  for (const label of labels.values()) {
-    if (!label.anchor) {
-      label.el.style.display = 'none';
-      continue;
-    }
-    v.copy(label.anchor).project(activeCam);
-    if (v.z > 1 || v.z < -1) {
-      label.el.style.display = 'none';
-      continue;
-    }
-    const x = (v.x * 0.5 + 0.5) * width;
-    const y = (-v.y * 0.5 + 0.5) * height;
-    label.el.style.display = 'block';
-    projected.push({ label, x, y });
-  }
-  // Leftmost keeps its lane; neighbours stack up from it.
-  projected.sort((a, b) => a.x - b.x || a.y - b.y);
-  const placed = []; // { left, right, top, bottom } in container px
-  for (const { label, x, y } of projected) {
-    const w = label.el.offsetWidth || 92;
-    const h = label.el.offsetHeight || 48;
-    let dy = 0;
-    let below = false; // false: stack up; true: no room above, stack down
-    for (let attempt = 0; attempt < 12; attempt++) {
-      const box = {
-        left: x - w / 2,
-        right: x + w / 2,
-        top: y - h - LIFT + dy,
-        bottom: y - LIFT + dy,
-      };
-      const hit = placed.find((p) =>
-        box.left < p.right + GAP && box.right > p.left - GAP &&
-        box.top < p.bottom + GAP && box.bottom > p.top - GAP);
-      if (!hit) break;
-      if (!below && box.top - (h + GAP) < 0) {
-        // No room for another lane above: drop below the anchor.
-        below = true;
-        dy = h + 2 * LIFT;
-      } else if (below) {
-        dy += h + GAP;
-      } else {
-        dy -= h + GAP;
-      }
-    }
-    placed.push({
-      left: x - w / 2,
-      right: x + w / 2,
-      top: y - h - LIFT + dy,
-      bottom: y - LIFT + dy,
-    });
-    label.el.style.transform =
-      'translate(-50%, calc(-100% - 8px)) translate(' + x.toFixed(1) + 'px, ' + (y + dy).toFixed(1) + 'px)';
-  }
+  layoutCallouts(cam || camera);
 }
 
 // ---------------------------------------------------------------------------
@@ -658,6 +704,11 @@ function pointAt(flow, u) {
   return flow.points[seg].clone().lerp(flow.points[seg + 1], t);
 }
 
+function prefersReducedMotion() {
+  return typeof window !== 'undefined' && window.matchMedia
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
 /**
  * Advance the current-flow dots one frame.
  *
@@ -667,11 +718,15 @@ function pointAt(flow, u) {
  * only while the current is non-zero; speed grows with log|I| and the
  * sign picks the direction (positive = along the stored wire points,
  * negative = reversed). Call every frame from the render loop.
+ * Under prefers-reduced-motion the dots do not travel: they render
+ * once at their initial positions and stay static (current direction
+ * is still shown as text in the callouts, never by motion alone).
  */
 export function animateFlow(deltaTime, branchCurrents) {
   if (!THREE || !scene) return;
   const dt = Math.min(Math.max(Number(deltaTime) || 0, 0), MAX_DELTA_TIME_S);
   const currents = branchCurrents || {};
+  const frozen = prefersReducedMotion();
 
   // Lazily build dot pools for wired branches that now carry current.
   // Branch-current keys are lowercase ("r1") while wire ids keep the
@@ -688,9 +743,11 @@ export function animateFlow(deltaTime, branchCurrents) {
     for (const dot of flow.dots) dot.visible = active;
     if (!active) continue;
     const direction = i > 0 ? 1 : -1;
-    const rate = FLOW_BASE_RATE +
-      FLOW_RATE_PER_DECADE * Math.log10(1 + Math.abs(i) / FLOW_REFERENCE_CURRENT_A);
-    flow.phase = (((flow.phase + direction * rate * dt) % 1) + 1) % 1;
+    if (!frozen) {
+      const rate = FLOW_BASE_RATE +
+        FLOW_RATE_PER_DECADE * Math.log10(1 + Math.abs(i) / FLOW_REFERENCE_CURRENT_A);
+      flow.phase = (((flow.phase + direction * rate * dt) % 1) + 1) % 1;
+    }
     for (let k = 0; k < flow.dots.length; k++) {
       const u = flow.phase + k / flow.dots.length;
       flow.dots[k].position.copy(pointAt(flow, u));
@@ -703,21 +760,22 @@ export function animateFlow(deltaTime, branchCurrents) {
 // ---------------------------------------------------------------------------
 
 export function disposeOverlays() {
-  for (const label of labels.values()) {
-    if (label.el && typeof label.el.remove === 'function') label.el.remove();
-  }
-  labels.clear();
+  detachPickListeners();
+  try { disposeCallouts(); } catch (error) { /* callouts may never have initialised */ }
+  calloutHandle = null;
   for (const flow of flows.values()) {
     for (const dot of flow.dots) {
       if (scene) scene.remove(dot);
     }
   }
   flows.clear();
-  if (labelLayer && typeof labelLayer.remove === 'function') labelLayer.remove();
-  labelLayer = null;
   restoreMaterials();
   dotGeometry = null;
   dotMaterial = null;
   scene = null;
   camera = null;
+  container = null;
+  lastMeshes = {};
+  lastReport = null;
+  lastNodesById = {};
 }

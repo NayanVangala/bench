@@ -1,96 +1,278 @@
-/* Netproof bench-instrument theme.
-   Light paper first (arena verdict B); dark theme via [data-theme="dark"]
-   on <html>, toggled by #theme-toggle and persisted in localStorage.
-   All colours are CSS custom properties. The ONLY saturated colours on
-   the page are the verdict colours (PASS #1a7f37, WARN #b45309,
-   STOP #b00020, same in both themes, white text: 5.0:1 or better).
-   Agent colours live ONLY inside the dark console, never on light
-   surfaces. Muted text is #595959 on paper (7.0:1) and #b3aea1 on the
-   dark panel (6.6:1): AA in both themes. */
+@import url('https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap');
+
+/* ==========================================================================
+   Netproof blueprint theme. WHOLESALE REBUILD, 2026-11-15.
+   Replaces the old paper/card stylesheet entirely. Do not mix old card
+   styles back in; the blueprint shell below is the whole UI.
+
+   The one memorable thing: a blueprint sheet that proves a circuit is
+   safe to build. Blue grid outside, white sheet inside, one green
+   Check button, verdict in plain words. The verdict is the stamp on
+   the drawing, not a dashboard card.
+
+   Structure (see blueprint-shell-spec.md):
+     body            blueprint blue + 24px/120px grid, 16px outer margin
+     header          top bar, top of the white frame
+     main            white frame body, scrolls internally
+     .layout         pale canvas (#EEF5FF, 16px radius) inside the frame
+     footer          frame bottom, trust line
+     #status-strip   four mono chips on the blue grid, OUTSIDE the frame
+     #drawer         5-tab details drawer (Netlist/Sweep/Repairs/Export/Log)
+   The index.html rebuild owns the new markup (#canvas, #drawer,
+   #status-strip, #check-btn, .topbar). This sheet styles BOTH the
+   current markup (so the page is usable today) and the new shell
+   classes (so the rebuilt markup lands on finished styles). No HTML
+   ids or JS were changed by this file.
+
+   Blueprint blue: #0B3D91 ONLY (coordinator decision). White on it is
+   10.04:1 (AAA). It is the darkest of the three proposals and the only
+   one adopted; #14508C and #1C4E9D appear nowhere in this file.
+
+   Contrast, all measured with the WCAG relative-luminance formula:
+     white on #0B3D91            10.04:1  AAA
+     #FFD166 focus on #0B3D91     6.97:1  (focus ring, see below)
+     #FFD166 focus on #123A6D     7.86:1
+     #0A2A5E keyline on white    13.95:1  (dark ring behind the amber
+                                            focus ring, so the ring also
+                                            reads on white paper, where
+                                            #FFD166 alone is 1.44:1)
+     #12290A ink on CTA #7ED957   8.87:1  AAA (white on #7ED957 is
+                                            1.76:1: NEVER white on CTA)
+     muted #595959 on paper       6.65:1  (the old sheet claimed 7.0:1;
+                                            6.65:1 is the measured value)
+     muted #595959 on white       7.00:1
+     #3D5A78 muted on #EEF5FF     6.53:1
+     #4A6FA5 eyebrow on #EEF5FF   4.66:1  (passes AA, kept)
+     severity TEXT on white: PASS #166534 7.13:1, WARN #92400E 7.09:1,
+       STOP #991B1B 8.31:1, UNKNOWN #4B5563 7.56:1
+     verdict FILLS (unchanged): PASS #1A7F37 white 5.08:1, WARN #B45309
+       white 5.02:1, STOP #B00020 white 7.33:1. Fills and text colours
+       are separate tokens on purpose.
+     page grid lines vs #0B3D91: fine rgba(255,255,255,0.45) 3.27:1,
+       heavy rgba(255,255,255,0.55) 4.16:1, both >= 3:1 non-text.
+     dark muted #A9C6E8 on #0A2238  9.19:1; ink #E8F1FA on #102E4C 12.12:1
+
+   Status chip 2 reads "NGSPICE - DC OP" with NO version number:
+   GET /health returns only a boolean ngspice flag, no version, so
+   no version is ever rendered. (Shell spec example "NGSPICE 46" is
+   not a fact and must not ship.)
+
+   Hard rules kept: no build step (plain CSS + Google Fonts import),
+   AA contrast, #FFD166 focus rings, 44px minimum targets, reduced
+   motion support, both themes (manual data-theme toggle + a
+   prefers-color-scheme fallback for first paint).
+   ========================================================================== */
 
 :root,
 [data-theme="light"] {
   color-scheme: light;
-  --paper: #faf9f5;
-  --panel: #ffffff;
-  --panel-2: #f3f1ea;
-  --ink: #1c1a17;
-  --muted: #595959;
-  --line: #d9d5cc;
-  --line-strong: #b9b4a8;
-  --focus: #1d4ed8;
-  --btn-bg: #1c1a17;
-  --btn-ink: #faf9f5;
-  --row-selected: #fdf3d7;
-  --readonly-bg: #f3f1ea;
-  --scene-bg: #e9e7e1;
-  --scene-ink: #595959;
-  --pass: #1a7f37;
-  --warn: #b45309;
-  --stop: #b00020;
-  --on-verdict: #ffffff;
-  --sev-pass: #1a7f37;
-  --sev-warn: #b45309;
-  --sev-stop: #b00020;
+
+  /* Blueprint core. --bp-blue is the ONLY blueprint blue. */
+  --bp-blue: #0B3D91;
+  --bp-blue-deep: #123A6D;
+  --bp-blue-deepest: #0A2A5E;
+  --bp-blue-mid: #0B2F6B;
+  --bp-blue-bright: #1E40AF; /* hover/active only, never a text surface */
+  --blueprint: #0B3D91;
+  --blueprint-deep: #0A2A5E;
+  --bp-canvas: #EEF5FF;
+  --bp-panel: #FFFFFF;
+  --bp-panel-2: #DCE9F8;
+  --bp-grid-fine: rgba(255, 255, 255, 0.45);  /* 24px, 3.27:1 vs blue */
+  --bp-grid-heavy: rgba(255, 255, 255, 0.55); /* 120px, 4.16:1 vs blue */
+  --bp-ink: #0B2A4A;
+  --bp-muted: #3D5A78;
+  --bp-line: #B9D2EC;
+  --bp-line-strong: #7FA6CF;
+  --bp-focus: #FFD166;
+  --focus-inner: #0A2A5E; /* dark keyline behind the amber focus ring */
+  --link: #0B3D91;
+
+  /* Frame and canvas. */
+  --frame: #FFFFFF;
+  --frame-line: rgba(20, 58, 117, 0.18);
+  --canvas: #EEF5FF;
+  --canvas-line: #D3E3FA;
+  --canvas-ink-soft: #4A6FA5; /* eyebrow on canvas, 4.66:1 */
+  --crop: rgba(255, 255, 255, 0.75);
+  --status-chip-line: rgba(255, 255, 255, 0.40);
+  --shell-gap: 12px;
+  --frame-radius: 24px;
+  --canvas-radius: 16px;
+  --card-radius: 16px;
+  --topbar-h: 64px;
+  --status-h: 36px;
+  --grid-fine: 24px;
+  --grid-heavy: 120px;
+
+  /* Verdict fills (unchanged in both themes) and verdict text. */
+  --pass: #1A7F37;
+  --warn: #B45309;
+  --stop: #B00020;
+  --on-verdict: #FFFFFF;
+  /* Severity TEXT colours (darker than the fills, for text on white). */
+  --sev-pass: #166534;
+  --sev-warn: #92400E;
+  --sev-stop: #991B1B;
+  --sev-unknown: #4B5563;
   --sev-info: #595959;
-  --chip-line: #b9b4a8;
-  --input-bg: #ffffff;
+
+  /* CTA green: dark ink only, never white text (1.76:1). */
+  --cta: #7ED957;
+  --cta-hover: #6FCB49;
+  --cta-ink: #12290A; /* 8.87:1 on #7ED957 */
+  --on-cta: #12290A;
+
+  /* Legacy token names, kept as aliases so older selectors still work. */
+  --paper: #EEF5FF;
+  --panel: #FFFFFF;
+  --panel-2: #DCE9F8;
+  --ink: #0B2A4A;
+  --muted: #595959;
+  --line: #B9D2EC;
+  --line-strong: #7FA6CF;
+  --focus: #FFD166;
+  --btn-bg: #0B2A4A;
+  --btn-ink: #FFFFFF;
+  --row-selected: #DBEAFE;
+  --readonly-bg: #DCE9F8;
+  --scene-bg: #0B2F4D; /* 3D view: dark blueprint, both themes */
+  --scene-ink: #DBEAFE;
+  --input-bg: #FFFFFF;
   --console-bg: #141412;
-  --console-ink: #e8e6e0;
-  --console-dim: #9a968c;
+  --console-ink: #E8E6E0;
+  --console-dim: #9A968C;
   --mock-chip-bg: #141412;
-  --mock-chip-ink: #ffe600;
+  --mock-chip-ink: #FFE600;
+  --chip-line: #7FA6CF;
 }
 
 [data-theme="dark"] {
   color-scheme: dark;
-  --paper: #191917;
-  --panel: #232320;
-  --panel-2: #2c2c28;
-  --ink: #edeae2;
-  --muted: #b3aea1;
-  --line: #3d3d37;
-  --line-strong: #57574f;
-  --focus: #8ab4ff;
-  --btn-bg: #edeae2;
-  --btn-ink: #191917;
-  --row-selected: #3a3220;
-  --readonly-bg: #2c2c28;
-  --scene-bg: #141412;
-  --scene-ink: #b3aea1;
-  --pass: #1a7f37;
-  --warn: #b45309;
-  --stop: #b00020;
-  --on-verdict: #ffffff;
-  --sev-pass: #4ade80;
-  --sev-warn: #fbbf24;
-  --sev-stop: #f87171;
-  --sev-info: #b3aea1;
-  --chip-line: #57574f;
-  --input-bg: #232320;
+  --bp-canvas: #0A2238;
+  --bp-panel: #102E4C;
+  --bp-panel-2: #16395C;
+  --bp-ink: #E8F1FA;
+  --bp-muted: #A9C6E8;
+  --bp-line: #22486E;
+  --bp-line-strong: #3D6A99;
+  --bp-focus: #FFD166;
+  --focus-inner: #0A2A5E;
+  --link: #8AB4FF;
+  --frame: #102E4C; /* frame is never pure white in dark theme */
+  --frame-line: rgba(255, 255, 255, 0.14);
+  --canvas: #0A2238;
+  --canvas-line: #2A3F5C;
+  --canvas-ink-soft: #8AB4FF;
+  --blueprint: #0A2540;
+  --blueprint-deep: #071A30;
+  --bp-grid-fine: rgba(255, 255, 255, 0.05);
+  --bp-grid-heavy: rgba(255, 255, 255, 0.12);
+  --sev-pass: #4ADE80;
+  --sev-warn: #FBBF24;
+  --sev-stop: #F87171;
+  --sev-unknown: #A9C6E8;
+  --sev-info: #A9C6E8;
+  /* --bp-blue, --pass, --warn, --stop, --cta, --cta-ink unchanged. */
+  --paper: #0A2238;
+  --panel: #102E4C;
+  --panel-2: #16395C;
+  --ink: #E8F1FA;
+  --muted: #A9C6E8;
+  --line: #22486E;
+  --line-strong: #3D6A99;
+  --focus: #FFD166;
+  --btn-bg: #E8F1FA;
+  --btn-ink: #0A2238;
+  --row-selected: #1E4A75;
+  --readonly-bg: #16395C;
+  --scene-bg: #0B2F4D;
+  --scene-ink: #DBEAFE;
+  --input-bg: #0A2238;
   --console-bg: #141412;
-  --console-ink: #e8e6e0;
-  --console-dim: #9a968c;
+  --console-ink: #E8E6E0;
+  --console-dim: #9A968C;
   --mock-chip-bg: #000000;
-  --mock-chip-ink: #ffe600;
+  --mock-chip-ink: #FFE600;
+  --chip-line: #3D6A99;
+}
+
+/* First-paint fallback: if no data-theme is set yet, follow the OS. The
+   inline script in index.html sets data-theme before paint in practice,
+   so this is a belt-and-braces rule, not the mechanism. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-theme="dark"]) {
+    color-scheme: dark;
+    --bp-canvas: #0A2238;
+    --bp-panel: #102E4C;
+    --bp-panel-2: #16395C;
+    --bp-ink: #E8F1FA;
+    --bp-muted: #A9C6E8;
+    --bp-line: #22486E;
+    --bp-line-strong: #3D6A99;
+    --link: #8AB4FF;
+    --frame: #102E4C;
+    --frame-line: rgba(255, 255, 255, 0.14);
+    --canvas: #0A2238;
+    --canvas-line: #2A3F5C;
+    --canvas-ink-soft: #8AB4FF;
+    --blueprint: #0A2540;
+    --blueprint-deep: #071A30;
+    --bp-grid-fine: rgba(255, 255, 255, 0.05);
+    --bp-grid-heavy: rgba(255, 255, 255, 0.12);
+    --sev-pass: #4ADE80;
+    --sev-warn: #FBBF24;
+    --sev-stop: #F87171;
+    --sev-unknown: #A9C6E8;
+    --sev-info: #A9C6E8;
+    --paper: #0A2238;
+    --panel: #102E4C;
+    --panel-2: #16395C;
+    --ink: #E8F1FA;
+    --muted: #A9C6E8;
+    --line: #22486E;
+    --line-strong: #3D6A99;
+    --btn-bg: #E8F1FA;
+    --btn-ink: #0A2238;
+    --row-selected: #1E4A75;
+    --readonly-bg: #16395C;
+    --input-bg: #0A2238;
+    --chip-line: #3D6A99;
+  }
 }
 
 * { box-sizing: border-box; }
 
 html { scroll-behavior: smooth; }
 
+/* Page background: the blueprint sheet. Gradients only, no image asset.
+   Fine 24px grid and heavy 120px grid share one origin, so every heavy
+   line lands on a fine line (120 = 5 x 24). The vertical gradient to
+   --blueprint-deep keeps the sheet from looking flat. The grid covers
+   the whole viewport, including behind the status strip. */
 body {
-  font-family: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-family: "Inter Tight", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   margin: 0;
-  background: var(--paper);
-  color: var(--ink);
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  overflow: hidden;
+  position: relative;
+  background-color: var(--blueprint);
+  background-image:
+    linear-gradient(var(--bp-grid-heavy) 1px, transparent 1px),
+    linear-gradient(90deg, var(--bp-grid-heavy) 1px, transparent 1px),
+    linear-gradient(var(--bp-grid-fine) 1px, transparent 1px),
+    linear-gradient(90deg, var(--bp-grid-fine) 1px, transparent 1px),
+    linear-gradient(180deg, var(--blueprint) 0%, var(--blueprint-deep) 100%);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px, 100% 100%;
+  color: var(--bp-ink);
   font-size: 16px;
   line-height: 1.5;
 }
 
-/* The page itself never scrolls horizontally: a wide table scrolls
-   inside its own .table-wrap instead (see below). Safety net only;
-   the wrapper is what actually contains the table. */
+/* The page itself never scrolls horizontally. */
 html, body { overflow-x: hidden; }
 
 /* Every value, node name, unit and rule ID is monospace. */
@@ -107,140 +289,608 @@ td input,
 td select,
 #scene3d-status,
 #repair-history .diff {
-  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
+
+/* Visually hidden helper (a11y spec 9.2, exact). */
+.visually-hidden {
+  position: absolute !important;
+  width: 1px; height: 1px;
+  margin: -1px; padding: 0; border: 0;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+/* Visible keyboard focus on EVERY control. Amber #FFD166, 3px solid,
+   2px offset, plus a dark keyline so the ring reads on white paper
+   (amber alone is 1.44:1 on white) as well as on blueprint blue
+   (amber alone is 6.97:1 there). Never remove a focus ring without
+   this replacement. No outline:none anywhere in this sheet except
+   the mouse-only rule below. */
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px var(--focus-inner);
+  border-radius: 4px;
+}
+:focus:not(:focus-visible) {
+  outline: none; /* mouse/touch only; keyboard keeps :focus-visible */
+}
+/* Blueprint surfaces get the same double ring, stated explicitly so a
+   later paper-surface rule can never strip it. */
+.bp-surface,
+.bp-surface :focus-visible,
+#netproof-edit-panel.bp-drawer :focus-visible,
+.netproof-callout:focus-visible,
+#status-strip :focus-visible {
+  --focus: #FFD166;
+  --focus-inner: #0A2A5E;
+}
+.bp-surface :focus-visible,
+#netproof-edit-panel.bp-drawer :focus-visible,
+.netproof-callout:focus-visible {
+  outline: 3px solid #FFD166;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px #0A2A5E;
+  border-radius: 4px;
+}
+/* Focus is never hidden under a sticky header, drawer, or sheet. */
+.bp-surface :focus-visible,
+.netproof-callout:focus-visible,
+#netproof-edit-panel :focus-visible {
+  scroll-margin: 72px;
+}
+/* Table rows keep the existing inset ring so it does not spill into
+   neighbouring rows; no outer keyline there. */
+tr:focus-visible { outline-offset: -3px; box-shadow: none; }
+td input:focus-visible,
+td select:focus-visible { outline-offset: -1px; box-shadow: none; }
 
 /* Skip link: first tab stop, visible on focus. */
 .skip-link {
   position: absolute;
   left: 16px;
   top: -48px;
-  background: var(--btn-bg);
-  color: var(--btn-ink);
+  background: var(--bp-blue-deepest);
+  color: #FFFFFF;
   padding: 8px 14px;
   border-radius: 6px;
-  z-index: 10;
+  z-index: 60;
   transition: top 0.15s ease;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
 }
 .skip-link:focus { top: 8px; }
 
-header {
-  background: var(--panel);
-  border-bottom: 1px solid var(--line);
-  padding: 12px 16px;
+a { color: var(--link); text-underline-offset: 3px; }
+a:hover { color: var(--bp-blue-deep); }
+[data-theme="dark"] a:hover { color: #DBEAFE; }
+
+::selection { background: var(--bp-blue); color: #FFFFFF; }
+
+/* ==========================================================================
+   FRAME ASSEMBLY
+   The white frame is three siblings (header, main, footer) that touch
+   exactly, so they read as one sheet: 24px radius, 1px frame border,
+   one shadow. The frame plus the status strip fill the viewport minus
+   32px (16px body padding on each side). The page does not scroll; the
+   frame body scrolls internally. Crop marks are the header/footer
+   pseudos, one L per frame corner, 6px outside the corner, 20px arms
+   (14px on mobile). Do NOT also add span.crop-mark elements: the
+   marks already render, and a second set would double them.
+   ========================================================================== */
+
+/* Top bar: brand left, command field centre, actions right. The current
+   header markup maps onto it directly (h1 + tagline + #theme-toggle). */
+header,
+.topbar {
+  background: var(--frame);
+  border: 1px solid var(--frame-line);
+  border-bottom: 1px solid var(--bp-line);
+  border-radius: var(--frame-radius) var(--frame-radius) 0 0;
+  box-shadow: 0 12px 32px rgba(10, 32, 72, 0.28);
+  padding: 10px 16px;
+  min-height: var(--topbar-h);
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
-  gap: 4px 16px;
+  align-items: center;
+  gap: 8px 12px;
+  flex: none;
+  position: relative;
 }
-header h1 {
+header h1,
+.topbar .wordmark {
   margin: 0;
-  font-size: 22px;
-  letter-spacing: 0.02em;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  color: var(--bp-ink);
+  line-height: 1.2;
 }
-header h1 .mono { font-size: 0.62em; color: var(--muted); letter-spacing: 0; }
-header p { margin: 0; color: var(--muted); font-size: 14px; flex: 1 1 280px; }
+header h1 .mono,
+.topbar .wordmark-sub {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--bp-muted);
+  letter-spacing: 0;
+}
+header p {
+  margin: 0;
+  color: var(--bp-muted);
+  font-size: 14px;
+  flex: 1 1 280px;
+}
 #theme-toggle { margin-left: auto; }
 
-main { max-width: 1280px; margin: 0 auto; padding: 16px; }
+/* Brand cluster (new markup): circuit-glyph logo + wordmark. Not a link,
+   not a button; clicking it does nothing. */
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+}
+.brand-mark {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  display: block;
+}
+.brand-mark svg { display: block; width: 100%; height: 100%; }
 
-/* Two-column bench layout on desktop; single column below 900px. */
-.layout {
-  display: grid;
-  grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
+/* Command field (new markup): the goal input, centred, max 640px. */
+.command-field {
+  flex: 1;
+  max-width: 640px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+/* Crop marks: four L shapes, one per frame corner, outside the frame. */
+header::before,
+header::after,
+footer::before,
+footer::after {
+  content: "";
+  position: absolute;
+  width: 20px;
+  height: 20px;
+  pointer-events: none;
+  z-index: 5;
+}
+header::before { top: -6px; left: -6px; border-top: 1.5px solid var(--crop); border-left: 1.5px solid var(--crop); }
+header::after { top: -6px; right: -6px; border-top: 1.5px solid var(--crop); border-right: 1.5px solid var(--crop); }
+footer::before { bottom: -6px; left: -6px; border-bottom: 1.5px solid var(--crop); border-left: 1.5px solid var(--crop); }
+footer::after { bottom: -6px; right: -6px; border-bottom: 1.5px solid var(--crop); border-right: 1.5px solid var(--crop); }
+
+/* Frame body: white, scrolls internally. Its child .layout is the pale
+   canvas. When the rebuilt markup lands, main holds #canvas instead and
+   #canvas takes the scroll; until then main scrolls. */
+main {
+  background: var(--frame);
+  border-left: 1px solid var(--frame-line);
+  border-right: 1px solid var(--frame-line);
+  box-shadow: 0 12px 32px rgba(10, 32, 72, 0.28);
+  padding: 12px 16px 16px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  scrollbar-width: thin;
+  scrollbar-color: var(--bp-line-strong) transparent;
+}
+main::-webkit-scrollbar { width: 10px; }
+main::-webkit-scrollbar-thumb { background: var(--bp-line-strong); border-radius: 5px; }
+main::-webkit-scrollbar-track { background: transparent; }
+
+/* Pale canvas inside the frame. Single scrolling column: the old
+   two-column .layout (5fr/6fr) is retired. The column divs are
+   display:contents so sections order in one flow: verdict first
+   (the on-canvas callout, top-left in reading order), then the
+   command/input card, 3D view, findings, netlist, sweep, repairs. */
+.layout,
+#canvas {
+  background: var(--canvas);
+  border: 1px solid var(--canvas-line);
+  border-radius: var(--canvas-radius);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
   gap: 16px;
-  align-items: start;
+  min-width: 0;
 }
-.col-left, .col-right { display: grid; gap: 16px; align-content: start; min-width: 0; }
-@media (max-width: 900px) {
-  .layout { grid-template-columns: 1fr; }
+#canvas {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.col-left, .col-right { display: contents; }
+#verdict-section { order: 1; }
+#input-section { order: 2; }
+#scene3d-section { order: 3; }
+#findings-section { order: 4; }
+#netlist-section { order: 5; }
+#sweep-section { order: 6; }
+#repair-section { order: 7; }
+
+/* Frame bottom: the trust line, centred, inside the frame. */
+footer {
+  background: var(--frame);
+  border: 1px solid var(--frame-line);
+  border-top: none;
+  border-radius: 0 0 var(--frame-radius) var(--frame-radius);
+  box-shadow: 0 12px 32px rgba(10, 32, 72, 0.28);
+  padding: 12px 16px 16px;
+  color: var(--bp-muted);
+  font-size: 13px;
+  text-align: center;
+  flex: none;
+  position: relative;
+}
+footer .mono { font-size: 12px; }
+/* If the footer moves inside the frame body as a caption (new markup),
+   it is borderless and transparent there. */
+main footer {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 16px 0 0;
 }
 
-section {
-  background: var(--panel);
-  border: 1px solid var(--line);
+/* ==========================================================================
+   STATUS STRIP (outside the frame, on the blue grid)
+   Four bordered mono chips, white text, no fill. Chip 2 is
+   "NGSPICE - DC OP": no version number ever (see header comment).
+   The verdict chip carries a 6px dot in the verdict colour with a 1px
+   white ring; hollow white circle while idle.
+   ========================================================================== */
+#status-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--status-h);
+  padding: 0 4px;
+  margin-top: var(--shell-gap);
+  flex: none;
+  overflow-x: visible;
+}
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 6px 12px;
+  border: 1px solid var(--status-chip-line);
+  border-radius: 999px;
+  background: transparent;
+  color: #FFFFFF;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.status-chip:hover { border-color: rgba(255, 255, 255, 0.7); }
+.status-chip .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: transparent;
+  border: 1px solid #FFFFFF;
+  flex: none;
+}
+.status-chip[data-verdict="pass"] .dot { background: #1A7F37; border-color: #FFFFFF; }
+.status-chip[data-verdict="warn"] .dot { background: #B45309; border-color: #FFFFFF; }
+.status-chip[data-verdict="stop"] .dot { background: #B00020; border-color: #FFFFFF; }
+
+/* ==========================================================================
+   BUTTONS. One primary action per step: green Check, blueprint-blue
+   Repair, everything else secondary. 44px minimum targets everywhere.
+   ========================================================================== */
+button {
+  font: inherit;
+  font-family: "Inter Tight", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  min-height: 44px;
+  min-width: 44px;
+  padding: 10px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--bp-line-strong);
+  background: var(--bp-panel);
+  color: var(--bp-ink);
+  cursor: pointer;
+  margin: 4px 8px 4px 0;
+  transition: background-color 0.15s ease-out, border-color 0.15s ease-out, opacity 0.15s ease-out;
+}
+button:hover { border-color: var(--bp-blue); background: var(--bp-panel-2); }
+button:active { background: var(--bp-panel-2); }
+button.secondary { background: transparent; color: var(--bp-ink); border-color: var(--bp-line-strong); }
+button.secondary:hover { border-color: var(--bp-blue); background: var(--bp-panel-2); }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+button:disabled:hover { border-color: var(--bp-line-strong); background: var(--bp-panel); }
+
+/* Green pill CTA: Run (image), Run (goal), and the single Check button
+   in the new top bar. Dark ink on green only, never white (1.76:1). */
+#run-image-btn,
+#run-goal-btn,
+#check-btn,
+.cta-btn {
+  background: var(--cta);
+  color: var(--cta-ink);
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-weight: 600;
+}
+#run-image-btn:hover,
+#run-goal-btn:hover,
+#check-btn:hover,
+.cta-btn:hover { background: var(--cta-hover); border-color: transparent; }
+#check-btn {
+  height: 44px;
+  min-width: 108px;
+  padding: 0 18px;
+  font-size: 14px;
+  margin: 0;
+  white-space: nowrap;
+}
+
+/* Blueprint-blue primary: Repair. It spends one of three irreversible
+   rounds, so it must not look like the free Re-check (secondary). */
+#repair-btn {
+  background: var(--bp-blue);
+  color: #FFFFFF;
+  border-color: transparent;
+}
+#repair-btn:hover { background: var(--bp-blue-deep); border-color: transparent; }
+
+/* Icon buttons in the top bar: upload, drawer toggle, theme toggle.
+   44x44, transparent, 1px border. The upload button gets a filled
+   state once a file is attached. */
+.icon-btn,
+#upload-btn,
+#drawer-toggle {
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border-radius: 10px;
-  padding: 14px;
+  background: transparent;
+  border: 1px solid var(--bp-line-strong);
+  color: var(--bp-ink);
+}
+.icon-btn:hover,
+#upload-btn:hover,
+#drawer-toggle:hover { border-color: var(--bp-blue); background: var(--bp-panel-2); }
+.icon-btn svg,
+#upload-btn svg { width: 20px; height: 20px; display: block; }
+/* Drawer toggle visible marker: a side-panel glyph drawn in CSS
+   (thick right bar = the drawer), plus a filled state when open. */
+#drawer-toggle::after {
+  content: "";
+  display: block;
+  width: 18px;
+  height: 14px;
+  border: 2px solid currentColor;
+  border-right-width: 6px;
+  border-radius: 2px;
+}
+#drawer-toggle[aria-expanded="true"],
+.icon-btn[aria-pressed="true"],
+#upload-btn.has-file {
+  background: var(--bp-panel-2);
+  border-color: var(--bp-blue);
+}
+
+/* Attached-file chip in the command field. The chip itself is
+   informational; removal runs through the 44px upload button, so the
+   small remove control inside the chip is the one deliberate
+   sub-44px exception in this sheet. */
+.file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  background: var(--bp-panel-2);
+  border: 1px solid var(--bp-line);
+  border-radius: 999px;
+  padding: 4px 8px;
+  color: var(--bp-ink);
+}
+.file-chip button {
+  min-height: 24px;
+  min-width: 24px;
+  padding: 0 6px;
+  margin: 0;
+  border-radius: 999px;
+}
+
+/* ==========================================================================
+   FORMS. Editable fields look editable at rest (background + border),
+   read-only cells look inert. Placeholder and caret are themed.
+   ========================================================================== */
+label { display: block; font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+input[type="text"],
+select {
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 12px;
+  font: inherit;
+  color: var(--bp-ink);
+  background: var(--input-bg);
+  border: 1px solid var(--bp-line-strong);
+  border-radius: 6px;
+  caret-color: var(--bp-blue);
+}
+textarea {
+  width: 100%;
+  min-height: 64px;
+  padding: 10px 12px;
+  font: inherit;
+  color: var(--bp-ink);
+  background: var(--input-bg);
+  border: 1px solid var(--bp-line-strong);
+  border-radius: 6px;
+  caret-color: var(--bp-blue);
+  resize: vertical;
+}
+::placeholder { color: var(--bp-muted); opacity: 1; }
+
+/* Command field: the goal input is a 44px pill. The current markup is
+   a textarea; the rebuilt markup is a single-line input. Both get the
+   pill treatment so the interim page already reads as the shell. */
+input#goal,
+textarea#goal {
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 16px;
+  font-size: 15px;
+  border-radius: 999px;
+}
+textarea#goal { resize: none; overflow: hidden; }
+
+/* ==========================================================================
+   SECTIONS. The old nine-identical-cards style is gone. One sheet
+   surface: white panel, 1px line, 16px radius, 16px padding, no shadow.
+   Hierarchy comes from size and placement, not from a tenth card style.
+   ========================================================================== */
+section {
+  background: var(--bp-panel);
+  border: 1px solid var(--bp-line);
+  border-radius: var(--card-radius);
+  padding: 16px;
   min-width: 0;
 }
 section.full { margin-top: 16px; }
-h2 { margin: 0 0 10px; font-size: 17px; }
-h2 .step-no {
-  font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
-  font-size: 12px;
-  color: var(--muted);
-  margin-right: 8px;
-}
+h2 { margin: 2px 0 10px; font-size: 18px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.3; }
+h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.01em; line-height: 1.2; }
 
-label { display: block; font-weight: 600; font-size: 13px; margin-bottom: 4px; }
-textarea, input[type="text"] {
-  width: 100%;
-  padding: 8px;
-  font: inherit;
-  color: var(--ink);
-  background: var(--input-bg);
-  border: 1px solid var(--line-strong);
-  border-radius: 6px;
-}
-textarea { min-height: 64px; resize: vertical; }
-
-button {
-  font: inherit;
-  padding: 8px 14px;
-  border-radius: 6px;
-  border: 1px solid var(--btn-bg);
-  background: var(--btn-bg);
-  color: var(--btn-ink);
-  cursor: pointer;
-  margin: 4px 6px 4px 0;
-  min-height: 40px;
-}
-button.secondary { background: transparent; color: var(--ink); border-color: var(--line-strong); }
-button:disabled { opacity: 0.45; cursor: not-allowed; }
-
-/* Visible keyboard focus on EVERY control, not just table inputs. */
-:focus-visible {
-  outline: 3px solid var(--focus);
-  outline-offset: 2px;
-  border-radius: 4px;
-}
-tr:focus-visible { outline-offset: -3px; }
-
+/* Dropzone: the current visible drop target. In the rebuilt shell the
+   whole canvas is the drop target and this block goes away; until then
+   it keeps the blueprint treatment and a visible drag state. */
 #dropzone {
-  border: 2px dashed var(--line-strong);
-  border-radius: 8px;
+  border: 2px dashed var(--bp-line-strong);
+  border-radius: 12px;
   padding: 24px;
   text-align: center;
-  color: var(--muted);
+  color: var(--bp-muted);
   cursor: pointer;
-  margin-bottom: 10px;
+  margin-bottom: 12px;
+  min-height: 44px;
 }
-#dropzone.drag { border-color: var(--focus); background: var(--panel-2); }
+#dropzone.drag { border-color: var(--bp-blue); background: var(--bp-panel-2); }
 #dropzone input { display: none; }
-#dropzone strong { color: var(--ink); }
+#dropzone strong { color: var(--bp-ink); }
+#file-input { display: none; }
+/* Canvas drag state (new markup): dashed blueprint outline inside the
+   canvas plus the drop hint text. */
+#canvas.drag,
+.layout.drag { outline: 2px dashed var(--bp-blue); outline-offset: -8px; }
 
 .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
 .row > div { flex: 1; min-width: 220px; }
 
 /* Examples picker. */
-.examples { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
-.examples-label { font-weight: 600; font-size: 13px; margin: 0 0 6px; }
-.example-btn { margin: 4px 6px 4px 0; }
+.examples { margin-top: 12px; border-top: 1px solid var(--bp-line); padding-top: 12px; }
+.examples-label { font-weight: 600; font-size: 13px; margin: 0 0 8px; }
+.example-btn {
+  margin: 4px 8px 4px 0;
+  border-radius: 999px;
+  background: var(--bp-panel);
+  border: 1px solid var(--canvas-line);
+  font-weight: 600;
+  font-size: 13px;
+  min-height: 44px;
+  padding: 8px 14px;
+}
+.example-btn:hover { border-color: var(--bp-blue); }
 
-/* Error banner: LLM/backend failures are never silent. */
+/* Empty state: faint line-art placeholder, eyebrow, example chips,
+   one supporting line. Replaces the empty cards until the first run. */
+#empty-state {
+  max-width: 560px;
+  margin: auto;
+  text-align: center;
+  padding: 48px 16px;
+}
+#empty-state .examples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  border-top: none;
+  padding-top: 0;
+}
+#empty-state .example-btn { margin: 0; }
+/* BUGFIX 2026-11-15: updateEmptyState() toggles .is-empty on #canvas, but
+   no rule ever hid #empty-state when the class was removed, so the
+   placeholder + example chips stayed visible above the loaded 3D view. */
+#canvas:not(.is-empty) #empty-state { display: none; }
+.empty-eyebrow {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--canvas-ink-soft);
+  margin: 24px 0 12px;
+}
+.placeholder-circuit,
+.empty-circuit {
+  display: block;
+  margin: 0 auto;
+  stroke: #9DBFE8;
+  stroke-width: 1.5px;
+  fill: none;
+  opacity: 0.55;
+  pointer-events: none;
+}
+.empty { color: var(--bp-muted); }
+
+/* Error banner: LLM/backend failures are never silent. Full-width red
+   callout, white text, under the top bar, outside the scrolling canvas. */
 #error-banner {
   display: none;
   background: var(--stop);
-  color: #fff;
+  color: #FFFFFF;
   padding: 12px 16px;
   border-radius: 8px;
-  margin-bottom: 16px;
+  margin: 0 0 12px;
   font-weight: 600;
 }
 #error-banner.show { display: block; }
 #error-banner small { display: block; font-weight: 400; margin-top: 4px; }
 
-/* Verdict readout: multimeter / scope style, the hero. */
+/* Verdict readout: the stamp. First on the canvas, top-left in reading
+   order, not a sidebar card. One word, 40-64px mono, white on the
+   verdict fill. The filled banner is kept deliberately: it is the one
+   authored moment on the page. */
 #verdict {
   display: none;
   text-align: center;
@@ -253,7 +903,7 @@ tr:focus-visible { outline-offset: -3px; }
   margin-bottom: 12px;
   color: var(--on-verdict);
 }
-#verdict.show { display: block; }
+#verdict.show { display: block; animation: verdict-in 0.2s ease-out; }
 #verdict.pass { background: var(--pass); }
 #verdict.warn { background: var(--warn); }
 #verdict.stop { background: var(--stop); }
@@ -274,18 +924,40 @@ tr:focus-visible { outline-offset: -3px; }
   display: block;
   font-size: 14px;
   font-weight: 400;
-  font-family: "IBM Plex Sans", system-ui, sans-serif;
+  font-family: "Inter Tight", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   margin-top: 8px;
   letter-spacing: 0;
 }
 .verdict-empty {
   text-align: center;
   padding: 20px 12px;
-  border: 2px dashed var(--line-strong);
+  border: 2px dashed var(--bp-line-strong);
   border-radius: 8px;
-  color: var(--muted);
+  color: var(--bp-muted);
   margin-bottom: 12px;
 }
+/* Verdict as an on-canvas callout (overlay variant, new markup): white
+   card, 1px severity border, 8px radius, verdict word in severity ink. */
+.verdict-callout {
+  background: var(--bp-panel);
+  border: 1px solid var(--bp-line);
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 12px;
+}
+.verdict-callout .verdict-word {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 32px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1.1;
+}
+.verdict-callout.is-pass { border-color: var(--sev-pass); }
+.verdict-callout.is-pass .verdict-word { color: var(--sev-pass); }
+.verdict-callout.is-warn { border-color: var(--sev-warn); }
+.verdict-callout.is-warn .verdict-word { color: var(--sev-warn); }
+.verdict-callout.is-stop { border-color: var(--sev-stop); }
+.verdict-callout.is-stop .verdict-word { color: var(--sev-stop); }
 
 /* Key measured numbers, pulled from the Report only. */
 #key-readings {
@@ -295,15 +967,14 @@ tr:focus-visible { outline-offset: -3px; }
   margin: 0 0 12px;
 }
 .reading {
-  background: var(--panel-2);
-  border: 1px solid var(--line);
-  border-radius: 6px;
+  background: var(--bp-panel-2);
+  border: 1px solid var(--bp-line);
+  border-radius: 8px;
   padding: 8px 10px;
   min-width: 0;
 }
-.reading dt { font-size: 12px; color: var(--muted); font-weight: 600; }
+.reading dt { font-size: 12px; color: var(--bp-muted); font-weight: 600; }
 .reading dd { margin: 2px 0 0; font-size: 20px; font-weight: 600; overflow-wrap: anywhere; }
-@media (max-width: 560px) { #key-readings { grid-template-columns: 1fr; } }
 
 /* Pipeline progress: simulate -> rules -> repair -> re-simulate. */
 #pipeline {
@@ -320,79 +991,279 @@ tr:focus-visible { outline-offset: -3px; }
   align-items: center;
   gap: 8px;
   font-size: 13px;
-  color: var(--muted);
+  color: var(--bp-muted);
   padding: 4px 6px 4px 0;
-  border-top: 3px solid var(--line);
+  border-top: 3px solid var(--bp-line);
 }
 #pipeline li .dot {
   flex: none;
   width: 12px;
   height: 12px;
   border-radius: 50%;
-  border: 2px solid var(--line-strong);
+  border: 2px solid var(--bp-line-strong);
   background: transparent;
 }
-#pipeline li.done { color: var(--ink); border-top-color: var(--pass); }
+#pipeline li.done { color: var(--bp-ink); border-top-color: var(--pass); }
 #pipeline li.done .dot { background: var(--pass); border-color: var(--pass); }
-#pipeline li.running { color: var(--ink); border-top-color: var(--warn); }
+#pipeline li.running { color: var(--bp-ink); border-top-color: var(--warn); }
 #pipeline li.running .dot { background: var(--warn); border-color: var(--warn); }
 #pipeline li.failed { color: var(--sev-stop); border-top-color: var(--stop); }
 #pipeline li.failed .dot { background: var(--stop); border-color: var(--stop); }
+#pipeline-note {
+  border-left: 3px solid var(--bp-line-strong);
+  padding-left: 10px;
+  color: var(--bp-muted);
+}
+#recheck-note {
+  border-left: 3px solid var(--bp-line-strong);
+  padding-left: 10px;
+  color: var(--bp-muted);
+}
 
-/* Findings. */
+/* ==========================================================================
+   FINDINGS AND CALLOUTS. Severity is text plus colour, never colour
+   alone. The 4px coloured left stripe is gone (craft-floor ban): a
+   finding carries its severity in the chip and in its wording.
+   Callouts are white cards: 1px border, 8px radius, severity border.
+   ========================================================================== */
 #findings { margin: 0; padding: 0; list-style: none; }
-#findings li { color: var(--ink); }
 #findings li {
-  border: 1px solid var(--line);
-  border-left-width: 4px;
-  border-radius: 6px;
+  color: var(--bp-ink);
+  background: var(--bp-panel);
+  border: 1px solid var(--bp-line);
+  border-radius: 8px;
   padding: 8px 10px;
   margin-bottom: 8px;
 }
-#findings li.sev-stop { border-left-color: var(--stop); }
-#findings li.sev-warn { border-left-color: var(--warn); }
-#findings li.sev-pass, #findings li.sev-info { border-left-color: var(--chip-line); }
 .findings-head { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; }
-.sev {
+
+/* Outline severity chips: coloured text + border, transparent fill.
+   Filled chips are reserved for the verdict banner and the MOCK tag. */
+.sev,
+.chip {
+  display: inline-block;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-weight: 700;
   font-size: 12px;
   letter-spacing: 0.04em;
-  border: 1px solid currentColor;
+  line-height: 1.4;
+  border: 1.5px solid currentColor;
   border-radius: 4px;
-  padding: 0 6px;
+  padding: 1px 8px;
+  background: transparent;
+  white-space: nowrap;
 }
-.sev-stop { color: var(--sev-stop); }
-.sev-warn { color: var(--sev-warn); }
-.sev-pass { color: var(--sev-pass); }
-.sev-info { color: var(--sev-info); }
+.sev-stop, .chip-stop { color: var(--sev-stop); }
+.sev-warn, .chip-warn { color: var(--sev-warn); }
+.sev-pass, .chip-pass { color: var(--sev-pass); }
+.sev-info, .chip-info { color: var(--sev-info); }
+.sev-unknown, .chip-unknown { color: var(--sev-unknown); }
+.chip-filled.chip-pass { color: #FFFFFF; background: var(--pass); border-color: transparent; }
+.chip-filled.chip-warn { color: #FFFFFF; background: var(--warn); border-color: transparent; }
+.chip-filled.chip-stop { color: #FFFFFF; background: var(--stop); border-color: transparent; }
+.mock-tag {
+  background: var(--mock-chip-bg);
+  color: var(--mock-chip-ink);
+  border: 2px solid var(--mock-chip-ink);
+  border-radius: 4px;
+  padding: 2px 10px;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+}
 .findings-code { font-weight: 700; font-size: 13px; }
 .findings-msg { margin: 4px 0 0; }
-.measured { display: block; margin-top: 4px; font-size: 13px; color: var(--muted); }
-.measured b { color: var(--ink); font-weight: 600; }
-.empty { color: var(--muted); }
+.measured { display: block; margin-top: 4px; font-size: 13px; color: var(--bp-muted); }
+.measured b { color: var(--bp-ink); font-weight: 600; }
+/* Uncertain: a finding the simulator flags, not an error. Blue rule
+   marks it informational. (Deliberate exception to the no-thick-left-
+   border rule, per the token spec: only this callout uses it.) */
+#uncertain {
+  border-left: 3px solid var(--bp-blue);
+  padding-left: 10px;
+  color: var(--bp-ink);
+}
+#uncertain:empty { display: none; }
+.unverified {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: var(--sev-warn);
+  border: 1.5px solid currentColor;
+  border-radius: 4px;
+  padding: 1px 8px;
+  background: transparent;
+  white-space: nowrap;
+}
 
-/* Netlist table: horizontal scroll lives INSIDE this wrapper so a
-   390px viewport never gets page-level horizontal scroll.
-   The table is width:max-content with min-width:100%: it is at least
-   as wide as the wrapper, and grows to fit its columns instead of
-   squeezing them. Per-column min-widths below are the floor that
-   keeps id / type / value / nodes / rating / color readable; the
-   wrapper scrolls rather than clipping them. */
+/* Callouts: focusable buttons, one per finding/component. White card,
+   1px border, 8px radius, severity border colour. Title 12px bold,
+   body 12px mono, severity word always present. DOM order is netlist
+   order; visual stacking must never reorder tab order. */
+.netproof-callout {
+  display: block;
+  width: 100%;
+  min-height: 44px;
+  text-align: left;
+  background: #FFFFFF;
+  color: var(--bp-ink);
+  border: 1px solid var(--bp-line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 0 0 8px;
+  cursor: pointer;
+  font-family: "Inter Tight", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  transition: border-color 0.15s ease-out, box-shadow 0.15s ease-out;
+}
+.netproof-callout:hover { border-color: var(--bp-blue); }
+.netproof-callout.selected {
+  border-color: var(--bp-blue);
+  box-shadow: 0 0 0 3px rgba(11, 61, 145, 0.35);
+}
+.netproof-callout.is-stop { border-color: var(--sev-stop); }
+.netproof-callout.is-warn { border-color: var(--sev-warn); }
+.netproof-callout.is-pass { border-color: var(--sev-pass); }
+.netproof-callout.is-unknown { border-color: var(--sev-unknown); }
+.netproof-callout-title {
+  display: block;
+  font-size: 12px;
+  font-weight: 700;
+  color: #111111;
+}
+.netproof-callout-body {
+  display: block;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: #1F2937;
+  margin-top: 2px;
+}
+.netproof-callout-sev {
+  display: inline-block;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  margin-top: 4px;
+}
+.netproof-callout-sev.stop, .netproof-callout.is-stop .netproof-callout-sev { color: var(--sev-stop); }
+.netproof-callout-sev.warn, .netproof-callout.is-warn .netproof-callout-sev { color: var(--sev-warn); }
+.netproof-callout-sev.pass, .netproof-callout.is-pass .netproof-callout-sev { color: var(--sev-pass); }
+.netproof-callout-sev.unknown, .netproof-callout.is-unknown .netproof-callout-sev { color: var(--sev-unknown); }
+
+/* 3D canvas callouts (callouts.js injectCalloutStyles, moved here 2026-11-15).
+   These style the absolutely-positioned boxes on the 3D canvas (width 260px,
+   positioned by JS left/top), NOT the list variant above (width 100%).
+   Do NOT merge the two .netproof-callout rules: they disagree on width,
+   font-family and margin. Per-severity border colours are set inline by JS
+   (el.style.borderColor); the #0B3D91 / #1a7f37 borders below are only the
+   INFO/PASS defaults. The JS injector still runs and wins ties for now;
+   delete injectCalloutStyles() only after a browser eyeball with it removed. */
+.netproof-callout-svg { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; z-index: 6; overflow: hidden; }
+.netproof-callout-layer { position: absolute; left: 0; top: 0; right: 0; bottom: 0; overflow: hidden; pointer-events: none; z-index: 7; }
+.netproof-callout { display: block; box-sizing: border-box; width: 260px; min-width: 44px; min-height: 44px; padding: 10px 12px; border: 1px solid #0B3D91; border-radius: 8px; background: #ffffff; color: #1c1a17; text-align: left; cursor: pointer; font: 13px/1.45 "Inter Tight", system-ui, sans-serif; pointer-events: auto; }
+.netproof-callout .nc-head { display: flex; justify-content: space-between; gap: 8px; }
+.netproof-callout .nc-rule { font: 600 12px/1.4 "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace; }
+.netproof-callout .nc-sev { font: 600 12px/1.4 "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace; white-space: nowrap; }
+.netproof-callout .nc-comp { font: 12px/1.4 "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace; color: #595959; white-space: nowrap; }
+.netproof-callout .nc-msg { display: block; margin-top: 4px; }
+.netproof-callout .nc-measured { display: block; margin-top: 4px; font: 12px/1.4 "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace; color: #595959; }
+.netproof-callout .nc-measured b { color: #1c1a17; font-weight: 600; }
+.netproof-callout .nc-rechecking { display: block; margin-top: 4px; font: 12px/1.4 "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace; color: #595959; }
+.netproof-callout-verdict { position: absolute; top: 12px; left: 12px; width: 300px; box-sizing: border-box; padding: 14px 16px; border: 1px solid #1a7f37; border-radius: 8px; background: #ffffff; color: #1c1a17; pointer-events: none; box-shadow: 0 2px 10px rgba(0,0,0,0.12); }
+.netproof-callout-verdict .nc-eyebrow { font: 600 11px/1.4 "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace; letter-spacing: 0.12em; color: #595959; }
+.netproof-callout-verdict .nc-word { font: 700 44px/1.1 "Inter Tight", system-ui, sans-serif; color: #1c1a17; }
+.netproof-callout-verdict .nc-mock { display: inline-block; margin-left: 8px; padding: 2px 6px; border-radius: 4px; background: #111; color: #ffe600; font: 700 11px/1.4 "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace; vertical-align: middle; }
+.netproof-callout-verdict .nc-readouts { margin-top: 8px; }
+.netproof-callout-verdict .nc-readout { display: flex; justify-content: space-between; gap: 8px; font: 13px/1.6 "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace; }
+.netproof-callout-verdict .nc-readout .nc-label { color: #595959; }
+.netproof-callout-verdict .nc-readout .nc-value { font-weight: 600; color: #1c1a17; }
+.netproof-callout-detail { cursor: default; }
+.netproof-callout-detail .nc-row { display: flex; justify-content: space-between; gap: 8px; font: 12px/1.7 "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace; }
+.netproof-callout-detail .nc-row .nc-label { color: #595959; }
+.netproof-callout-detail .nc-row .nc-value { font-weight: 600; color: #1c1a17; text-align: right; }
+.netproof-callout-detail .nc-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.netproof-callout-detail .nc-chip { min-height: 44px; min-width: 44px; padding: 10px 12px; border: 1px solid #0B3D91; border-radius: 6px; background: #ffffff; cursor: pointer; font: 600 12px/1.2 "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace; }
+.netproof-callout:focus-visible, .netproof-callout-detail:focus-visible, .netproof-callout-detail .nc-chip:focus-visible { outline: 3px solid #FFD166; outline-offset: 2px; box-shadow: 0 0 0 4px #0A2A5E; border-radius: 4px; scroll-margin: 72px; }
+@media (prefers-reduced-motion: reduce) {
+  .netproof-callout, .netproof-callout-verdict { transition: none !important; animation: none !important; }
+  .netproof-callout-detail .nc-value-tween { transition: none !important; }
+}
+.netproof-callout-detail .nc-value-tween { transition: opacity 150ms ease, transform 150ms ease; }
+.netproof-callout-detail .nc-value-tweening { opacity: 0; transform: translateY(2px); }
+[data-theme="dark"] .netproof-callout, [data-theme="dark"] .netproof-callout-verdict, [data-theme="dark"] .netproof-callout-detail .nc-chip { background: #232320; color: #edeae2; }
+[data-theme="dark"] .netproof-callout .nc-comp, [data-theme="dark"] .netproof-callout .nc-measured, [data-theme="dark"] .netproof-callout .nc-rechecking, [data-theme="dark"] .netproof-callout-verdict .nc-eyebrow, [data-theme="dark"] .netproof-callout-verdict .nc-readout .nc-label, [data-theme="dark"] .netproof-callout-detail .nc-row .nc-label { color: #b3aea1; }
+[data-theme="dark"] .netproof-callout .nc-measured b, [data-theme="dark"] .netproof-callout-verdict .nc-word, [data-theme="dark"] .netproof-callout-verdict .nc-readout .nc-value, [data-theme="dark"] .netproof-callout-detail .nc-row .nc-value { color: #edeae2; }
+
+/* Legacy overlay labels (overlay.js): same white-card treatment. The
+   layer never takes pointer events; each callout opts back in. */
+.netproof-label-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+.netproof-label-layer .netproof-callout {
+  position: absolute;
+  width: auto;
+  min-width: 92px;
+  max-width: 260px;
+  pointer-events: auto;
+}
+.netproof-label {
+  position: absolute;
+  min-width: 92px;
+  max-width: 260px;
+  background: #FFFFFF;
+  border: 1px solid var(--bp-line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  pointer-events: none;
+}
+.netproof-label-title { font-size: 12px; font-weight: 700; color: #111111; }
+.netproof-label-body {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: #1F2937;
+}
+.netproof-label-nodata { color: #595959; font-style: italic; }
+
+/* ==========================================================================
+   NETLIST TABLE. Editable cells are visibly fields at rest (background
+   + border); read-only cells are visibly inert. Rows are 44px minimum.
+   Horizontal scroll lives INSIDE .table-wrap; the page never scrolls
+   horizontally. Sticky header so column names survive the scroll.
+   ========================================================================== */
 .table-wrap {
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
   max-width: 100%;
-  border: 1px solid var(--line);
+  border: 1px solid var(--bp-line);
   border-radius: 8px;
   margin-bottom: 10px;
+  background: var(--bp-panel);
+  scrollbar-width: thin;
+  scrollbar-color: var(--bp-line-strong) transparent;
 }
+.table-wrap::-webkit-scrollbar { height: 10px; }
+.table-wrap::-webkit-scrollbar-thumb { background: var(--bp-line-strong); border-radius: 5px; }
+.table-wrap::-webkit-scrollbar-track { background: transparent; }
 .table-wrap:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
 table { border-collapse: collapse; width: max-content; min-width: 100%; font-size: 13px; }
 #netlist-section table { min-width: 740px; }
-th, td { border-bottom: 1px solid var(--line); padding: 5px 6px; text-align: left; }
-th { background: var(--panel-2); font-size: 12px; color: var(--muted); font-weight: 600; white-space: nowrap; }
-/* Netlist column floors: id, type, value, nodes, rating, color,
-   node voltage, current, power. No column may shrink below these. */
+th, td { border-bottom: 1px solid var(--bp-line); padding: 4px 6px; text-align: left; }
+thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bp-panel-2);
+  font-size: 12px;
+  color: var(--bp-muted);
+  font-weight: 600;
+  white-space: nowrap;
+  padding: 8px 6px;
+}
 #netlist-section th:nth-child(1), #netlist-section td:nth-child(1) { min-width: 52px; }
 #netlist-section th:nth-child(2), #netlist-section td:nth-child(2) { min-width: 104px; }
 #netlist-section th:nth-child(3), #netlist-section td:nth-child(3) { min-width: 64px; }
@@ -405,11 +1276,14 @@ th { background: var(--panel-2); font-size: 12px; color: var(--muted); font-weig
 td input,
 td select {
   width: 100%;
-  border: none;
+  border: 1px solid var(--bp-line);
   font: inherit;
-  padding: 2px;
-  background: transparent;
-  color: var(--ink);
+  font-size: 13px;
+  padding: 8px 6px;
+  min-height: 44px;
+  background: var(--input-bg);
+  color: var(--bp-ink);
+  border-radius: 6px;
 }
 td input[data-field="id"] { min-width: 44px; }
 td select[data-field="type"] { min-width: 88px; }
@@ -417,35 +1291,33 @@ td input[data-field="value"] { min-width: 56px; }
 td input[data-field="nodes"] { min-width: 80px; }
 td input[data-field="rating_watts"] { min-width: 56px; }
 td input[data-field="color"] { min-width: 56px; }
-td input:focus-visible, td select:focus-visible { outline-offset: -1px; }
-td.readonly { background: var(--readonly-bg); color: var(--ink); white-space: nowrap; }
+td.readonly {
+  background: var(--readonly-bg);
+  color: var(--bp-ink);
+  white-space: nowrap;
+  border: 1px solid transparent;
+  padding: 8px 6px;
+}
 tr.selected td { background: var(--row-selected); }
 tr.selected td input { background: transparent; }
 tr[data-id] { cursor: pointer; }
 
-#preview { max-width: 100%; border: 1px solid var(--line); border-radius: 6px; display: none; }
+#preview { max-width: 100%; border: 1px solid var(--bp-line); border-radius: 6px; display: none; }
 #preview.show { display: block; }
 .layout > *, .col-left > *, .col-right > *, .split > * { min-width: 0; }
 .split { display: grid; grid-template-columns: 1fr 2fr; gap: 14px; align-items: start; }
-@media (max-width: 1100px) { .split { grid-template-columns: 1fr; } }
-/* No image uploaded yet: the image column is hidden (see
-   #image-col[hidden] in index.html), so the table takes the full
-   width of the panel instead of being squeezed into 2/3 of it.
-   setFile() removes .no-image once an image exists. */
 #netlist-section.no-image .split { grid-template-columns: 1fr; }
 #netlist-section.no-image #image-col { display: none; }
 
-/* Resistor sweep (P5.2): two inline-SVG charts side by side, stacked
-   under 800 px. Chart colours match the verdict palette. */
+/* ==========================================================================
+   RESISTOR SWEEP. Charts stack vertically in the drawer; side by side
+   only while the section is on the wide canvas. Chart text uses the
+   muted token. (Sweep colours hardcoded in chart JS are the 3D/JS
+   owner's fix, not this sheet's: the token WARN is #B45309.)
+   ========================================================================== */
 .sweep-charts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
-@media (max-width: 800px) { .sweep-charts { grid-template-columns: 1fr; } }
 .sweep-charts svg { width: 100%; height: auto; display: block; }
-.sweep-charts svg text { font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace; fill: var(--muted); }
-/* Resistor sweep form: one aligned row (label + select + button).
-   Grid, not flex-wrap, so at 390px the button stays on the same row
-   as the select instead of wrapping underneath it: label is auto,
-   the select takes the remaining space (minmax(0, 1fr) lets it
-   shrink), the button is auto and never wraps. */
+.sweep-charts svg text { font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: var(--bp-muted); }
 .sweep-form {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -454,16 +1326,7 @@ tr[data-id] { cursor: pointer; }
   margin-bottom: 8px;
 }
 .sweep-form label { margin-bottom: 0; white-space: nowrap; }
-.sweep-form select {
-  width: 100%;
-  min-width: 0;
-  padding: 6px;
-  font: inherit;
-  color: var(--ink);
-  background: var(--input-bg);
-  border: 1px solid var(--line-strong);
-  border-radius: 6px;
-}
+.sweep-form select { width: 100%; min-width: 0; }
 .sweep-form button { margin: 0; white-space: nowrap; }
 .sweep-meta { margin: 0 0 8px; }
 .sweep-meta .mono { font-size: 13px; }
@@ -471,8 +1334,107 @@ tr[data-id] { cursor: pointer; }
 .sweep-verdict.pass { color: var(--sev-pass); }
 .sweep-verdict.warn { color: var(--sev-warn); }
 .sweep-verdict.stop { color: var(--sev-stop); }
+#sweep-hint {
+  border-left: 3px solid var(--bp-line-strong);
+  padding-left: 10px;
+  color: var(--bp-muted);
+}
 
-/* Live console: stays dark in both themes; agent colours live here only. */
+/* ==========================================================================
+   3D VIEW. Dark blueprint ground, both themes. 420px desktop, 320px
+   minimum, 320px on mobile. The container is the keyboard entry point
+   (arrow keys cycle, Enter edits, Escape deselects).
+   ========================================================================== */
+#scene3d {
+  position: relative;
+  min-height: 320px;
+  height: 420px;
+  border: 1px solid var(--bp-line);
+  border-radius: 12px;
+  background: var(--scene-bg);
+  color: var(--scene-ink);
+  overflow: hidden;
+}
+#scene3d canvas { display: block; width: 100%; height: 100%; }
+#scene3d .fallback { padding: 24px; color: var(--scene-ink); }
+#scene3d-status { font-size: 13px; color: var(--bp-muted); margin-top: 6px; }
+#selected-component { font-weight: 600; }
+.controls-hint { font-size: 13px; color: var(--bp-muted); }
+.controls-hint kbd {
+  background: var(--bp-panel-2);
+  border: 1px solid var(--bp-line-strong);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font: inherit;
+  font-size: 12px;
+}
+
+/* ==========================================================================
+   REPAIR HISTORY.
+   ========================================================================== */
+#repair-history { margin: 0; padding-left: 20px; }
+#repair-history li { margin-bottom: 10px; }
+#repair-history .diff { display: block; font-size: 13px; margin-top: 2px; overflow-wrap: anywhere; }
+#repair-history .diff .arrow { color: var(--bp-muted); }
+#status { font-size: 13px; color: var(--bp-muted); margin-top: 6px; }
+#repair-round-label { font-size: 13px; }
+
+/* History round chips (history.js): 44px, pill, roving/plain Tab. */
+.np-history-chips { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
+.np-history-chip {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 10px 16px;
+  border-radius: 999px;
+  border: 1px solid var(--bp-line-strong);
+  background: var(--bp-panel);
+  color: var(--bp-ink);
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-weight: 600;
+  cursor: pointer;
+}
+.np-history-chip:hover { border-color: var(--bp-blue); }
+.np-history-chip[aria-pressed="true"] {
+  background: var(--bp-blue);
+  color: #FFFFFF;
+  border-color: transparent;
+}
+.np-history-empty, .np-history-note { color: var(--bp-muted); font-size: 13px; }
+.np-history-detail, .np-history-changes, .np-history-components,
+.np-history-findings { font-size: 13px; }
+.np-history-verdict { font-weight: 700; }
+
+/* History rules moved from history.js ensureStyle() (2026-11-15), pasted
+   AFTER the existing .np-history-* block so the injected values win ties
+   and behaviour is unchanged. The two chip sets disagree (this file: 44px,
+   JetBrains Mono 600, pressed = blueprint blue; injected: 8px 14px padding,
+   2px #111 border, pressed = #111 bg). Unifying them is a decision for the
+   history owner, not this move. NOTE: the injected :focus-visible uses
+   #2684ff, NOT the blueprint focus token (#FFD166 + #0A2A5E keyline);
+   flagged, not changed. The JS injector still runs; delete ensureStyle()
+   only after a browser eyeball with it removed. */
+.np-history { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: #111; }
+.np-history-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.np-history-chip { font: inherit; padding: 8px 14px; border-radius: 999px; border: 2px solid #111; background: #fff; color: #111; cursor: pointer; }
+.np-history-chip .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+.np-history-chip[aria-pressed="true"] { background: #111; color: #fff; }
+.np-history-chip:focus-visible { outline: 3px solid #2684ff; outline-offset: 2px; }
+.np-history-chip:disabled { opacity: .45; cursor: not-allowed; }
+.np-history-detail h3 { margin: 0 0 6px; font-size: 15px; }
+.np-history-verdict { font-weight: 800; }
+.np-history-changes, .np-history-findings, .np-history-components { margin: 6px 0; padding-left: 20px; }
+.np-history-changes li, .np-history-findings li, .np-history-components li { margin-bottom: 4px; }
+.np-history-empty { color: #595959; }
+.np-history-note { font-size: 12px; color: #555; margin-top: 8px; }
+
+/* ==========================================================================
+   LIVE CONSOLE. Stays dark in both themes; agent colours live here only.
+   CONSOLE TOGGLE FIX (impeccable P1-6): the old .console-toggle rules
+   were dead because the button carries no class (it is #console-toggle
+   inside an h2). The rules below target the ID first, so the heading
+   treatment and the chevron marker actually render. The chevron is the
+   visible state marker: right-pointing when collapsed, down when open.
+   ========================================================================== */
 .console-wrap {
   background: var(--console-bg);
   color: var(--console-ink);
@@ -485,68 +1447,304 @@ tr[data-id] { cursor: pointer; }
   overflow-y: auto;
   font-size: 13px;
   line-height: 1.5;
+  scrollbar-width: thin;
+  scrollbar-color: #57574F transparent;
 }
+#console::-webkit-scrollbar { width: 10px; }
+#console::-webkit-scrollbar-thumb { background: #57574F; border-radius: 5px; }
+#console::-webkit-scrollbar-track { background: transparent; }
 #console .line { white-space: pre-wrap; overflow-wrap: break-word; }
 #console .t { color: var(--console-dim); }
 #console .agent { font-weight: 700; }
-#console .err { color: #ff8080; }
-.legend { font-size: 12px; color: var(--console-dim); margin-top: 8px; border-top: 1px solid #33332e; padding-top: 8px; }
+#console .err { color: #FF8080; }
+.legend { font-size: 12px; color: var(--console-dim); margin-top: 8px; border-top: 1px solid #33332E; padding-top: 8px; }
 .legend span { display: inline-block; margin-right: 12px; color: var(--console-ink); }
 .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
 
-/* Live console drawer: collapsed by default (the #console-body div
-   starts hidden in the HTML); a run start opens it while the run
-   streams, and the toggle opens/closes it. The toggle looks like
-   the section heading, with a ▸ / ▾ marker for its state. */
 #console-body[hidden] { display: none; }
+#console-toggle,
 .console-toggle {
   background: none;
   border: none;
-  padding: 0;
+  padding: 10px 0;
   margin: 0;
-  min-height: 0;
+  min-height: 44px;
   font: inherit;
-  color: var(--ink);
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--bp-ink);
   cursor: pointer;
   text-align: left;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
-.console-toggle::after { content: ' \25B8'; color: var(--muted); }
-.console-toggle[aria-expanded="true"]::after { content: ' \25BE'; }
+#console-toggle:hover,
+.console-toggle:hover { background: none; border: none; color: var(--bp-blue); }
+#console-toggle::after,
+.console-toggle::after {
+  content: " \25B8";
+  color: var(--bp-muted);
+  font-size: 14px;
+}
+#console-toggle[aria-expanded="true"]::after,
+.console-toggle[aria-expanded="true"]::after { content: " \25BE"; }
 
-/* 3D view. */
-#scene3d {
+/* Downloads. */
+#share-status { font-size: 13px; color: var(--bp-muted); }
+
+/* ==========================================================================
+   RIGHT-SIDE DRAWER (new markup). Collapsed by default: display none,
+   no space, no tab stops. Five tabs: Netlist, Sweep, Repairs, Export,
+   Log. Desktop: pushes the canvas (canvas flexes). Overlay mode at
+   900px and below, and whenever space requires: absolute inside the
+   frame, backdrop over the canvas only, never over the top bar or the
+   status strip.
+   ========================================================================== */
+.frame-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
   position: relative;
-  min-height: 320px;
-  height: 420px;
-  border: 1px solid var(--line);
+}
+#drawer { display: none; }
+#drawer.open {
+  display: flex;
+  flex-direction: column;
+  width: 360px;
+  flex: none;
+  min-height: 0;
+  background: var(--bp-panel);
+  border-left: 1px solid var(--bp-line);
+}
+.drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bp-blue-deep);
+  color: #FFFFFF;
+  flex: none;
+}
+.drawer-header h2 { margin: 0; color: #FFFFFF; font-size: 15px; }
+.drawer-header .drawer-close {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  color: #FFFFFF;
   border-radius: 8px;
-  background: var(--scene-bg);
-  color: var(--scene-ink);
-  overflow: hidden;
 }
-#scene3d canvas { display: block; width: 100%; height: 100%; }
-#scene3d .fallback { padding: 24px; color: var(--scene-ink); }
-#scene3d-status { font-size: 13px; color: var(--muted); margin-top: 6px; }
-#selected-component { font-weight: 600; }
-.controls-hint { font-size: 13px; color: var(--muted); }
-.controls-hint kbd {
-  background: var(--panel-2);
-  border: 1px solid var(--line-strong);
-  border-radius: 4px;
-  padding: 1px 5px;
-  font: inherit;
-  font-size: 12px;
+.drawer-header .drawer-close:hover { background: rgba(255, 255, 255, 0.12); border-color: #FFFFFF; }
+#drawer [role="tablist"],
+.drawer-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--bp-line);
+  overflow-x: auto;
+  flex: none;
+  scrollbar-width: none;
+}
+#drawer [role="tablist"]::-webkit-scrollbar,
+.drawer-tabs::-webkit-scrollbar { display: none; }
+#drawer [role="tab"],
+.drawer-tab {
+  flex: 1 0 auto;
+  min-height: 44px;
+  padding: 10px 12px;
+  margin: 0;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--bp-muted);
+  white-space: nowrap;
+}
+#drawer [role="tab"]:hover,
+.drawer-tab:hover { background: var(--bp-panel-2); border-bottom-color: transparent; }
+#drawer [role="tab"][aria-selected="true"],
+.drawer-tab[aria-selected="true"] {
+  color: var(--bp-ink);
+  border-bottom-color: var(--bp-blue);
+}
+#drawer [role="tabpanel"],
+.drawer-panel {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 14px;
+}
+/* In the drawer, charts stack vertically and the netlist table keeps
+   its internal horizontal scroll. */
+#drawer .sweep-charts { grid-template-columns: 1fr; }
+.drawer-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(11, 42, 91, 0.45);
+  z-index: 10;
 }
 
-#repair-history { margin: 0; padding-left: 20px; }
-#repair-history li { margin-bottom: 10px; }
-#repair-history .diff { display: block; font-size: 13px; margin-top: 2px; overflow-wrap: anywhere; }
-#repair-history .diff .arrow { color: var(--muted); }
-#status { font-size: 13px; color: var(--muted); margin-top: 6px; }
-#repair-round-label { font-size: 13px; }
+/* ==========================================================================
+   EDIT PANEL DRAWER (web/3d/edit-panel.js). Same DOM, same focus order
+   on desktop and mobile; only the positioning changes. Desktop: right
+   side drawer. Mobile (768px): bottom sheet. Focus in on open goes to
+   Close; Escape closes; focus returns to the invoking control.
+   NOTE: the panel styling lives in this sheet (styles.css);
+   edit-panel.js injects no <style> block — it only sets inline
+   positioning/display styles on the panel element. These rules use the
+   #netproof-edit-panel.bp-drawer scope to outrank the panel's inline
+   styles where it matters.
+   ========================================================================== */
+#netproof-edit-panel.bp-drawer {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  width: min(380px, 100vw);
+  max-height: calc(100vh - 32px);
+  background: var(--bp-panel);
+  border: 1px solid var(--bp-line);
+  border-radius: 16px;
+  box-shadow: 0 12px 32px rgba(10, 32, 72, 0.28);
+  overflow-y: auto;
+  z-index: 50;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+#netproof-edit-panel .ep-close,
+#netproof-edit-panel.bp-drawer .ep-close {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 10px;
+}
+#netproof-edit-panel input,
+#netproof-edit-panel select,
+#netproof-edit-panel.bp-drawer input,
+#netproof-edit-panel.bp-drawer select {
+  min-height: 44px;
+  padding: 10px 12px;
+}
+#netproof-edit-panel button,
+#netproof-edit-panel.bp-drawer button {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 10px 14px;
+}
+#netproof-edit-panel .ep-led-hint button,
+#netproof-edit-panel.bp-drawer .ep-led-hint button {
+  min-height: 44px;
+  padding: 10px 12px;
+}
+#netproof-edit-panel .ep-hint,
+#netproof-edit-panel .ep-empty,
+#netproof-edit-panel .ep-sub {
+  color: var(--bp-muted);
+  font-size: 13px;
+}
+#netproof-edit-panel .ep-error { color: var(--sev-stop); font-weight: 600; }
+#netproof-edit-panel .ep-sev-stop { color: var(--sev-stop); font-weight: 700; }
+#netproof-edit-panel .ep-sev-warn { color: var(--sev-warn); font-weight: 700; }
+#netproof-edit-panel .ep-sev-info { color: var(--sev-info); font-weight: 700; }
+#netproof-edit-panel .ep-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+#netproof-edit-panel [role="tablist"] {
+  display: flex;
+  border-bottom: 1px solid var(--bp-line);
+}
+#netproof-edit-panel [role="tab"] {
+  flex: 1 0 auto;
+  min-height: 44px;
+  padding: 10px 16px;
+  margin: 0;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--bp-muted);
+}
+#netproof-edit-panel [role="tab"][aria-selected="true"] {
+  color: var(--bp-ink);
+  border-bottom-color: var(--bp-blue);
+}
+#netproof-edit-panel [role="tabpanel"] { padding: 14px; }
 
-footer { max-width: 1280px; margin: 0 auto; padding: 0 16px 24px; color: var(--muted); font-size: 13px; }
-footer .mono { font-size: 12px; }
+/* ==========================================================================
+   BOTTOM SHEET (mobile, 768px breakpoint). The edit drawer becomes a
+   sheet, and the verdict + findings + key readings collapse into a
+   peekable sheet. Same DOM and focus order as the drawer; only the
+   positioning and gesture change. The drag handle is visual only, never
+   the sole close control: Close (44x44) and Escape always work.
+   ========================================================================== */
+.bottom-sheet {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--bp-panel);
+  border-radius: 16px 16px 0 0;
+  box-shadow: 0 -12px 32px rgba(10, 32, 72, 0.28);
+  max-height: 70dvh;
+  display: flex;
+  flex-direction: column;
+  z-index: 30;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+.bottom-sheet::before {
+  content: "";
+  display: block;
+  width: 40px;
+  height: 4px;
+  margin: 8px auto 4px;
+  border-radius: 2px;
+  background: var(--bp-line-strong);
+  flex: none;
+}
+.sheet-peek {
+  min-height: 64px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  cursor: pointer;
+  flex: none;
+  background: none;
+  border: none;
+  border-radius: 16px 16px 0 0;
+  text-align: left;
+  color: var(--bp-ink);
+}
+.sheet-peek .sheet-verdict {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-weight: 700;
+  font-size: 16px;
+}
+.sheet-peek .sheet-count { font-size: 13px; color: var(--bp-muted); }
+.sheet-body {
+  overflow-y: auto;
+  padding: 0 16px 16px;
+  min-height: 0;
+}
+.bottom-sheet[data-state="collapsed"] .sheet-body { display: none; }
+.sheet-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(11, 42, 91, 0.45);
+  z-index: 25;
+}
+
+/* ==========================================================================
+   MOTION. One authored moment (the verdict landing), 150-250ms state
+   transitions. No page-load sequence, no scattered entrance animation.
+   ========================================================================== */
+@keyframes verdict-in {
+  from { opacity: 0; transform: translateY(4px) scale(0.995); }
+  to { opacity: 1; transform: none; }
+}
 
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
@@ -554,4 +1752,112 @@ footer .mono { font-size: 12px; }
     animation: none !important;
     transition: none !important;
   }
+  /* Blueprint additions: no slide on the drawer/sheet, no pulse on the
+     selected callout, no dot travel. */
+  #netproof-edit-panel.bp-drawer { transition: none !important; }
+  .netproof-callout { transition: none !important; }
+  #drawer.open { transition: none !important; }
+  .bottom-sheet { transition: none !important; }
+}
+
+/* ==========================================================================
+   RESPONSIVE. Reference widths: desktop, 900px (drawer overlay),
+   768px (bottom sheet), 640px/390px (mobile frame, top bar, strip).
+   The page never gains horizontal scroll at any width.
+   ========================================================================== */
+@media (max-width: 1100px) {
+  .split { grid-template-columns: 1fr; }
+}
+@media (max-width: 900px) {
+  /* Drawer switches to overlay mode even on desktop widths when space
+     requires it: absolute inside the frame, backdrop over the canvas. */
+  #drawer.open {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(360px, 92vw);
+    z-index: 20;
+    box-shadow: -12px 0 32px rgba(10, 32, 72, 0.28);
+  }
+}
+@media (max-width: 800px) {
+  .sweep-charts { grid-template-columns: 1fr; }
+}
+@media (max-width: 768px) {
+  /* Edit drawer becomes a bottom sheet. Same DOM, same focus order,
+     same tabs; only positioning changes. Never covers the whole
+     screen: the 3D view stays visible above it. */
+  #netproof-edit-panel.bp-drawer {
+    top: auto;
+    right: 0;
+    left: 0;
+    bottom: 0;
+    width: 100%;
+    max-width: none;
+    max-height: 85vh;
+    border-radius: 16px 16px 0 0;
+    overflow-y: auto;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  #netproof-edit-panel.bp-drawer::before {
+    content: "";
+    display: block;
+    width: 40px;
+    height: 4px;
+    margin: 8px auto 4px;
+    border-radius: 2px;
+    background: var(--bp-line-strong);
+  }
+  /* Drawer tabs scroll horizontally if needed, never wrap to two rows. */
+  #drawer [role="tablist"],
+  .drawer-tabs { flex-wrap: nowrap; }
+}
+@media (max-width: 640px) {
+  /* Mobile frame: 8px margin, radius stays 24px. */
+  body { padding: 8px; }
+  header::before, header::after,
+  footer::before, footer::after { width: 14px; height: 14px; }
+  header,
+  .topbar {
+    min-height: 0;
+    flex-wrap: wrap;
+    padding: 10px 12px;
+    gap: 8px;
+  }
+  header h1,
+  .topbar .wordmark { font-size: 18px; }
+  header h1 .mono,
+  .topbar .wordmark-sub { display: none; }
+  .command-field { flex: 1 1 100%; max-width: none; order: 2; }
+  .topbar-actions { order: 1; margin-left: auto; }
+  #check-btn { flex: 1 1 100%; height: 48px; order: 3; }
+  #run-image-btn,
+  #run-goal-btn { flex: 1 1 100%; margin-right: 0; }
+  main { padding: 8px 8px 12px; }
+  .layout,
+  #canvas { margin: 0; padding: 8px; border-radius: 12px; gap: 12px; }
+  section { padding: 12px; }
+  #scene3d { height: 320px; }
+  /* Status strip scrolls horizontally; chips never wrap or shrink. */
+  #status-strip {
+    overflow-x: auto;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+    mask-image: linear-gradient(90deg, black 85%, transparent 100%);
+  }
+  #status-strip::-webkit-scrollbar { display: none; }
+  .status-chip { flex: none; }
+  /* Empty state scales down; chips wrap two-by-two. */
+  #empty-state { padding: 32px 8px; }
+  .placeholder-circuit,
+  .empty-circuit { max-width: 280px; }
+  #empty-state .example-btn { flex: 1 1 40%; }
+  .examples { display: flex; flex-wrap: wrap; gap: 8px; }
+  .example-btn { flex: 1 1 40%; margin: 0; }
+  /* Callouts sheet: the peek is 64px; expanded it is 70dvh. */
+  .bottom-sheet { max-height: 70dvh; }
+}
+@media (max-width: 560px) {
+  #key-readings { grid-template-columns: 1fr; }
 }

@@ -1,4 +1,10 @@
-// Netproof 3D scene — Three.js module (frontend-only, no backend deps).
+// Netproof 3D scene — BLUEPRINT render (wholesale rebuild).
+//
+// Orthographic isometric camera, white / pale-blue MeshBasicMaterial
+// fills with blue EdgesGeometry outlines, no lights, no fog, no shadows,
+// no dark ground. Component geometry lives in ./components.js (shared
+// builders); this file owns the camera, the view, framing, verdict
+// edge-recolouring + glow, and the Inspect explode tween.
 //
 // Usage (from a page that loads this as an ES module):
 //   import { createScene, addComponent, removeComponent, updateVerdictColors }
@@ -17,6 +23,14 @@
 // No simulation numbers live here: colours come only from the verdict
 // values the caller passes in (which must come from a real /check run).
 //
+// Blueprint blue is #0B3D91 ONLY (coordinator decision 2026-11-15).
+// Severity edge colours are STOP #d92d20, WARN #92400E, PASS #1a7f37 —
+// the same values overlay.js SEVERITY_COLORS and history.js
+// VERDICT_COLORS use (coordinator decision 2026-11-15: WARN #d97706
+// failed AA as text). The three verdict-colour tables
+// (scene.js, overlay.js, history.js) must change together; changing one
+// without the others is a known trap (see web/3d/README-3D.md).
+//
 // NOTE on imports: every module in web/3d/ imports the bare specifier
 // 'three' (and 'three/addons/...' for OrbitControls), resolved by the
 // host page's import map to unpkg three@0.160.0, so the whole 3D layer
@@ -28,27 +42,52 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import {
+  BLUEPRINT_BLUE,
+  BLUEPRINT_FILL,
+  BLUEPRINT_FILL_2,
+  addEdges,
+  blueprintMaterial,
+  buildComponentMesh,
+  easeInOutCubic,
+  explodeOffset,
+  EXPLODE_DURATION_MS,
+} from './components.js';
 
-// Verdict -> mesh colour. Matches the 2D verdict banner in web/index.html
-// (PASS green #1a7f37, WARN amber #d97706, STOP red #b00020), brightened
-// slightly so emissive meshes read on the dark scene.
-export const VERDICT_COLORS = Object.freeze({
-  PASS: 0x2ea043,
-  WARN: 0xd97706,
-  STOP: 0xe5484d,
-  INFO: 0x4da3ff,
-  UNKNOWN: 0x8b949e,
+export { addEdges, blueprintMaterial };
+
+// Blueprint palette (single source of truth for this file; the values
+// match components.js — one blue, #0B3D91, everywhere).
+export const BLUEPRINT = Object.freeze({
+  background: 0xffffff,
+  fill: BLUEPRINT_FILL,
+  fill2: BLUEPRINT_FILL_2,
+  edge: BLUEPRINT_BLUE,
+  ink: 0x1e3a5f,
 });
 
-// Default (no verdict yet) body colour per component type.
+// Verdict -> EDGE colour. Severity changes edges + glow only; fills stay
+// white / pale-blue and wires stay blue. Matches overlay.js
+// SEVERITY_COLORS exactly (STOP #d92d20, WARN #92400E, PASS #1a7f37).
+// UNKNOWN is blueprint blue with no glow: no report, no signal.
+export const VERDICT_COLORS = Object.freeze({
+  PASS: 0x1a7f37,
+  WARN: 0x92400e,
+  STOP: 0xd92d20,
+  INFO: 0x667085, // never colours a part; INFO resolves to neutral blue
+  UNKNOWN: BLUEPRINT_BLUE,
+});
+
+// Default body fill per component type. Type is read from shape + label,
+// not colour, so these are all white / pale-blue by design.
 export const COMPONENT_COLORS = Object.freeze({
-  resistor: 0xc9a227,
-  capacitor: 0x4da3ff,
-  led: 0xff4d4d,
-  diode: 0xff8a5c,
-  voltage_source: 0x3ddc84,
-  current_source: 0xb388ff,
-  default: 0x8b949e,
+  resistor: BLUEPRINT_FILL,
+  capacitor: BLUEPRINT_FILL_2,
+  led: BLUEPRINT_FILL_2,
+  diode: BLUEPRINT_FILL,
+  voltage_source: BLUEPRINT_FILL_2,
+  current_source: BLUEPRINT_FILL,
+  default: BLUEPRINT_FILL,
 });
 
 const COMPONENT_TYPES = new Set([
@@ -62,6 +101,24 @@ const COMPONENT_TYPES = new Set([
 
 const SPACING = 2.2; // layout spacing between components on the x axis (scene units, not electrical)
 const GROUND_Y = 0;
+
+// Classic isometric view: elevation 35.264 deg, azimuth 45 deg, giving
+// dir = (cos(el)*sin(az), sin(el), cos(el)*cos(az)) = (0.577, 0.577, 0.577)
+// (normalised). All three axes are equally foreshortened: true isometric.
+export const ISO_ELEVATION_DEG = 35.264;
+export const ISO_AZIMUTH_DEG = 45;
+const _el = THREE.MathUtils.degToRad(ISO_ELEVATION_DEG);
+const _az = THREE.MathUtils.degToRad(ISO_AZIMUTH_DEG);
+export const ISO_DIRECTION = Object.freeze(new THREE.Vector3(
+  Math.cos(_el) * Math.sin(_az),
+  Math.sin(_el),
+  Math.cos(_el) * Math.cos(_az),
+).normalize());
+
+const UP = new THREE.Vector3(0, 1, 0);
+const CAMERA_DISTANCE = 50; // arbitrary in ortho (only near/far care); the frustum does the fitting
+const ORTHO_NEAR = -100;
+const ORTHO_FAR = 100;
 
 function normalizeType(type) {
   const t = String(type || '').trim().toLowerCase();
@@ -80,144 +137,59 @@ function verdictColor(verdict) {
   return VERDICT_COLORS[normalizeVerdict(verdict)];
 }
 
-function makeMaterial(color, { emissive = 0x000000, emissiveIntensity = 0 } = {}) {
-  return new THREE.MeshStandardMaterial({
-    color,
-    emissive,
-    emissiveIntensity,
-    roughness: 0.55,
-    metalness: 0.25,
+function prefersReducedMotion() {
+  return typeof window !== 'undefined'
+    && typeof window.matchMedia === 'function'
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+// Mesh-only bounding box of a group: glow sprites are excluded (their
+// geometry carries an empty bounding box by construction — see
+// components.js finalizeGroup — but this stays correct even for groups
+// built any other way). Edges (LineSegments) share their mesh's bounds.
+function meshBox(root) {
+  const box = new THREE.Box3();
+  root.updateWorldMatrix(true, true);
+  root.traverse((obj) => {
+    if (!obj.isMesh) return;
+    const b = new THREE.Box3().setFromObject(obj);
+    if (!b.isEmpty()) box.union(b);
   });
+  return box;
 }
 
-function box(w, h, d, color, x = 0, y = 0, z = 0) {
-  const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), makeMaterial(color));
-  mesh.position.set(x, y, z);
-  mesh.castShadow = true;
-  return mesh;
-}
-
-function cylinder(rt, rb, h, color, x = 0, y = 0, z = 0, radialSegments = 24) {
-  const mesh = new THREE.Mesh(
-    new THREE.CylinderGeometry(rt, rb, h, radialSegments),
-    makeMaterial(color),
-  );
-  mesh.position.set(x, y, z);
-  mesh.castShadow = true;
-  return mesh;
-}
-
-// One schematic-style mesh group per component type. Geometry is purely
-// visual; it encodes no electrical value.
-function buildComponentMesh(component) {
-  const type = normalizeType(component.type);
-  const color = COMPONENT_COLORS[type] ?? COMPONENT_COLORS.default;
-  const group = new THREE.Group();
-  const bodyY = 0.55;
-
-  if (type === 'resistor') {
-    const body = cylinder(0.28, 0.28, 1.1, color, 0, bodyY, 0);
-    body.rotation.z = Math.PI / 2;
-    group.add(body);
-    const lead = cylinder(0.05, 0.05, 0.7, 0xcccccc, -0.9, bodyY, 0, 8);
-    lead.rotation.z = Math.PI / 2;
-    const lead2 = lead.clone();
-    lead2.position.x = 0.9;
-    group.add(lead, lead2);
-  } else if (type === 'capacitor') {
-    group.add(box(0.12, 0.9, 0.7, color, -0.18, bodyY, 0));
-    group.add(box(0.12, 0.9, 0.7, 0xdddddd, 0.18, bodyY, 0));
-    const lead = cylinder(0.05, 0.05, 0.5, 0xcccccc, -0.55, bodyY, 0, 8);
-    lead.rotation.z = Math.PI / 2;
-    const lead2 = lead.clone();
-    lead2.position.x = 0.55;
-    group.add(lead, lead2);
-  } else if (type === 'led' || type === 'diode') {
-    const cone = new THREE.Mesh(
-      new THREE.ConeGeometry(0.42, 0.8, 24),
-      makeMaterial(color, { emissive: color, emissiveIntensity: 0.35 }),
-    );
-    cone.rotation.z = -Math.PI / 2;
-    cone.position.set(0, bodyY, 0);
-    cone.castShadow = true;
-    group.add(cone);
-    group.add(box(0.1, 0.7, 0.7, 0xdddddd, 0.5, bodyY, 0));
-    const lead = cylinder(0.05, 0.05, 0.5, 0xcccccc, -0.7, bodyY, 0, 8);
-    lead.rotation.z = Math.PI / 2;
-    group.add(lead);
-    if (type === 'led') {
-      const dome = new THREE.Mesh(
-        new THREE.SphereGeometry(0.3, 24, 16),
-        makeMaterial(color, { emissive: color, emissiveIntensity: 0.6 }),
-      );
-      dome.position.set(-0.45, bodyY + 0.45, 0);
-      dome.castShadow = true;
-      group.add(dome);
-    }
-  } else if (type === 'voltage_source') {
-    const cell = cylinder(0.35, 0.35, 1.0, color, 0, bodyY, 0);
-    group.add(cell);
-    group.add(cylinder(0.36, 0.36, 0.08, 0xdddddd, 0, bodyY + 0.54, 0));
-    const lead = cylinder(0.05, 0.05, 0.5, 0xcccccc, 0, bodyY + 0.8, 0, 8);
-    const lead2 = lead.clone();
-    lead2.position.y = bodyY - 0.8;
-    group.add(lead, lead2);
-  } else if (type === 'current_source') {
-    const ring = new THREE.Mesh(
-      new THREE.TorusGeometry(0.45, 0.12, 12, 32),
-      makeMaterial(color),
-    );
-    ring.position.set(0, bodyY, 0);
-    ring.castShadow = true;
-    group.add(ring);
-    const arrow = new THREE.Mesh(
-      new THREE.ConeGeometry(0.16, 0.45, 12),
-      makeMaterial(0xffffff),
-    );
-    arrow.position.set(0, bodyY, 0);
-    group.add(arrow);
-  } else {
-    group.add(box(0.9, 0.9, 0.9, color, 0, bodyY, 0));
-  }
-
-  // Small feet so every part sits on the ground plane.
-  const footL = box(0.08, bodyY, 0.08, 0x666666, -0.85, bodyY / 2, 0);
-  const footR = box(0.08, bodyY, 0.08, 0x666666, 0.85, bodyY / 2, 0);
-  group.add(footL, footR);
-
-  group.userData.componentId = component.id;
-  group.userData.type = type;
-  group.userData.value = component.value ?? null;
-  group.userData.nodes = Array.isArray(component.nodes)
-    ? component.nodes
-    : [];
-  group.userData.verdict = 'UNKNOWN';
-  group.userData.baseColor = color;
-  group.traverse((child) => {
-    if (child.isMesh) {
-      child.userData.componentId = component.id;
-      child.userData.rootGroup = group;
-    }
-  });
-  return group;
-}
-
+// Severity: edge recolour + soft glow, rest stays blue.
+// A finding changes only the affected part's edges and its glow sprite.
+// Fill stays white / pale-blue, wires stay blue, every other part stays
+// exactly as it was. UNKNOWN (and INFO, which never colours) restores
+// blue edges and hides the glow. PASS glows fainter (0.18) than
+// WARN / STOP (0.35). No PASS is ever inferred here: callers pass the
+// verdict, and updateVerdictColors / overlay severityForComponent own
+// the worst-severity-wins rule.
 function applyVerdictToGroup(group, verdict) {
   const v = normalizeVerdict(verdict);
-  const color = VERDICT_COLORS[v];
   group.userData.verdict = v;
+  const neutral = v === 'UNKNOWN' || v === 'INFO';
+  const edgeHex = neutral ? BLUEPRINT_BLUE : VERDICT_COLORS[v];
+  const edgeMat = group.userData.edgeMaterial;
+  if (edgeMat && edgeMat.color) edgeMat.color.setHex(edgeHex);
+  // Groups built without a shared edge material (or with extra
+  // per-mesh edge materials) still recolour through the stored material.
   group.traverse((child) => {
-    if (!child.isMesh || !child.material || !child.material.emissive) return;
-    // Tint the body toward the verdict colour; keep metal leads neutral.
-    if (child.material.color.getHex() === 0xcccccc
-      || child.material.color.getHex() === 0xdddddd
-      || child.material.color.getHex() === 0x666666
-      || child.material.color.getHex() === 0xffffff) {
-      return;
-    }
-    child.material.emissive.setHex(color);
-    child.material.emissiveIntensity = v === 'UNKNOWN' ? 0 : 0.45;
+    if (!child.isMesh) return;
+    const m = child.userData.edgeMaterial;
+    if (m && m !== edgeMat && m.color) m.color.setHex(edgeHex);
   });
+  const glow = group.userData.glowSprite;
+  if (glow) {
+    if (neutral) {
+      glow.visible = false;
+    } else {
+      glow.material.color.setHex(VERDICT_COLORS[v]);
+      glow.material.opacity = v === 'PASS' ? 0.18 : 0.35;
+      glow.visible = true;
+    }
+  }
 }
 
 function layoutPosition(index, position) {
@@ -228,17 +200,21 @@ function layoutPosition(index, position) {
 }
 
 /**
- * Frame the camera on the circuit's bounding box.
+ * Frame the camera on the circuit's bounding box (orthographic fit).
  *
- * Computes the Box3 union of every mesh in `view.components`, puts the
- * OrbitControls target on its centre, and moves the camera along its
- * current viewing direction (so an orbit angle the user chose is kept)
- * to the smallest distance at which every corner of the box fits inside
- * the view frustum (vertical and horizontal FOV both honoured), times
- * `options.margin` (default 1.15). Returns false (and moves nothing)
- * when there are no components, so an empty scene keeps its view.
- * Callers: main3d.js buildDisplayed() — i.e. on load and on every
- * setNetlist / history-round rebuild. Also exposed as view.frameCamera.
+ * Computes the Box3 union of every mesh in `view.components`, expands
+ * it for the slab and dimension lines (slab pad 0.8 + dimension offset
+ * 0.5 = 1.3 per side in X/Z, slab bottom 0.18 in Y), then sizes the
+ * ortho frustum from the exact corner fit: project the 8 box corners
+ * onto the camera's right/up axes, take max |x| / max |y|, apply
+ * `options.margin` (default 1.15), enforce the aspect, and set
+ * left/right/top/bottom with zoom reset to 1. The current view
+ * direction is kept (so an orbit angle the user chose survives); only
+ * the frustum, target and position change. Returns false (and moves
+ * nothing) when there are no components, so an empty scene keeps its
+ * view. Callers: main3d.js buildDisplayed() — i.e. on load and on every
+ * setNetlist / history-round rebuild — via resetToIso (full reset) or
+ * directly. Also exposed as view.frameCamera.
  */
 export function frameCamera(view, options = {}) {
   if (!view || !view.camera || !view.controls
@@ -247,77 +223,118 @@ export function frameCamera(view, options = {}) {
   let hasBox = false;
   view.components.forEach((group) => {
     if (!group) return;
-    const b = new THREE.Box3().setFromObject(group);
+    const b = meshBox(group);
     if (b.isEmpty()) return;
     box.union(b);
     hasBox = true;
   });
   if (!hasBox || box.isEmpty()) return false;
 
+  // Include the slab and dimension lines in the fit, so the fit never
+  // crops the slab edge or a dimension line.
+  box.min.x -= 1.3;
+  box.max.x += 1.3;
+  box.min.z -= 1.3;
+  box.max.z += 1.3;
+  box.min.y -= SLAB_BOTTOM_PAD;
+
   const center = box.getCenter(new THREE.Vector3());
   const margin = Number.isFinite(options.margin) && options.margin > 0
     ? options.margin
     : 1.15;
 
-  // Keep the current viewing direction; only distance/target change.
+  // Keep the current viewing direction; only frustum/target change.
   const direction = view.camera.position.clone().sub(view.controls.target);
-  if (direction.lengthSq() < 1e-6) direction.set(0.5, 0.45, 0.75);
+  if (direction.lengthSq() < 1e-6) direction.copy(ISO_DIRECTION);
   direction.normalize();
 
-  const vHalf = THREE.MathUtils.degToRad(view.camera.fov / 2);
-  const hHalf = Math.atan(
-    Math.tan(vHalf) * Math.max(view.camera.aspect || 1, 0.01),
-  );
-  const right = new THREE.Vector3().crossVectors(direction, new THREE.Vector3(0, 1, 0));
+  const right = new THREE.Vector3().crossVectors(direction, UP);
   if (right.lengthSq() < 1e-6) right.set(1, 0, 0); // looking straight down
   right.normalize();
   const up = new THREE.Vector3().crossVectors(right, direction).normalize();
 
-  // Smallest distance at which every box corner is inside the frustum:
-  // a corner at offset v needs depth >= |v.right| / tan(hHalf) and
-  // >= |v.up| / tan(vHalf), where depth = distance - v.along (corners
-  // toward the camera are nearer, so they need more distance).
-  // A bounding sphere would force the long, flat LED circuit to fit its
-  // 6-unit length into the viewport height; the corner fit fills the
-  // width instead.
-  let distance = 0;
+  // Exact corner fit: a bounding sphere would force the long, flat LED
+  // circuit to fit its 6-unit length into the viewport height; the
+  // corner fit fills the width instead.
+  let halfW = 0;
+  let halfH = 0;
   for (const x of [box.min.x, box.max.x]) {
     for (const y of [box.min.y, box.max.y]) {
       for (const z of [box.min.z, box.max.z]) {
         const v = new THREE.Vector3(x, y, z).sub(center);
-        const along = v.dot(direction);
-        distance = Math.max(
-          distance,
-          Math.abs(v.dot(right)) / Math.tan(hHalf) + along,
-          Math.abs(v.dot(up)) / Math.tan(vHalf) + along,
-        );
+        halfW = Math.max(halfW, Math.abs(v.dot(right)));
+        halfH = Math.max(halfH, Math.abs(v.dot(up)));
       }
     }
   }
-  distance *= margin;
-  const minD = view.controls.minDistance ?? 2;
-  const maxD = view.controls.maxDistance ?? 40;
-  distance = THREE.MathUtils.clamp(distance, minD, maxD);
+  halfW *= margin;
+  halfH *= margin;
+  const aspect = Math.max(view.camera.aspect || 1, 0.01);
+  halfH = Math.max(halfH, halfW / aspect);
+  halfW = halfH * aspect;
+
+  const cam = view.camera;
+  cam.left = -halfW;
+  cam.right = halfW;
+  cam.top = halfH;
+  cam.bottom = -halfH;
+  cam.zoom = 1;
+  cam.updateProjectionMatrix();
+  view._orthoHalfH = halfH;
 
   view.controls.target.copy(center);
-  view.camera.position.copy(center).addScaledVector(direction, distance);
+  cam.position.copy(center).addScaledVector(direction, CAMERA_DISTANCE);
   view.controls.update();
   return true;
+}
+
+// Slab bottom sits 0.18 below y = 0 (slab height); the fit includes it.
+const SLAB_BOTTOM_PAD = 0.18;
+
+/**
+ * Reset to the canonical isometric view: discard any user orbit, set
+ * the camera direction back to (0.577, 0.577, 0.577), then fit the
+ * bounding box with frameCamera. That is the whole reset: direction +
+ * fit, nothing else. Call it from buildDisplayed() on load and on every
+ * setNetlist / history-round rebuild (a new netlist is a new drawing).
+ * A plain updateReport (no netlist change) must NOT call it: it only
+ * re-tints and re-labels. Also exposed as view.resetToIso().
+ */
+export function resetToIso(view) {
+  if (!view || !view.camera || !view.controls) return false;
+  const center = view.controls.target.clone();
+  view.camera.position.copy(center).addScaledVector(ISO_DIRECTION, CAMERA_DISTANCE);
+  view.controls.update();
+  return frameCamera(view);
 }
 
 /**
  * Create the Three.js scene inside `container`.
  *
+ * Orthographic isometric camera (35.264 deg elevation, 45 deg azimuth),
+ * white background, OrbitControls (rotate / pan / wheel zoom via
+ * camera.zoom 0.5-8, polar clamped so the camera never goes under the
+ * slab). No lights, no fog, no shadows, no ground grid: MeshBasicMaterial
+ * is unlit, and the blueprint has one raised slab, not an infinite grid.
+ *
  * @param {HTMLElement} container - element the renderer canvas is appended to.
  * @param {object} [options]
  * @param {(componentId: string | null) => void} [options.onPick] - called
  *   with the picked component id, or null when empty space is clicked.
- * @param {number} [options.background] - scene background colour (default dark).
+ * @param {number} [options.background] - scene background colour (default white).
  * @returns {{ scene, camera, renderer, controls, components: Map,
- *   raycaster, selectedId, pickAt, setOnPick, frameCamera, dispose }}
+ *   raycaster, selectedId, pickAt, setOnPick, frameCamera, resetToIso,
+ *   setExploded, toggleExplode, isExploded, stepExplode, resetExplode,
+ *   dispose }}
  *   `components` maps component id -> mesh group. The render loop runs
  *   until `dispose()` is called. `frameCamera()` fits the camera to
- *   the bounding box of every component (see frameCamera).
+ *   the bounding box of every component (see frameCamera);
+ *   `resetToIso()` restores the canonical iso direction and fits.
+ *   Explode state: `setExploded(bool)` tweens every component group to
+ *   its staggered offset (0.9 + 0.18 * index) over 300 ms with
+ *   easeInOutCubic, driven by the animate loop (and by `stepExplode(now)`
+ *   for callers with their own tick); `resetExplode()` snaps every group
+ *   back to its base Y and clears the flag — call it on setNetlist.
  */
 export function createScene(container, options = {}) {
   if (!container || typeof container.appendChild !== 'function') {
@@ -326,26 +343,35 @@ export function createScene(container, options = {}) {
   const onPick = typeof options.onPick === 'function' ? options.onPick : null;
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(options.background ?? 0x0b0e14);
-  scene.fog = new THREE.Fog(0x0b0e14, 18, 42);
+  scene.background = new THREE.Color(options.background ?? BLUEPRINT.background);
+  // No fog: a white blueprint must not fade to dark. No lights, no
+  // shadows: MeshBasicMaterial is unlit by definition.
 
-  const camera = new THREE.PerspectiveCamera(
-    50,
-    container.clientWidth / Math.max(container.clientHeight, 1),
-    0.1,
-    200,
+  const aspect = container.clientWidth / Math.max(container.clientHeight, 1);
+  const initialHalfH = 5;
+  const camera = new THREE.OrthographicCamera(
+    -initialHalfH * aspect,
+    initialHalfH * aspect,
+    initialHalfH,
+    -initialHalfH,
+    ORTHO_NEAR,
+    ORTHO_FAR,
   );
-  camera.position.set(6, 6, 9);
+  camera.position.copy(ISO_DIRECTION).multiplyScalar(CAMERA_DISTANCE).add(new THREE.Vector3(0, 0.5, 0));
+  // OrthographicCamera has no aspect in its constructor; set it here so
+  // frameCamera's aspect enforcement is correct before any resize.
+  camera.aspect = aspect;
 
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   renderer.setSize(container.clientWidth, container.clientHeight);
-  renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   container.appendChild(renderer.domElement);
 
   // OrbitControls: left-drag rotate, right-drag pan, wheel zoom.
-  // enableDamping smooths all three; update() is called every frame.
+  // In ortho, wheel zoom changes camera.zoom, not distance, so the
+  // limits are minZoom/maxZoom (minDistance/maxDistance are meaningless
+  // here and are not set). enableDamping smooths all three; update()
+  // is called every frame.
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
   controls.dampingFactor = 0.08;
@@ -361,39 +387,12 @@ export function createScene(container, options = {}) {
     ONE: THREE.TOUCH.ROTATE,
     TWO: THREE.TOUCH.DOLLY_PAN,
   };
-  controls.minDistance = 2;
-  controls.maxDistance = 40;
-  controls.maxPolarAngle = Math.PI / 2 - 0.02; // stay above the ground plane
+  controls.minZoom = 0.5;
+  controls.maxZoom = 8;
+  controls.minPolarAngle = 0.15; // never flip under the slab from the top
+  controls.maxPolarAngle = Math.PI / 2 - 0.02; // stay above the slab
+  controls.screenSpacePanning = false; // pan moves in the ground plane
   controls.target.set(0, 0.5, 0);
-
-  // Lights: soft ambient fill + key directional with shadows.
-  const ambient = new THREE.AmbientLight(0xffffff, 0.55);
-  scene.add(ambient);
-  const directional = new THREE.DirectionalLight(0xffffff, 1.4);
-  directional.position.set(6, 10, 4);
-  directional.castShadow = true;
-  directional.shadow.mapSize.set(2048, 2048);
-  directional.shadow.camera.left = -12;
-  directional.shadow.camera.right = 12;
-  directional.shadow.camera.top = 12;
-  directional.shadow.camera.bottom = -12;
-  scene.add(directional);
-  const rim = new THREE.DirectionalLight(0x4da3ff, 0.35);
-  rim.position.set(-6, 4, -6);
-  scene.add(rim);
-
-  // Dark grid ground: large ground plane + grid lines.
-  const ground = new THREE.Mesh(
-    new THREE.PlaneGeometry(60, 60),
-    new THREE.MeshStandardMaterial({ color: 0x11151d, roughness: 0.95, metalness: 0 }),
-  );
-  ground.rotation.x = -Math.PI / 2;
-  ground.position.y = GROUND_Y;
-  ground.receiveShadow = true;
-  scene.add(ground);
-  const grid = new THREE.GridHelper(40, 40, 0x2a3342, 0x1a2230);
-  grid.position.y = GROUND_Y + 0.01;
-  scene.add(grid);
 
   const components = new Map();
   const raycaster = new THREE.Raycaster();
@@ -403,15 +402,81 @@ export function createScene(container, options = {}) {
   let disposed = false;
   let rafId = 0;
 
+  // -- Inspect explode (visual only: writes group.position.y and
+  //    nothing else; never touches nodes, values or verdicts). --------
+  let explodeTarget = false; // where the tween is headed
+  let explodeAnim = null; // { from: Map<group, y>, to: Map<group, y>, start, target }
+
+  function explodeGroups() {
+    const groups = [...components.values()].filter(Boolean);
+    return groups.map((group, order) => ({
+      group,
+      index: Number.isFinite(group.userData.explodeIndex)
+        ? group.userData.explodeIndex
+        : order,
+      baseY: Number.isFinite(group.userData.baseY) ? group.userData.baseY : 0,
+    }));
+  }
+
+  function snapExplode(target) {
+    for (const { group, index, baseY } of explodeGroups()) {
+      group.position.y = baseY + (target ? explodeOffset(index) : 0);
+    }
+  }
+
+  function setExploded(next) {
+    const target = next === true;
+    if (target === explodeTarget && !explodeAnim) return target;
+    explodeTarget = target;
+    if (prefersReducedMotion()) {
+      explodeAnim = null;
+      snapExplode(target);
+      return target;
+    }
+    const from = new Map();
+    const to = new Map();
+    for (const { group, index, baseY } of explodeGroups()) {
+      from.set(group, group.position.y);
+      to.set(group, baseY + (target ? explodeOffset(index) : 0));
+    }
+    explodeAnim = {
+      from,
+      to,
+      start: typeof performance !== 'undefined' ? performance.now() : 0,
+      target,
+    };
+    return target;
+  }
+
+  // Advance the explode tween to time `now` (ms, same clock as
+  // performance.now()). Called every frame from the animate loop; also
+  // exposed so a caller with its own tick (main3d.js) can drive it —
+  // calling it twice for one frame is harmless (same `now`, same Y).
+  // Toggling mid-tween reverses from the current Y, never snaps.
+  function stepExplode(now) {
+    if (!explodeAnim) return;
+    const t = Math.min(1, Math.max(0, (now - explodeAnim.start) / EXPLODE_DURATION_MS));
+    const e = easeInOutCubic(t);
+    for (const [group, fromY] of explodeAnim.from) {
+      const toY = explodeAnim.to.get(group);
+      if (toY === undefined) continue;
+      if (group.parent === null && !components.has(group.userData.componentId)) continue;
+      group.position.y = fromY + (toY - fromY) * e;
+    }
+    if (t >= 1) explodeAnim = null;
+  }
+
+  function resetExplode() {
+    explodeTarget = false;
+    explodeAnim = null;
+    snapExplode(false);
+  }
+
   function setSelected(componentId) {
-    if (selectedId && components.has(selectedId)) {
-      const prev = components.get(selectedId);
-      prev.scale.setScalar(1);
-    }
-    selectedId = componentId;
-    if (componentId && components.has(componentId)) {
-      components.get(componentId).scale.setScalar(1.12);
-    }
+    // State only. The old 1.12x scale pop is gone: it would break the
+    // flat blueprint read and fight the explode tween. Selection's
+    // single visual signal is the BoxHelper outline in interaction.js.
+    selectedId = componentId && components.has(componentId) ? componentId : null;
   }
 
   function pickAt(clientX, clientY) {
@@ -445,22 +510,26 @@ export function createScene(container, options = {}) {
   function resize() {
     const w = container.clientWidth;
     const h = Math.max(container.clientHeight, 1);
-    camera.aspect = w / h;
+    const nextAspect = w / h;
+    camera.aspect = nextAspect;
+    // Re-apply the stored frustum height for the new aspect; only the
+    // aspect changes on resize. A user zoom is preserved (zoom is not
+    // reset here) and the box is NOT re-fit.
+    const halfH = Number.isFinite(view._orthoHalfH) ? view._orthoHalfH : initialHalfH;
+    camera.left = -halfH * nextAspect;
+    camera.right = halfH * nextAspect;
+    camera.top = halfH;
+    camera.bottom = -halfH;
     camera.updateProjectionMatrix();
     renderer.setSize(w, h);
   }
-  const resizeObserver = new ResizeObserver(resize);
-  resizeObserver.observe(container);
-  window.addEventListener('resize', resize);
-
-  function animate() {
+  function animate(now) {
     if (disposed) return;
     rafId = requestAnimationFrame(animate);
     controls.update();
+    stepExplode(typeof now === 'number' ? now : (typeof performance !== 'undefined' ? performance.now() : 0));
     renderer.render(scene, camera);
   }
-  animate();
-
   function dispose() {
     disposed = true;
     cancelAnimationFrame(rafId);
@@ -494,18 +563,37 @@ export function createScene(container, options = {}) {
     frameCamera(options) {
       return frameCamera(view, options);
     },
+    resetToIso() {
+      return resetToIso(view);
+    },
+    setExploded,
+    toggleExplode() {
+      return setExploded(!explodeTarget);
+    },
+    isExploded() {
+      return explodeTarget;
+    },
+    stepExplode,
+    resetExplode,
     dispose,
   };
+  const resizeObserver = new ResizeObserver(resize);
+  resizeObserver.observe(container);
+  window.addEventListener('resize', resize);
+  animate();
   return view;
 }
 
 /**
- * Add (or replace) one component mesh.
+ * Add (or replace) one component mesh. The mesh is built by the shared
+ * blueprint builders in components.js, so it looks identical to a part
+ * built by buildCircuit.
  * @param {object} view - return value of createScene().
  * @param {object} component - { id, type, value, nodes } (IR shape).
  * @param {object} [options]
  * @param {{ x: number, z: number }} [options.position] - explicit ground position;
  *   otherwise components auto-lay-out left to right in insertion order.
+ * @param {number} [options.span] - node-to-node distance for the part (default 3).
  * @param {string} [options.verdict] - initial verdict colour (PASS | WARN | STOP).
  * @returns {THREE.Group} the added mesh group.
  */
@@ -518,7 +606,19 @@ export function addComponent(view, component, options = {}) {
   }
   const id = component.id.trim();
   if (view.components.has(id)) removeComponent(view, id);
-  const group = buildComponentMesh({ ...component, id });
+  const type = normalizeType(component.type);
+  const group = buildComponentMesh(
+    {
+      id,
+      type,
+      value: component.value ?? null,
+      nodes: Array.isArray(component.nodes) ? component.nodes : ['n1', 'n2'],
+      color: component.color ?? null,
+      ratingWatts: component.rating_watts ?? component.ratingWatts ?? null,
+    },
+    Number.isFinite(options.span) && options.span > 0 ? options.span : 3,
+  );
+  group.userData.explodeIndex = view.components.size;
   const pos = layoutPosition(view.components.size, options.position);
   group.position.set(pos.x, GROUND_Y, pos.z);
   view.scene.add(group);
@@ -538,6 +638,18 @@ export function addComponents(view, netlist, options = {}) {
   return rows.map((row) => addComponent(view, row, options));
 }
 
+function disposeObject(root) {
+  root.traverse((child) => {
+    if (child.isMesh || child.isLine || child.isSprite) {
+      child.geometry?.dispose?.();
+      const materials = Array.isArray(child.material) ? child.material : [child.material];
+      for (const m of materials) {
+        if (m && typeof m.dispose === 'function') m.dispose();
+      }
+    }
+  });
+}
+
 /**
  * Remove a component mesh by id. Returns true if one was removed.
  */
@@ -547,13 +659,7 @@ export function removeComponent(view, componentId) {
   const group = view.components.get(id);
   if (!group) return false;
   view.scene.remove(group);
-  group.traverse((child) => {
-    if (child.isMesh) {
-      child.geometry?.dispose?.();
-      if (Array.isArray(child.material)) child.material.forEach((m) => m.dispose?.());
-      else child.material?.dispose?.();
-    }
-  });
+  disposeObject(group);
   view.components.delete(id);
   if (view.selectedId === id) view.setSelected(null);
   return true;
@@ -562,6 +668,7 @@ export function removeComponent(view, componentId) {
 /** Remove every component mesh. Returns the number removed. */
 export function clearComponents(view) {
   if (!view || !view.components) return 0;
+  if (typeof view.resetExplode === 'function') view.resetExplode();
   const ids = [...view.components.keys()];
   ids.forEach((id) => removeComponent(view, id));
   return ids.length;
@@ -581,8 +688,10 @@ export function getComponentMesh(view, componentId) {
  *     the listed ids; omit the list to colour every component), or
  *   updateVerdictColors(view, findings) where findings is an array of
  *     { severity, component_ids } from a /check report — the worst
- *     severity per component wins (STOP > WARN > INFO).
+ *     severity per component wins (STOP > WARN > INFO; INFO never colours,
+ *     it resolves to neutral blue).
  * Unknown ids are ignored. Returns the map of id -> applied verdict.
+ * Severity changes edges + glow only: fills stay white / pale-blue.
  */
 export function updateVerdictColors(view, verdicts, componentIds) {
   if (!view || !view.components) return {};
@@ -637,7 +746,7 @@ export function setComponentVerdict(view, componentId, verdict) {
   return true;
 }
 
-/** Reset every component to the neutral (no verdict) colour. */
+/** Reset every component to the neutral (no verdict) colour: blue edges, no glow. */
 export function resetVerdictColors(view) {
   if (!view || !view.components) return;
   view.components.forEach((group) => applyVerdictToGroup(group, 'UNKNOWN'));

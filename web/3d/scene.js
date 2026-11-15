@@ -17,14 +17,17 @@
 // No simulation numbers live here: colours come only from the verdict
 // values the caller passes in (which must come from a real /check run).
 //
-// NOTE on imports: OrbitControls (three r160 examples/jsm) imports the
-// bare specifier 'three' internally, so the host page needs an import map
-// mapping 'three' to the same three.module.js URL before this module can
-// run in a browser. That map belongs in web/index.html, which this file
-// must not edit, so a later agent wires it there.
+// NOTE on imports: every module in web/3d/ imports the bare specifier
+// 'three' (and 'three/addons/...' for OrbitControls), resolved by the
+// host page's import map to unpkg three@0.160.0, so the whole 3D layer
+// shares exactly one THREE instance. OrbitControls imports bare
+// 'three' internally too, so the map must be present before this
+// module can run in a browser. That map belongs in web/index.html,
+// which this file must not edit. Do NOT import three from a direct
+// CDN URL: a second URL would load a second THREE instance.
 
-import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
-import { OrbitControls } from 'https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js';
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 // Verdict -> mesh colour. Matches the 2D verdict banner in web/index.html
 // (PASS green #1a7f37, WARN amber #d97706, STOP red #b00020), brightened

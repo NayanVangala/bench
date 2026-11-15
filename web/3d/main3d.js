@@ -81,12 +81,15 @@
 //       (restored on dispose). Mount: an element (or selector) to append
 //       the panel to; without one the caller appends handle.element.
 //
-// Three.js: pinned 0.160.0 from unpkg, the SAME URL scene.js and
-// components.js import, so all three share one module instance:
-//   https://unpkg.com/three@0.160.0/build/three.module.js
-// The host page still needs the import map for interaction.js's bare
-// 'three' (see above); that map belongs in web/index.html, which this
-// file must not edit.
+// Three.js: every module in this directory imports the bare specifier
+// 'three' (and 'three/addons/...' for OrbitControls), resolved by the
+// host page's import map to unpkg three@0.160.0. That map is the single
+// source of the version, and because every import resolves to the same
+// URL there is exactly one THREE instance in the page. Do NOT import
+// three from a direct CDN URL here: a second URL would load a second
+// instance and break instanceof / material sharing with OrbitControls
+// and interaction.js. The import map belongs in web/index.html, which
+// this file must not edit.
 //
 // Click vs double-click (per README-3D.md): click selects, double-click
 // edits. main3d.js opens the edit panel on interaction onEdit only,
@@ -142,7 +145,7 @@
 //      changes: [string | { description|message|text|summary }] }]
 //   or a single such entry, or { history: [...] }.
 
-import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+import * as THREE from 'three';
 import { createScene } from './scene.js';
 import { buildCircuit } from './components.js';
 import { setupInteraction } from './interaction.js';
@@ -427,6 +430,14 @@ export function init3D(container, callbacks = {}, options = {}) {
   if (!scene || !camera || !renderer) {
     throw new Error('netproof 3D: scene.js createScene did not return a scene, camera and renderer');
   }
+
+  // The container ships with a loading placeholder (index.html
+  // .fallback). Once the scene exists the placeholder must go: left in
+  // place its text sits over the canvas and the panel looks broken
+  // even though the view works. A later throw still lands in the
+  // page's failure path, which rewrites the container itself.
+  const placeholder = element.querySelector('.fallback');
+  if (placeholder) placeholder.remove();
 
   // -- THREE as a global, for history.js only (UMD: reads window.THREE). ---
   const prevWindowTHREE = (typeof window !== 'undefined') ? window.THREE : undefined;

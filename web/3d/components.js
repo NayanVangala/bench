@@ -21,10 +21,12 @@
 // or powers are read here and none are invented — those live in the
 // backend simulation results, not in this file.
 //
-// Three.js comes from the same CDN + version as web/3d/scene.js
-// (unpkg, three@0.160.0) so both modules share one module instance.
+// Three.js comes from the bare 'three' specifier, resolved by the host
+// page's import map to unpkg three@0.160.0 — the same instance every
+// other web/3d/ module uses. Do NOT import three from a direct CDN URL
+// here: a second URL would load a second THREE instance.
 
-import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+import * as THREE from 'three';
 
 export const GRID_X = 3; // node column spacing (scene units)
 export const GRID_Y = 2; // node row spacing (scene units)

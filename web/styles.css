@@ -278,12 +278,24 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
   border: 0; background: transparent; border-radius: 9px; padding: 8px 6px; font-size: 13px; font-weight: 600; color: var(--muted);
 }
 .domain-switch button[aria-pressed="true"] { background: var(--card); color: var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,0.12); }
-body[data-domain="circuit"] #panel-fiber, body[data-domain="circuit"] #fiber-check-btn { display: none; }
+body:not([data-domain="fiber"]) #panel-fiber, body:not([data-domain="fiber"]) #fiber-check-btn,
+body:not([data-domain="optics"]) #panel-optics, body:not([data-domain="optics"]) #optics-check-btn { display: none; }
 body[data-domain="fiber"] .drawer-panel:not(#panel-fiber),
-body[data-domain="fiber"] .drawer-tabs,
-body[data-domain="fiber"] #check-btn,
-body[data-domain="fiber"] #empty-state { display: none !important; }
-body[data-domain="fiber"] #panel-fiber { display: block; }
+body[data-domain="optics"] .drawer-panel:not(#panel-optics),
+body:not([data-domain="circuit"]) .drawer-tabs,
+body:not([data-domain="circuit"]) #check-btn,
+body:not([data-domain="circuit"]) #empty-state,
+body:not([data-domain="circuit"]) #chip-checks { display: none !important; }
+body[data-domain="fiber"] #panel-fiber, body[data-domain="optics"] #panel-optics { display: block; }
+#optics-verdict-card[data-verdict="PASS"] { border-color: var(--pass); background: var(--pass-bg); }
+#optics-verdict-card[data-verdict="WARN"] { border-color: var(--warn); background: var(--warn-bg); }
+#optics-verdict-card[data-verdict="STOP"] { border-color: var(--stop); background: var(--stop-bg); }
+.optics-plan svg { display: block; width: 100%; height: auto; border-radius: 8px; background: #2b2d33; }
+.optics-plan .hole { fill: #16181c; }
+.optics-plan .el { fill: #e9edf3; stroke: #0c0d10; stroke-width: 0.6; }
+.optics-plan .el.bad { fill: var(--stop); }
+.optics-plan .lbl { font: 9px "JetBrains Mono", monospace; fill: #c7d2e6; }
+.optics-plan .beam { stroke-linecap: round; }
 
 .verdict-word { font-size: 34px; line-height: 1; font-weight: 700; margin: 2px 0 12px; }
 .verdict-word:empty { display: none; }

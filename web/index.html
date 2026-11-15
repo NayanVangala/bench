@@ -235,7 +235,7 @@
       <div class="domain-switch" role="group" aria-label="What are you building?">
         <button type="button" data-domain="circuit" aria-pressed="true">Circuit</button>
         <button type="button" data-domain="fiber" aria-pressed="false">Fiber link</button>
-        <button type="button" data-domain="optics" aria-pressed="false" disabled title="Free-space optics bench: coming next">Optics bench</button>
+        <button type="button" data-domain="optics" aria-pressed="false">Optics bench</button>
       </div>
 
       <div class="drawer-panel" id="panel-fiber" aria-label="Fiber link">
@@ -283,6 +283,54 @@
             <button id="fiber-add-btn" type="button" class="ghost-btn">Add before detector</button>
           </div>
           <p class="empty">Losses use typical values; set a loss in dB on any element to override. The verdict comes from the power budget, never the AI.</p>
+        </section>
+      </div>
+
+      <div class="drawer-panel" id="panel-optics" aria-label="Optics bench">
+        <section class="card">
+          <div class="card-head"><span class="eyebrow" id="optics-examples-label"><span class="step">01</span> Examples</span></div>
+          <div class="example-grid" role="group" aria-labelledby="optics-examples-label">
+            <button type="button" class="example-btn" data-optics-example="good"><span class="vdot pass" aria-hidden="true"></span>Periscope to detector</button>
+            <button type="button" class="example-btn" data-optics-example="stray"><span class="vdot stop" aria-hidden="true"></span>Unblocked split arm</button>
+            <button type="button" class="example-btn" data-optics-example="misaligned"><span class="vdot stop" aria-hidden="true"></span>Mirror mis-angled</button>
+            <button type="button" class="example-btn" data-optics-example="overload"><span class="vdot stop" aria-hidden="true"></span>20 mW into a detector</button>
+          </div>
+        </section>
+        <section class="card verdict-card" id="optics-verdict-card">
+          <div class="card-head"><span class="eyebrow"><span class="step">02</span> Verdict</span></div>
+          <div id="optics-verdict" class="verdict-word" aria-live="polite"></div>
+          <p class="empty" id="optics-verdict-empty">No check yet.</p>
+          <button id="optics-pack-cta" type="button" class="cta-ghost" hidden>Ready to build &rarr; get the build pack (PDF)</button>
+          <dl class="readings" aria-label="Ray trace summary">
+            <div class="reading"><dt>At detector</dt><dd id="optics-rx">&mdash;</dd></div>
+            <div class="reading"><dt>Stray beams</dt><dd id="optics-stray">&mdash;</dd></div>
+            <div class="reading"><dt>Beam segments</dt><dd id="optics-segs">&mdash;</dd></div>
+          </dl>
+        </section>
+        <section class="card">
+          <div class="card-head"><span class="eyebrow"><span class="step">03</span> Findings</span></div>
+          <ul id="optics-findings" class="findings-list"><li class="empty">No findings yet. Run a check first.</li></ul>
+        </section>
+        <section class="card">
+          <div class="card-head"><span class="eyebrow"><span class="step">04</span> Top view</span></div>
+          <div id="optics-plan" class="optics-plan" role="img" aria-label="Top view of the bench with traced beams"></div>
+        </section>
+        <section class="card">
+          <div class="card-head"><span class="eyebrow"><span class="step">05</span> Elements</span></div>
+          <div class="table-wrap" tabindex="0" aria-label="Optics bench elements, scrollable">
+            <table class="fiber-table">
+              <thead><tr><th>id</th><th>type</th><th>x mm</th><th>y mm</th><th>angle&deg;</th><th>settings</th><th></th></tr></thead>
+              <tbody id="optics-body"><tr><td colspan="7" class="empty">Pick an example or add elements.</td></tr></tbody>
+            </table>
+          </div>
+          <div class="btn-row">
+            <select id="optics-add-type" aria-label="Element type to add">
+              <option value="mirror">mirror</option><option value="beamsplitter">beamsplitter</option><option value="lens">lens</option>
+              <option value="filter">ND filter</option><option value="dump">beam dump</option><option value="detector">detector</option>
+            </select>
+            <button id="optics-add-btn" type="button" class="ghost-btn">Add element</button>
+          </div>
+          <p class="empty">Angles: a laser's is its beam direction; a mirror's is its face normal (135&deg; turns a +x beam to +y). Positions snap to the 25 mm hole grid in the build guide.</p>
         </section>
       </div>
 
@@ -453,6 +501,7 @@
     <div class="drawer-foot">
       <button id="check-btn" type="button" class="cta">Check circuit &rarr;</button>
       <button id="fiber-check-btn" type="button" class="cta">Check link &rarr;</button>
+      <button id="optics-check-btn" type="button" class="cta">Trace beams &rarr;</button>
       <p class="canvas-trust" id="trust-line">Verdicts come from ngspice + fixed rules, never the AI.</p>
     </div>
   </aside>
@@ -2504,5 +2553,6 @@
   })();
 </script>
 <script src="fiber.js" defer></script>
+<script src="optics.js" defer></script>
 </body>
 </html>

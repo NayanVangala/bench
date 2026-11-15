@@ -185,10 +185,13 @@
     });
     $('trust-line').textContent = d === 'fiber'
       ? 'Verdicts come from the optical power budget + fixed rules, never the AI.'
+      : d === 'optics' ? 'Verdicts come from the ray trace + fixed rules, never the AI.'
       : 'Verdicts come from ngspice + fixed rules, never the AI.';
     var h = window.__netproof3d;
     if (d === 'fiber') {
       if (!link) loadExample('good'); else { renderAll(); show3d(); }
+    } else if (d === 'optics') {
+      if (window.NetproofOptics) window.NetproofOptics.activate();
     } else if (h && typeof h.setNetlist === 'function' && window.NetproofPage) {
       h.setNetlist(window.NetproofPage.getNetlist(), window.NetproofPage.getReport());
       if (window.NetproofPage.updateStatusStrip) window.NetproofPage.updateStatusStrip();
@@ -300,7 +303,18 @@
     box.innerHTML = svg + '</svg>';
   }
 
-  function renderTable() {
+  // Re-rendering replaces the inputs; keep keyboard focus on the same field.
+  function keepFocus(render) {
+    var a = document.activeElement;
+    var key = a && a.closest && a.closest('#fiber-body') ? [a.getAttribute('data-i'), a.getAttribute('data-k')] : null;
+    render();
+    if (key && key[0] != null) {
+      var el = document.querySelector('#fiber-body [data-i="' + key[0] + '"][data-k="' + key[1] + '"]');
+      if (el) el.focus();
+    }
+  }
+  function renderTable() { keepFocus(renderTableRows); }
+  function renderTableRows() {
     var body = $('fiber-body');
     if (!link) return;
     var trace = {};

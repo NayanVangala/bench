@@ -204,6 +204,7 @@ import { createScene, frameCamera } from './scene.js';
 import { buildCircuit } from './components.js';
 import { partModelsReady } from './models.js';
 import { buildFiberLink } from './fiber3d.js';
+import { buildOpticsBench } from './optics3d.js';
 import { setupInteraction } from './interaction.js';
 import {
   initOverlays,
@@ -1291,8 +1292,21 @@ export function init3D(container, callbacks = {}, options = {}) {
      * callouts, severity tints and framing). setNetlist returns to circuits.
      */
     setFiberLink(link, report) {
+      return handle.setModel(() => buildFiberLink(link), report);
+    },
+
+    /** Free-space optics bench (elements on posts + traced beams). */
+    setOpticsBench(bench, report) {
+      return handle.setModel(() => buildOpticsBench(bench, report), report);
+    },
+
+    /**
+     * Any non-circuit model: `builder()` returns { group, meshesById, ... }
+     * like buildCircuit. Picking, callouts, tints and framing all apply.
+     */
+    setModel(builder, report) {
       if (disposed) return handle;
-      displayedBuilder = () => buildFiberLink(link);
+      displayedBuilder = builder;
       currentNetlist = [];
       displayedNetlist = [];
       viewingHistory = false;

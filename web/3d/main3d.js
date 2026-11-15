@@ -202,6 +202,7 @@
 import * as THREE from 'three';
 import { createScene, frameCamera } from './scene.js';
 import { buildCircuit } from './components.js';
+import { partModelsReady } from './models.js';
 import { setupInteraction } from './interaction.js';
 import {
   initOverlays,
@@ -1474,6 +1475,8 @@ export function init3D(container, callbacks = {}, options = {}) {
   // -- Animation loop (overlay tick; scene.js renders). ---------------------
   rafId = requestAnimationFrame(tick);
 
+  // KiCad part models load async; redraw with them once they arrive.
+  partModelsReady.then(() => { if (!disposed) buildDisplayed(); });
   return handle;
 }
 

@@ -49,6 +49,7 @@
 // URL here: a second URL would load a second THREE instance.
 
 import * as THREE from 'three';
+import { partModel, MODEL_MM } from './models.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 
 export const GRID_X = 3; // node column spacing (scene units)
@@ -562,6 +563,20 @@ function finalizeGroup(group, comp) {
 
 function buildResistor(comp, span) {
   const group = new THREE.Group();
+  const model = partModel('resistor');
+  if (model) {
+    // KiCad DIN0207 body (L 6.3 mm, D 2.5 mm) + this part's own value bands.
+    group.add(model.object);
+    const r = 1.25 * MODEL_MM;
+    const len = 6.3 * MODEL_MM;
+    const y = model.size.y - r;
+    resistorBandColors(comp.value).forEach((color, i) => {
+      const band = xCylinder(r * 1.06, len * 0.08, blueprintMaterial(color), comp);
+      band.position.set(len * ([-0.3, -0.15, 0, 0.3][i] ?? 0), y, 0);
+      group.add(band);
+    });
+    return group;
+  }
   const bodyHalf = Math.min(0.6, span * 0.25);
   const bodyY = 0.32; // body radius, so the body sits on the slab
   const body = xCylinder(0.32, bodyHalf * 2, blueprintMaterial(PART_COLORS.resistorBody), comp);
@@ -587,6 +602,11 @@ function buildResistor(comp, span) {
 
 function buildCapacitor(comp, span) {
   const group = new THREE.Group();
+  const model = partModel('capacitor');
+  if (model) {
+    group.add(model.object);
+    return group;
+  }
   // Two parallel plates, faces normal to the component axis, 0.36 gap
   // between them; it is the symbol. White plate, pale-blue plate.
   const plateY = 0.65; // plate height 1.3, so the plates sit on the slab
@@ -608,6 +628,21 @@ function buildCapacitor(comp, span) {
 
 function buildDiode(comp, span, isLed) {
   const group = new THREE.Group();
+  const model = partModel(isLed ? 'led' : 'diode');
+  if (model) {
+    if (isLed) {
+      // Tint the LED's clear epoxy to this part's colour.
+      const ledHex = ledColorHex(comp.color || 'red');
+      model.object.traverse((o) => {
+        const mats = o.isMesh ? [].concat(o.material) : [];
+        for (const m of mats) {
+          if (m && m.transparent && m.color) { m.color.setHex(ledHex); m.opacity = Math.max(m.opacity, 0.8); }
+        }
+      });
+    }
+    group.add(model.object);
+    return group;
+  }
   if (isLed) {
     // Physical 5 mm LED, lying on its axis: domed top, flange rim,
     // two legs down to the slab. Anode is nodes[0] (local -X).

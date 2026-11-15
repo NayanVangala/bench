@@ -305,3 +305,7 @@ files, not running them.
   anywhere in this project. The guarantee is narrower and checkable: every
   verdict is derived from a real simulation run against the rule list
   above, never from the language model alone.
+
+## Credits
+
+3D part models (resistor, LED, capacitor, diode) are from the [KiCad 3D library](https://gitlab.com/kicad/libraries/kicad-packages3D), CC-BY-SA 4.0. See `web/3d/models/kicad/README.md`.

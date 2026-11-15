@@ -8,7 +8,9 @@ modules, whose real APIs this file is written against (read 2026-11-15)::
     ir.py     - Netlist / Component / Finding / Report (pydantic v2).
                 Severity STOP/WARN/INFO; Verdict PASS/WARN/STOP (derived).
                 Report REQUIRES ``netlist_used``; findings sort STOP first.
-    spice.py  - ``netlist_to_spice(netlist) -> str`` (the exact deck that
+    spice.py  - ``simulate(netlist) -> SimResult`` (the one-call real
+                path: ``netlist_to_spice`` + ``run_ngspice``),
+                ``netlist_to_spice(netlist) -> str`` (the exact deck that
                 gets simulated; raises ValueError on an empty netlist),
                 ``run_ngspice(spice_text) -> SimResult`` (raises
                 RuntimeError if ngspice is missing or times out after
@@ -38,6 +40,9 @@ modules, whose real APIs this file is written against (read 2026-11-15)::
 Endpoints::
 
     GET  /                    serve web/index.html
+    Static files: web/ is mounted at "/" AFTER all API routes, so
+    /3d/main3d.js and the rest of web/3d/ are served same-origin
+    without shadowing any API route.
     GET  /health              {"status","ngspice","ngspice_path",
                               "simulator_override","modules"}
     POST /check               JSON Netlist -> report dict {verdict,
@@ -101,6 +106,7 @@ from typing import Any, AsyncIterator, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 try:  # Preferred SSE implementation (task requirement).
@@ -149,6 +155,10 @@ _PROJECT_ROOT = _HERE.parent.parent  # backend/netproof/ -> repo root
 _INDEX_CANDIDATES = [
     _PROJECT_ROOT / "web" / "index.html",
     Path.cwd() / "web" / "index.html",
+]
+_WEB_DIR_CANDIDATES = [
+    _PROJECT_ROOT / "web",
+    Path.cwd() / "web",
 ]
 
 MAX_UPLOAD_BYTES = 10_000_000  # 10 MB cap on /run-image uploads.
@@ -1041,6 +1051,19 @@ async def download_bom_csv() -> PlainTextResponse:
         media_type="text/csv",
         headers={"Content-Disposition": 'attachment; filename="BOM.csv"'},
     )
+
+
+# ---------------------------------------------------------------------------
+# Static files (web/): mounted AFTER every API route above, so the mount
+# can never shadow /check, /repair, /run-goal, /run-image, /download/*,
+# /health or GET "/". Serves web/index.html's dynamic import
+# ./3d/main3d.js (and the rest of web/3d/) as same-origin files.
+# ---------------------------------------------------------------------------
+_WEB_DIR = next(
+    (c for c in _WEB_DIR_CANDIDATES if c.is_dir()),
+    _PROJECT_ROOT / "web",
+)
+app.mount("/", StaticFiles(directory=_WEB_DIR, html=True), name="web")
 
 
 @app.exception_handler(Exception)

@@ -81,6 +81,7 @@ __all__ = [
     "netlist_to_spice",
     "parse_op_output",
     "run_ngspice",
+    "simulate",
     "current_through_resistor",
     "resistor_power",
 ]
@@ -612,6 +613,17 @@ def run_ngspice(spice_text: str) -> SimResult:
                 os.unlink(path)
             except OSError:
                 pass
+
+
+def simulate(netlist) -> SimResult:
+    """Simulate a netlist end to end: render the SPICE deck with
+    :func:`netlist_to_spice` and run it with :func:`run_ngspice`.
+
+    This is the one-call real-simulation path used by
+    ``pipeline._simulate`` (and by ``test_pipeline.py``'s real-ngspice
+    test, which passes it in as the injected simulator).
+    """
+    return run_ngspice(netlist_to_spice(netlist))
 
 
 # ---------------------------------------------------------------------------

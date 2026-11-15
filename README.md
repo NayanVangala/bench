@@ -65,10 +65,18 @@ uv run pytest
 # 4. Set your API key
 export ANTHROPIC_API_KEY=sk-ant-...
 
-# 5. Start the server (once backend/netproof/server.py lands; it does not
-#    exist yet, and the server tests skip until it does)
+# 5. Start the server (backend/netproof/server.py exists; it serves
+#    the API and the web UI on the same origin)
 uv run uvicorn netproof.server:app --reload
 ```
+
+The server refuses to start without `ngspice` on PATH (its startup
+check raises `RuntimeError` with install instructions), unless a fake
+simulator has been injected via `server.set_simulator` (tests only).
+`uv run pytest` runs the full suite: the server tests use that fake
+simulator, so they run without ngspice; the one real-ngspice test
+(`test_pipeline.py::test_real_ngspice_good_netlist_passes`) skips when
+the binary is absent.
 
 Environment variables:
 
@@ -104,13 +112,24 @@ netproof/
 ├── pyproject.toml       # uv project root: dependencies, pytest config
 ├── backend/
 │   ├── netproof/        # Python package: ir, spice (ngspice), rules,
-│   │                    # parts, bom, llm (no server.py yet)
-│   └── tests/           # test_server.py + fixtures/
+│   │                    # parts, bom, llm, pipeline, server
+│   └── tests/           # conftest.py, test_server.py, test_pipeline.py,
+│                        # test_spice.py, test_rules.py, test_llm.py,
+│                        # test_consensus.py, test_bom.py, test_3d.py,
+│                        # fixtures/
 └── web/
-    ├── index.html       # Web UI: input, verdict banner, netlist table
+    ├── index.html       # Web UI: input, verdict banner, netlist table,
+    │                    # 3D view container + guarded dynamic import
+    │                    # of ./3d/main3d.js
     └── 3d/
-        ├── scene.js     # Three.js 3D view (frontend-only)
-        └── edit-panel.js # Edit panel for the picked component
+        ├── main3d.js    # 3D entry point (init3D)
+        ├── scene.js     # Three.js scene, camera, picking
+        ├── components.js # Component meshes + layout
+        ├── interaction.js # Orbit / pick / drag / double-click
+        ├── overlay.js   # Live-number overlays on meshes
+        ├── edit-panel.js # Edit panel for the picked component
+        ├── history.js   # Repair-history timeline (UMD)
+        └── README-3D.md # 3D layer spec
 ```
 
 ## 3D view
@@ -134,8 +153,9 @@ directly.
   (`web/3d/edit-panel.js`), where its value, power rating, and (for LEDs)
   colour can be changed. Saving posts the edited netlist to `/check`
   (or `/repair`) and re-simulates; the panel itself never computes a
-  verdict. The double-click wiring lives in the host page and is still
-  pending (see Status below).
+  verdict. The wiring exists end to end: `interaction.js` fires `onEdit`
+  on double-click, `main3d.js` opens the edit panel, and the host page's
+  `onEdit` callback applies the patch and re-checks.
 - **Numbers come from ngspice only.** The 3D view holds no simulation
   numbers of its own. Mesh colours come only from the verdict values
   passed in by the host page, which must come from a real `/check` run
@@ -143,21 +163,28 @@ directly.
   in the edit panel come only from that `/check` report; a value missing
   from the report is shown as "—", never guessed or filled in.
 
-Status: `scene.js` and `edit-panel.js` are written, but the view is not
-wired into `web/index.html` yet — the page has no reference to `web/3d/`,
-and the import map `OrbitControls` needs (mapping `three` to the same
-0.160.0 URL) still has to be added there, along with the double-click to
-edit-panel wiring.
+Status: wired into `web/index.html` — the page carries an import map
+mapping `three` to the same 0.160.0 URL, a `#scene3d` container, and a
+guarded dynamic import of `./3d/main3d.js` (in `try/catch`: if the import
+or init fails, the flat page keeps working and the 3D container shows
+the failure instead of an error). All seven `web/3d/*.js` modules exist
+(`main3d.js`, `scene.js`, `components.js`, `interaction.js`,
+`overlay.js`, `edit-panel.js`, `history.js`). The server serves the
+whole `web/` directory same-origin (static mount after the API routes),
+so the `./3d/main3d.js` import resolves instead of 404ing. Live
+in-browser rendering is not covered by the backend test suite; the
+tests cover serving the files, not running them.
 
 ## Known limits
 
-- **Server not written yet.** `backend/netproof/server.py` does not exist,
-  so the `uvicorn` step above cannot run yet and the server tests skip
-  until it lands. The rules engine, SPICE runner, and LLM helpers exist;
-  only the HTTP layer is missing.
-- **3D view not wired in yet.** The 3D modules exist, but `web/index.html`
-  does not load them, so there is no 3D view in the running UI until the
-  import map and host wiring land.
+- **Server needs ngspice to start.** `backend/netproof/server.py` exists
+  and serves the API plus the web UI, but its startup check refuses to
+  start without the `ngspice` binary on PATH (tests inject a fake
+  simulator instead, so they run without it).
+- **3D view is wired in but not browser-verified here.** `web/index.html`
+  loads `./3d/main3d.js` and the server serves it, but no backend test
+  runs the 3D code in a browser, so a rendering failure would surface
+  only in the `#scene3d` fallback text, not in the test suite.
 - **DC operating point only.** Netproof runs a DC operating-point
   simulation. It does not do transient analysis or AC analysis, so it
   cannot check anything that depends on time, switching, or frequency

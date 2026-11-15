@@ -257,6 +257,18 @@ def test_index_serves_html(client: TestClient):
     assert "<html" in resp.text.lower()
 
 
+@needs_server
+def test_3d_main_script_served_as_javascript(client: TestClient):
+    """web/index.html dynamically imports ./3d/main3d.js, so the server
+    must serve it same-origin (static mount of web/, after the API
+    routes) instead of 404ing."""
+    resp = client.get("/3d/main3d.js")
+    assert resp.status_code == 200
+    assert "javascript" in resp.headers["content-type"].lower()
+    assert resp.text.strip(), "main3d.js must not be empty"
+    assert "init3D" in resp.text
+
+
 # ---------------------------------------------------------------------------
 # POST /check verdicts (need the server AND a simulation).
 # ---------------------------------------------------------------------------

@@ -8,11 +8,13 @@ model calls of its own. It wires together the real sibling modules:
 * ``ir.py``     -- Pydantic types: ``Netlist`` / ``Component`` /
   ``Finding`` / ``Report`` (verdict derived from findings: any STOP
   -> STOP, else any WARN -> WARN, else PASS).
-* ``spice.py``  -- ``netlist_to_spice(netlist) -> str`` and
-  ``run_ngspice(spice_text) -> SimResult``. There is NO
-  ``spice.simulate``. ``run_ngspice`` raises ``RuntimeError`` with a
-  clear message when the ngspice binary is missing or times out, and
-  returns ``SimResult(success=False)`` for a failed simulation.
+* ``spice.py``  -- ``simulate(netlist) -> SimResult`` (the one-call
+  real path: ``netlist_to_spice`` + ``run_ngspice``),
+  ``netlist_to_spice(netlist) -> str`` and
+  ``run_ngspice(spice_text) -> SimResult``. ``run_ngspice`` raises
+  ``RuntimeError`` with a clear message when the ngspice binary is
+  missing or times out, and returns ``SimResult(success=False)`` for
+  a failed simulation.
 * ``rules.py``  -- ``verify(netlist, sim_result=None) -> ir.Report``,
   ``check_rules(...)``, ``pre_sim_checks(...)`` /
   ``post_sim_checks(...)``. Findings are ``ir.Finding`` objects
@@ -108,7 +110,7 @@ Injectable seams (for tests)
   ``ir.Report`` (a fake standing in for spice + rules: returned
   as-is), a ``SimResult``, or a sim-result dict (passed to
   ``rules.verify``). ``None`` means the real path
-  (``spice.netlist_to_spice`` + ``spice.run_ngspice``); if ngspice
+  (``spice.simulate``); if ngspice
   is missing that raises ``RuntimeError`` with install
   instructions. A module-level override can also be installed with
   ``set_simulator`` (``None`` clears it); an explicit argument wins.
@@ -463,8 +465,7 @@ def _simulate(netlist: Netlist, simulator: Any, run_sim: Any) -> Any:
     """
     sim = _resolve_simulator(simulator, run_sim)
     if sim is None:
-        deck = _spice.netlist_to_spice(netlist)
-        return _spice.run_ngspice(deck)
+        return _spice.simulate(netlist)
     for attr in ("simulate", "run"):
         method = getattr(sim, attr, None)
         if callable(method):

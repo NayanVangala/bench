@@ -1123,7 +1123,6 @@ export function init3D(container, callbacks = {}, options = {}) {
     ? globalThis.NetproofHistory
     : undefined;
   let historyHandle = null;
-  let historySceneAttached = false;
 
   function resolveHistoryMount() {
     if (opts.historyContainer) {
@@ -1150,16 +1149,9 @@ export function init3D(container, callbacks = {}, options = {}) {
     } catch (error) { onError(error); }
   }
 
-  function ensureHistoryScene() {
-    if (!historyHandle || historySceneAttached) return;
-    if (!repairHistoryEntries.length) return;
-    try {
-      const attached = historyHandle.attachScene({ scene, camera, renderer });
-      if (attached !== false) historySceneAttached = true;
-    } catch (error) {
-      onError(error);
-    }
-  }
+  // The 3D round timeline (history.js attachScene) is not added to the bench:
+  // it drew "Round N" markers over the circuit. Repair history lives in the
+  // Repairs tab.
 
   function createOrUpdateHistory() {
     if (!HistoryNS || typeof HistoryNS.renderHistory !== 'function') {
@@ -1181,7 +1173,6 @@ export function init3D(container, callbacks = {}, options = {}) {
         onError(error);
         return;
       }
-      ensureHistoryScene();
     } else {
       try {
         historyHandle.update(repairHistoryEntries);
@@ -1189,7 +1180,6 @@ export function init3D(container, callbacks = {}, options = {}) {
         onError(error);
         return;
       }
-      ensureHistoryScene();
     }
   }
 

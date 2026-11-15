@@ -1019,6 +1019,24 @@ export function buildSlab(box) {
   );
   outline.raycast = () => {};
   outline.userData = { kind: 'slab-outline' };
+  // Cutting-mat grid on the mat top (0.5-unit squares), faint white.
+  const step = 0.5;
+  const gridPts = [];
+  for (let x = cx - hw + step; x < cx + hw - 1e-6; x += step) {
+    gridPts.push(x, 0.004, cz - hd, x, 0.004, cz + hd);
+  }
+  for (let z = cz - hd + step; z < cz + hd - 1e-6; z += step) {
+    gridPts.push(cx - hw, 0.004, z, cx + hw, 0.004, z);
+  }
+  const gridGeo = new THREE.BufferGeometry();
+  gridGeo.setAttribute('position', new THREE.Float32BufferAttribute(gridPts, 3));
+  const matGrid = new THREE.LineSegments(
+    gridGeo,
+    new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.16 }),
+  );
+  matGrid.raycast = () => {};
+  matGrid.userData = { kind: 'slab-grid' };
+  group.add(matGrid);
   group.add(outline);
   group.userData = {
     kind: 'slab',

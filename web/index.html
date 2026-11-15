@@ -2108,7 +2108,22 @@
     if (drawer) drawer.classList.toggle('open', !!open);
     if (drawerToggle) drawerToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
     if (!open && drawerToggle) drawerToggle.focus();
+    syncSceneInset();
   }
+  // The bench canvas is full-bleed behind the floating panel; tell the 3D
+  // scene how many px the panel covers so it frames the circuit (and lays
+  // out callouts) in the visible part. Wide screens only.
+  function syncSceneInset() {
+    var s3 = $('scene3d');
+    var d = $('drawer');
+    if (!s3) return;
+    var wide = window.matchMedia('(min-width: 901px)').matches;
+    var px = wide && d && d.classList.contains('open') ? Math.round(d.getBoundingClientRect().right + 16) : 0;
+    if (s3.dataset.insetLeft === String(px)) return;
+    s3.dataset.insetLeft = String(px);
+    window.dispatchEvent(new Event('resize'));
+  }
+  window.matchMedia('(min-width: 901px)').addEventListener('change', syncSceneInset);
   function isDrawerOpen() {
     var main = $('main');
     return !!(main && main.classList.contains('drawer-open'));
@@ -2216,6 +2231,7 @@
     $('drawer').classList.add('open');
     if (drawerToggle) drawerToggle.setAttribute('aria-expanded', 'true');
   }
+  syncSceneInset();
 
   // Wiring: the whole canvas is the drop target; the top-bar
   // upload button opens the file picker. #dropzone stays in the DOM

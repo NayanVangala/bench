@@ -279,17 +279,25 @@ export function frameCamera(view, options = {}) {
   }
   halfW *= margin;
   halfH *= margin;
-  const aspect = Math.max(view.camera.aspect || 1, 0.01);
+  const el = view.renderer && view.renderer.domElement && view.renderer.domElement.parentElement;
+  const width = el ? el.clientWidth : 0;
+  const height = el ? el.clientHeight : 0;
+  const inset = width && height ? Math.min(insetLeftPx(el), width * 0.6) : 0;
+  const aspect = width && height
+    ? Math.max((width - inset) / height, 0.01)
+    : Math.max(view.camera.aspect || 1, 0.01);
   halfH = Math.max(halfH, halfW / aspect);
-  halfW = halfH * aspect;
 
   const cam = view.camera;
-  cam.left = -halfW;
-  cam.right = halfW;
-  cam.top = halfH;
-  cam.bottom = -halfH;
   cam.zoom = 1;
-  cam.updateProjectionMatrix();
+  if (width && height) applyFrustum(cam, halfH, width, height, inset);
+  else {
+    cam.left = -halfH * aspect;
+    cam.right = halfH * aspect;
+    cam.top = halfH;
+    cam.bottom = -halfH;
+    cam.updateProjectionMatrix();
+  }
   view._orthoHalfH = halfH;
 
   view.controls.target.copy(center);
@@ -300,6 +308,26 @@ export function frameCamera(view, options = {}) {
 
 // Slab bottom sits 0.18 below y = 0 (slab height); the fit includes it.
 const SLAB_BOTTOM_PAD = 0.18;
+
+function insetLeftPx(el) {
+  const v = el && el.dataset ? Number(el.dataset.insetLeft) : 0;
+  return Number.isFinite(v) && v > 0 ? v : 0;
+}
+
+// Ortho frustum of half-height halfH whose centre sits in the middle of the
+// VISIBLE part of the canvas (right of the left inset), so the circuit is
+// never framed under the floating panel; the canvas itself stays full-bleed.
+function applyFrustum(cam, halfH, width, height, inset) {
+  const h = Math.max(height, 1);
+  const visW = Math.max(width - inset, 1);
+  const unitsPerPx = (2 * halfH) / h;
+  const halfVis = (visW / 2) * unitsPerPx;
+  cam.left = -halfVis - inset * unitsPerPx;
+  cam.right = halfVis;
+  cam.top = halfH;
+  cam.bottom = -halfH;
+  cam.updateProjectionMatrix();
+}
 
 /**
  * Reset to the canonical isometric view: discard any user orbit, set
@@ -380,6 +408,13 @@ export function createScene(container, options = {}) {
   floor.raycast = () => {};
   floor.userData = { kind: 'floor' };
   scene.add(floor);
+  for (const [divisions, color, y] of [[480, 0x3c4048, -0.295], [96, 0x4a4f59, -0.29]]) {
+    const grid = new THREE.GridHelper(240, divisions, color, color);
+    grid.position.y = y;
+    grid.raycast = () => {};
+    grid.userData = { kind: 'grid' };
+    scene.add(grid);
+  }
 
   const aspect = container.clientWidth / Math.max(container.clientHeight, 1);
   const initialHalfH = 5;
@@ -552,11 +587,7 @@ export function createScene(container, options = {}) {
     // aspect changes on resize. A user zoom is preserved (zoom is not
     // reset here) and the box is NOT re-fit.
     const halfH = Number.isFinite(view._orthoHalfH) ? view._orthoHalfH : initialHalfH;
-    camera.left = -halfH * nextAspect;
-    camera.right = halfH * nextAspect;
-    camera.top = halfH;
-    camera.bottom = -halfH;
-    camera.updateProjectionMatrix();
+    applyFrustum(camera, halfH, w, h, Math.min(insetLeftPx(container), w * 0.6));
     renderer.setSize(w, h);
   }
   function animate(now) {

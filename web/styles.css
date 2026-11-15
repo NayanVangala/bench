@@ -112,10 +112,9 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 
 /* ---- Stage: the 3D bench ------------------------------------------------ */
 #canvas, #scene3d-section { position: fixed; inset: 0; }
-#scene3d { position: absolute; inset: 0; outline: none; transition: left 200ms ease; }
+#scene3d { position: absolute; inset: 0; outline: none; }
 #scene3d canvas { display: block; }
 #scene3d:focus-visible { box-shadow: inset 0 0 0 2px var(--hud); }
-main.drawer-open #scene3d { left: calc(var(--panel-w) + var(--gap) * 2); }
 #scene3d .fallback {
   position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
   max-width: 420px; color: #d7dae0; text-align: center; font-size: 14px;
@@ -367,7 +366,6 @@ main.drawer-open #scene3d { left: calc(var(--panel-w) + var(--gap) * 2); }
   .status-pill { overflow-x: auto; scrollbar-width: none; }
   .scene-tools { top: auto; bottom: 84px; right: var(--gap); }
   .hud { display: none; }
-  main.drawer-open #scene3d { left: 0; }
   #empty-state { left: 50%; top: 38%; padding: 0 16px; width: 100%; }
   #error-banner { left: var(--gap); top: 112px; }
   #drawer {

@@ -1068,11 +1068,15 @@ export function showRepairDiffs(diffs, options) {
   const findings = currentReport ? (currentReport.findings || []) : [];
   const verdict = currentReport ? currentReport.verdict : undefined;
   for (const [id, lines] of byId) {
-    const sev = severityForComponentLocal(id, findings, verdict);
-    const border = CALLOUT_SEVERITY_COLORS[sev] || CALLOUT_SEVERITY_COLORS.UNKNOWN;
+    // A repair callout describes a change, not a finding: neutral label and
+    // border. (The report here can still be the pre-repair one, which used
+    // to label a fixed part STOP.) The verdict lives in the panel.
+    const sev = 'CHANGED';
+    const border = CALLOUT_BLUE;
+    void findings; void verdict;
     const el = document.createElement('button');
     el.type = 'button';
-    el.className = 'netproof-callout';
+    el.className = 'netproof-callout is-diff';
     el.dataset.componentId = id;
     el.style.borderColor = border;
     el.setAttribute('aria-label', 'Repair change for ' + id + '. '
@@ -1085,7 +1089,7 @@ export function showRepairDiffs(diffs, options) {
     const sevEl = document.createElement('span');
     sevEl.className = 'nc-sev';
     sevEl.textContent = sev;
-    sevEl.style.color = SEVERITY_TEXT_COLORS[sev];
+    sevEl.style.color = SEVERITY_TEXT_COLORS[sev] || CALLOUT_BLUE;
     head.appendChild(rule);
     head.appendChild(sevEl);
     el.appendChild(head);
@@ -1286,6 +1290,8 @@ export function layoutCallouts(cam) {
   const activeCam = cam || camera;
   if (!svg || !layer || !container) return;
   const W = container.clientWidth;
+  // Left px covered by the page's floating panel; the left lane starts after it.
+  const insetL = Math.min(Number(container.dataset.insetLeft) || 0, W * 0.6);
   const H = container.clientHeight;
   if (!W || !H) return;
 
@@ -1374,7 +1380,7 @@ export function layoutCallouts(cam) {
 
   const lanes = { left: [], right: [] };
   for (const item of items) {
-    const side = item.anchor && item.anchor.x >= W / 2 ? 'right' : 'left';
+    const side = item.anchor && item.anchor.x >= (insetL + W) / 2 ? 'right' : 'left';
     lanes[side].push(item);
   }
   const rankOf = (kind) => ({ global: 0, detail: 1, finding: 2, diff: 3 }[kind] ?? 2);
@@ -1401,7 +1407,7 @@ export function layoutCallouts(cam) {
     for (const item of list) {
       const w = item.el.offsetWidth || boxW;
       const h = item.el.offsetHeight || 60;
-      const left = side === 'left' ? LANE_MARGIN : W - LANE_MARGIN - w;
+      const left = side === 'left' ? insetL + LANE_MARGIN : W - LANE_MARGIN - w;
       let top = item.anchor
         ? clamp(item.anchor.y - h / 2, laneTop[side], Math.max(laneTop[side], H - h - LANE_MARGIN))
         : cursor;
@@ -1498,7 +1504,7 @@ export function layoutCallouts(cam) {
     const side = lanes.left.includes(item) ? 'left' : 'right';
     const w = item.el.offsetWidth || boxW;
     const h = item.el.offsetHeight || 60;
-    const left = side === 'left' ? LANE_MARGIN : W - LANE_MARGIN - w;
+    const left = side === 'left' ? insetL + LANE_MARGIN : W - LANE_MARGIN - w;
     const top = Math.max(laneTop[side], H - h - LANE_MARGIN);
     item.rect = { left, top, right: left + w, bottom: top + h };
   }

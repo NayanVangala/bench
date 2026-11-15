@@ -518,6 +518,16 @@ export function updateOverlays(report, meshesById, extra) {
  * Re-project every label from its 3D anchor to screen pixels.
  * Pass the camera, or rely on the one given to initOverlays().
  * Labels whose anchor is behind the camera are hidden.
+ *
+ * Overlap: the LED circuit's parts sit 1.5 scene units apart on one
+ * line (V1, R1, D1), so their full labels (~170 px wide at the framed
+ * distance) land on the same screen row and overlap. Labels are
+ * therefore placed left-to-right and any label whose box would overlap
+ * an already-placed one is stacked one label-height up (and, if there
+ * is no room above the container, below its anchor instead) until it
+ * is clear. Full label text is kept for every part; nothing is
+ * shortened to a tag. Recomputed from scratch every frame, so a
+ * camera move re-stacks the labels for the new projection.
  */
 export function updateLabelPositions(cam) {
   const activeCam = cam || camera;
@@ -525,7 +535,10 @@ export function updateLabelPositions(cam) {
   const width = labelLayer.clientWidth || (typeof window !== 'undefined' ? window.innerWidth : 0);
   const height = labelLayer.clientHeight || (typeof window !== 'undefined' ? window.innerHeight : 0);
   if (!width || !height) return;
+  const GAP = 6; // px kept clear between stacked labels
+  const LIFT = 8; // px between a label's bottom edge and its anchor
   const v = new THREE.Vector3();
+  const projected = [];
   for (const label of labels.values()) {
     if (!label.anchor) {
       label.el.style.display = 'none';
@@ -539,8 +552,45 @@ export function updateLabelPositions(cam) {
     const x = (v.x * 0.5 + 0.5) * width;
     const y = (-v.y * 0.5 + 0.5) * height;
     label.el.style.display = 'block';
+    projected.push({ label, x, y });
+  }
+  // Leftmost keeps its lane; neighbours stack up from it.
+  projected.sort((a, b) => a.x - b.x || a.y - b.y);
+  const placed = []; // { left, right, top, bottom } in container px
+  for (const { label, x, y } of projected) {
+    const w = label.el.offsetWidth || 92;
+    const h = label.el.offsetHeight || 48;
+    let dy = 0;
+    let below = false; // false: stack up; true: no room above, stack down
+    for (let attempt = 0; attempt < 12; attempt++) {
+      const box = {
+        left: x - w / 2,
+        right: x + w / 2,
+        top: y - h - LIFT + dy,
+        bottom: y - LIFT + dy,
+      };
+      const hit = placed.find((p) =>
+        box.left < p.right + GAP && box.right > p.left - GAP &&
+        box.top < p.bottom + GAP && box.bottom > p.top - GAP);
+      if (!hit) break;
+      if (!below && box.top - (h + GAP) < 0) {
+        // No room for another lane above: drop below the anchor.
+        below = true;
+        dy = h + 2 * LIFT;
+      } else if (below) {
+        dy += h + GAP;
+      } else {
+        dy -= h + GAP;
+      }
+    }
+    placed.push({
+      left: x - w / 2,
+      right: x + w / 2,
+      top: y - h - LIFT + dy,
+      bottom: y - LIFT + dy,
+    });
     label.el.style.transform =
-      'translate(-50%, calc(-100% - 8px)) translate(' + x.toFixed(1) + 'px, ' + y.toFixed(1) + 'px)';
+      'translate(-50%, calc(-100% - 8px)) translate(' + x.toFixed(1) + 'px, ' + (y + dy).toFixed(1) + 'px)';
   }
 }
 

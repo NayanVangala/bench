@@ -11,7 +11,11 @@
 //   ./scene.js
 //     createScene(container, { onPick }) -> view
 //       { scene, camera, renderer, controls, components: Map,
-//         raycaster, selectedId, pickAt, setOnPick, setSelected, dispose }
+//         raycaster, selectedId, pickAt, setOnPick, setSelected,
+//         frameCamera, dispose }
+//       frameCamera(view) fits the camera to the bounding box of
+//       view.components; main3d.js calls it in buildDisplayed() so
+//       the view reframes on load and on every setNetlist.
 //       Runs its OWN animation loop (controls.update + render) and its
 //       OWN resize handling (ResizeObserver). main3d.js therefore does
 //       NOT render and does NOT resize; its loop only drives the
@@ -146,7 +150,7 @@
 //   or a single such entry, or { history: [...] }.
 
 import * as THREE from 'three';
-import { createScene } from './scene.js';
+import { createScene, frameCamera } from './scene.js';
 import { buildCircuit } from './components.js';
 import { setupInteraction } from './interaction.js';
 import {
@@ -533,6 +537,11 @@ export function init3D(container, callbacks = {}, options = {}) {
     // these meshes (buildCircuit groups are children of circuit.group,
     // not of the scene, so addComponent's registration does not apply).
     for (const [id, mesh] of built.meshesById) view.components.set(id, mesh);
+    // Frame the camera on the new circuit's bounding box (load, every
+    // setNetlist, and every history-round / edit rebuild all come
+    // through here). No-op when there is nothing to frame; the user's
+    // orbit angle is kept, only distance/target are reset.
+    try { frameCamera(view); } catch (error) { onError(error); }
     if (selectedId && built.meshesById.has(selectedId)) {
       try { view.setSelected(selectedId); } catch (error) { /* highlight-only */ }
     }

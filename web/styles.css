@@ -88,6 +88,11 @@ body {
   line-height: 1.5;
 }
 
+/* The page itself never scrolls horizontally: a wide table scrolls
+   inside its own .table-wrap instead (see below). Safety net only;
+   the wrapper is what actually contains the table. */
+html, body { overflow-x: hidden; }
+
 /* Every value, node name, unit and rule ID is monospace. */
 .mono,
 code,
@@ -99,6 +104,7 @@ kbd,
 .findings-code,
 td.readonly,
 td input,
+td select,
 #scene3d-status,
 #repair-history .diff {
   font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -366,27 +372,52 @@ tr:focus-visible { outline-offset: -3px; }
 .empty { color: var(--muted); }
 
 /* Netlist table: horizontal scroll lives INSIDE this wrapper so a
-   390px viewport never gets page-level horizontal scroll. */
+   390px viewport never gets page-level horizontal scroll.
+   The table is width:max-content with min-width:100%: it is at least
+   as wide as the wrapper, and grows to fit its columns instead of
+   squeezing them. Per-column min-widths below are the floor that
+   keeps id / type / value / nodes / rating / color readable; the
+   wrapper scrolls rather than clipping them. */
 .table-wrap {
   overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  max-width: 100%;
   border: 1px solid var(--line);
   border-radius: 8px;
   margin-bottom: 10px;
 }
 .table-wrap:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
-table { border-collapse: collapse; width: 100%; font-size: 13px; min-width: 680px; }
+table { border-collapse: collapse; width: max-content; min-width: 100%; font-size: 13px; }
+#netlist-section table { min-width: 740px; }
 th, td { border-bottom: 1px solid var(--line); padding: 5px 6px; text-align: left; }
-th { background: var(--panel-2); font-size: 12px; color: var(--muted); font-weight: 600; }
-td input {
+th { background: var(--panel-2); font-size: 12px; color: var(--muted); font-weight: 600; white-space: nowrap; }
+/* Netlist column floors: id, type, value, nodes, rating, color,
+   node voltage, current, power. No column may shrink below these. */
+#netlist-section th:nth-child(1), #netlist-section td:nth-child(1) { min-width: 52px; }
+#netlist-section th:nth-child(2), #netlist-section td:nth-child(2) { min-width: 104px; }
+#netlist-section th:nth-child(3), #netlist-section td:nth-child(3) { min-width: 64px; }
+#netlist-section th:nth-child(4), #netlist-section td:nth-child(4) { min-width: 88px; }
+#netlist-section th:nth-child(5), #netlist-section td:nth-child(5) { min-width: 68px; }
+#netlist-section th:nth-child(6), #netlist-section td:nth-child(6) { min-width: 64px; }
+#netlist-section th:nth-child(7), #netlist-section td:nth-child(7) { min-width: 72px; }
+#netlist-section th:nth-child(8), #netlist-section td:nth-child(8) { min-width: 72px; }
+#netlist-section th:nth-child(9), #netlist-section td:nth-child(9) { min-width: 72px; }
+td input,
+td select {
   width: 100%;
-  min-width: 52px;
   border: none;
   font: inherit;
   padding: 2px;
   background: transparent;
   color: var(--ink);
 }
-td input:focus-visible { outline-offset: -1px; }
+td input[data-field="id"] { min-width: 44px; }
+td select[data-field="type"] { min-width: 88px; }
+td input[data-field="value"] { min-width: 56px; }
+td input[data-field="nodes"] { min-width: 80px; }
+td input[data-field="rating_watts"] { min-width: 56px; }
+td input[data-field="color"] { min-width: 56px; }
+td input:focus-visible, td select:focus-visible { outline-offset: -1px; }
 td.readonly { background: var(--readonly-bg); color: var(--ink); white-space: nowrap; }
 tr.selected td { background: var(--row-selected); }
 tr.selected td input { background: transparent; }
@@ -397,6 +428,12 @@ tr[data-id] { cursor: pointer; }
 .layout > *, .col-left > *, .col-right > *, .split > * { min-width: 0; }
 .split { display: grid; grid-template-columns: 1fr 2fr; gap: 14px; align-items: start; }
 @media (max-width: 1100px) { .split { grid-template-columns: 1fr; } }
+/* No image uploaded yet: the image column is hidden (see
+   #image-col[hidden] in index.html), so the table takes the full
+   width of the panel instead of being squeezed into 2/3 of it.
+   setFile() removes .no-image once an image exists. */
+#netlist-section.no-image .split { grid-template-columns: 1fr; }
+#netlist-section.no-image #image-col { display: none; }
 
 /* Resistor sweep (P5.2): two inline-SVG charts side by side, stacked
    under 800 px. Chart colours match the verdict palette. */
@@ -404,7 +441,32 @@ tr[data-id] { cursor: pointer; }
 @media (max-width: 800px) { .sweep-charts { grid-template-columns: 1fr; } }
 .sweep-charts svg { width: 100%; height: auto; display: block; }
 .sweep-charts svg text { font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace; fill: var(--muted); }
-#sweep-resistor { width: 100%; padding: 6px; font: inherit; }
+/* Resistor sweep form: one aligned row (label + select + button).
+   Grid, not flex-wrap, so at 390px the button stays on the same row
+   as the select instead of wrapping underneath it: label is auto,
+   the select takes the remaining space (minmax(0, 1fr) lets it
+   shrink), the button is auto and never wraps. */
+.sweep-form {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.sweep-form label { margin-bottom: 0; white-space: nowrap; }
+.sweep-form select {
+  width: 100%;
+  min-width: 0;
+  padding: 6px;
+  font: inherit;
+  color: var(--ink);
+  background: var(--input-bg);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+}
+.sweep-form button { margin: 0; white-space: nowrap; }
+.sweep-meta { margin: 0 0 8px; }
+.sweep-meta .mono { font-size: 13px; }
 .sweep-verdict { font-weight: 700; }
 .sweep-verdict.pass { color: var(--sev-pass); }
 .sweep-verdict.warn { color: var(--sev-warn); }
@@ -431,6 +493,25 @@ tr[data-id] { cursor: pointer; }
 .legend { font-size: 12px; color: var(--console-dim); margin-top: 8px; border-top: 1px solid #33332e; padding-top: 8px; }
 .legend span { display: inline-block; margin-right: 12px; color: var(--console-ink); }
 .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+
+/* Live console drawer: collapsed by default (the #console-body div
+   starts hidden in the HTML); a run start opens it while the run
+   streams, and the toggle opens/closes it. The toggle looks like
+   the section heading, with a ▸ / ▾ marker for its state. */
+#console-body[hidden] { display: none; }
+.console-toggle {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  min-height: 0;
+  font: inherit;
+  color: var(--ink);
+  cursor: pointer;
+  text-align: left;
+}
+.console-toggle::after { content: ' \25B8'; color: var(--muted); }
+.console-toggle[aria-expanded="true"]::after { content: ' \25BE'; }
 
 /* 3D view. */
 #scene3d {

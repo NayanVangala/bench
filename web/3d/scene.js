@@ -228,6 +228,84 @@ function layoutPosition(index, position) {
 }
 
 /**
+ * Frame the camera on the circuit's bounding box.
+ *
+ * Computes the Box3 union of every mesh in `view.components`, puts the
+ * OrbitControls target on its centre, and moves the camera along its
+ * current viewing direction (so an orbit angle the user chose is kept)
+ * to the smallest distance at which every corner of the box fits inside
+ * the view frustum (vertical and horizontal FOV both honoured), times
+ * `options.margin` (default 1.15). Returns false (and moves nothing)
+ * when there are no components, so an empty scene keeps its view.
+ * Callers: main3d.js buildDisplayed() — i.e. on load and on every
+ * setNetlist / history-round rebuild. Also exposed as view.frameCamera.
+ */
+export function frameCamera(view, options = {}) {
+  if (!view || !view.camera || !view.controls
+    || !view.components || !view.components.size) return false;
+  const box = new THREE.Box3();
+  let hasBox = false;
+  view.components.forEach((group) => {
+    if (!group) return;
+    const b = new THREE.Box3().setFromObject(group);
+    if (b.isEmpty()) return;
+    box.union(b);
+    hasBox = true;
+  });
+  if (!hasBox || box.isEmpty()) return false;
+
+  const center = box.getCenter(new THREE.Vector3());
+  const margin = Number.isFinite(options.margin) && options.margin > 0
+    ? options.margin
+    : 1.15;
+
+  // Keep the current viewing direction; only distance/target change.
+  const direction = view.camera.position.clone().sub(view.controls.target);
+  if (direction.lengthSq() < 1e-6) direction.set(0.5, 0.45, 0.75);
+  direction.normalize();
+
+  const vHalf = THREE.MathUtils.degToRad(view.camera.fov / 2);
+  const hHalf = Math.atan(
+    Math.tan(vHalf) * Math.max(view.camera.aspect || 1, 0.01),
+  );
+  const right = new THREE.Vector3().crossVectors(direction, new THREE.Vector3(0, 1, 0));
+  if (right.lengthSq() < 1e-6) right.set(1, 0, 0); // looking straight down
+  right.normalize();
+  const up = new THREE.Vector3().crossVectors(right, direction).normalize();
+
+  // Smallest distance at which every box corner is inside the frustum:
+  // a corner at offset v needs depth >= |v.right| / tan(hHalf) and
+  // >= |v.up| / tan(vHalf), where depth = distance - v.along (corners
+  // toward the camera are nearer, so they need more distance).
+  // A bounding sphere would force the long, flat LED circuit to fit its
+  // 6-unit length into the viewport height; the corner fit fills the
+  // width instead.
+  let distance = 0;
+  for (const x of [box.min.x, box.max.x]) {
+    for (const y of [box.min.y, box.max.y]) {
+      for (const z of [box.min.z, box.max.z]) {
+        const v = new THREE.Vector3(x, y, z).sub(center);
+        const along = v.dot(direction);
+        distance = Math.max(
+          distance,
+          Math.abs(v.dot(right)) / Math.tan(hHalf) + along,
+          Math.abs(v.dot(up)) / Math.tan(vHalf) + along,
+        );
+      }
+    }
+  }
+  distance *= margin;
+  const minD = view.controls.minDistance ?? 2;
+  const maxD = view.controls.maxDistance ?? 40;
+  distance = THREE.MathUtils.clamp(distance, minD, maxD);
+
+  view.controls.target.copy(center);
+  view.camera.position.copy(center).addScaledVector(direction, distance);
+  view.controls.update();
+  return true;
+}
+
+/**
  * Create the Three.js scene inside `container`.
  *
  * @param {HTMLElement} container - element the renderer canvas is appended to.
@@ -236,9 +314,10 @@ function layoutPosition(index, position) {
  *   with the picked component id, or null when empty space is clicked.
  * @param {number} [options.background] - scene background colour (default dark).
  * @returns {{ scene, camera, renderer, controls, components: Map,
- *   raycaster, selectedId, pickAt, setOnPick, dispose }}
+ *   raycaster, selectedId, pickAt, setOnPick, frameCamera, dispose }}
  *   `components` maps component id -> mesh group. The render loop runs
- *   until `dispose()` is called.
+ *   until `dispose()` is called. `frameCamera()` fits the camera to
+ *   the bounding box of every component (see frameCamera).
  */
 export function createScene(container, options = {}) {
   if (!container || typeof container.appendChild !== 'function') {
@@ -412,6 +491,9 @@ export function createScene(container, options = {}) {
       onPickHandler = typeof fn === 'function' ? fn : null;
     },
     setSelected,
+    frameCamera(options) {
+      return frameCamera(view, options);
+    },
     dispose,
   };
   return view;

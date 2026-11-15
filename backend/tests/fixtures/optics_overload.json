@@ -1,0 +1,4 @@
+{"title":"20 mW laser straight into a detector","width_mm":600,"depth_mm":300,"elements":[
+ {"id":"L1","type":"laser","x_mm":50,"y_mm":150,"angle_deg":0,"wavelength_nm":532,"power_mw":20,"beam_mm":1.0},
+ {"id":"LN1","type":"lens","x_mm":250,"y_mm":150,"angle_deg":0,"focal_mm":100},
+ {"id":"D1","type":"detector","x_mm":450,"y_mm":150,"angle_deg":0,"max_mw":10}]}

@@ -1,0 +1,4 @@
+{"title":"Mirror at the wrong angle","width_mm":600,"depth_mm":300,"elements":[
+ {"id":"L1","type":"laser","x_mm":50,"y_mm":50,"angle_deg":0,"wavelength_nm":633,"power_mw":1,"beam_mm":1.0},
+ {"id":"M1","type":"mirror","x_mm":300,"y_mm":50,"angle_deg":120},
+ {"id":"D1","type":"detector","x_mm":300,"y_mm":250,"angle_deg":90,"max_mw":10}]}

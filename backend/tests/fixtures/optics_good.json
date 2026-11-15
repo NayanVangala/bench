@@ -1,0 +1,7 @@
+{"title":"Periscope steer, lens, ND filter, detector","width_mm":600,"depth_mm":300,"elements":[
+ {"id":"L1","type":"laser","x_mm":50,"y_mm":50,"angle_deg":0,"wavelength_nm":532,"power_mw":4.5,"beam_mm":1.0},
+ {"id":"M1","type":"mirror","x_mm":300,"y_mm":50,"angle_deg":135},
+ {"id":"M2","type":"mirror","x_mm":300,"y_mm":250,"angle_deg":135},
+ {"id":"LN1","type":"lens","x_mm":400,"y_mm":250,"angle_deg":0,"focal_mm":100},
+ {"id":"ND1","type":"filter","x_mm":470,"y_mm":250,"angle_deg":0,"od":1},
+ {"id":"D1","type":"detector","x_mm":550,"y_mm":250,"angle_deg":0,"max_mw":10}]}

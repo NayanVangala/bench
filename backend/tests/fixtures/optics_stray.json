@@ -1,0 +1,4 @@
+{"title":"50:50 split with an unblocked arm","width_mm":600,"depth_mm":300,"elements":[
+ {"id":"L1","type":"laser","x_mm":50,"y_mm":150,"angle_deg":0,"wavelength_nm":633,"power_mw":4,"beam_mm":1.0},
+ {"id":"BS1","type":"beamsplitter","x_mm":250,"y_mm":150,"angle_deg":135,"split":0.5},
+ {"id":"D1","type":"detector","x_mm":520,"y_mm":150,"angle_deg":0,"max_mw":10}]}

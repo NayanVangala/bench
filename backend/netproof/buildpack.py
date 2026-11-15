@@ -380,6 +380,134 @@ def fiber_pack(report: dict) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Free-space optics bench packs (report from optics.trace_bench)
+# ---------------------------------------------------------------------------
+
+HOLE_PITCH_MM = 25
+_LENS_PN = {50: "LA1131-A", 75: "LA1608-A", 100: "LA1509-A", 150: "LA1433-A", 200: "LA1708-A", 250: "LA1461-A"}
+_ND_PN = {0.5: "NE05A", 1.0: "NE10A", 2.0: "NE20A", 3.0: "NE30A", 4.0: "NE40A"}
+_OPTICS_TOOLS = [
+    ("Laser safety glasses", "rated for your laser wavelength", 90.00, "laser safety glasses", ""),
+    ("Alignment card", "fluorescent target, visible + NIR", 25.00, "laser alignment card", ""),
+    ("Hex key set", "imperial + metric balldrivers", 15.00, "balldriver hex key set imperial metric", ""),
+]
+
+
+def _optic(pn: str | None, name: str, spec: str, price: float, query: str | None = None) -> dict:
+    return {"name": name, "spec": (f"{pn} \u00b7 " if pn else "") + spec, "unit_usd": price, "query": query or pn or spec}
+
+
+def _optics_items(e: dict) -> list[dict]:
+    t = e["type"]
+    post = _optic(None, "Post assembly", "TR2 post + PH2 holder + BA1S base", 21.00, "TR2 PH2 BA1S post holder base")
+    if t == "laser":
+        wl = e.get("wavelength_nm") or 633
+        pn = "CPS532" if abs(wl - 532) < 5 else "CPS635R" if 630 <= wl <= 640 else None
+        return [_optic(pn, "Laser module", f"collimated, {wl:g} nm, {e.get('power_mw', 1):g} mW", 120.00,
+                       pn or f"{wl:g}nm collimated laser diode module"), post]
+    if t == "mirror":
+        return [_optic("BB1-E02", "Mirror", "\u00d81\" dielectric, 400-750 nm", 80.00),
+                _optic("KM100", "Kinematic mount", "\u00d81\" optics", 48.00), post]
+    if t == "beamsplitter":
+        return [_optic("BS013", "Beamsplitter cube", "10 mm, 50:50, 400-700 nm", 250.00),
+                _optic("KM100CP", "Kinematic cube mount", "for 10 mm cubes", 70.00), post]
+    if t == "lens":
+        f = e.get("focal_mm") or 100
+        pn = _LENS_PN.get(int(round(f)))
+        return [_optic(pn, "Lens", f"\u00d81\" plano-convex, f = {f:g} mm", 35.00, pn or f"1 inch plano convex lens f={f:g}mm"),
+                _optic("LMR1", "Lens mount", "\u00d81\" optics", 18.00), post]
+    if t == "filter":
+        od = float(e.get("od") if e.get("od") is not None else 1.0)
+        pn = _ND_PN.get(od)
+        return [_optic(pn, "ND filter", f"\u00d81\" mounted, OD {od:g}", 65.00, pn or f"OD {od:g} ND filter mounted 1 inch"),
+                _optic("LMR1", "Lens mount", "\u00d81\" optics", 18.00), post]
+    if t == "dump":
+        return [_optic("LB1", "Beam block", "black anodized", 95.00), post]
+    if t == "detector":
+        return [_optic("DET36A2", "Photodetector", "Si, 350-1100 nm, biased", 150.00), post]
+    return []
+
+
+def optics_line_items(report: dict) -> list[dict]:
+    groups: "OrderedDict[tuple, dict]" = OrderedDict()
+    bench = report["bench"]
+    w, d = bench.get("width_mm", 600), bench.get("depth_mm", 300)
+    board = _optic("MB3060/M" if w <= 600 and d <= 300 else None, "Optical breadboard",
+                   f"{w:g} x {d:g} mm, M6 holes on {HOLE_PITCH_MM} mm grid", 520.00, f"optical breadboard {w:g} x {d:g} mm")
+    for item, ref in [(board, "bench")] + [(i, e["id"]) for e in bench["elements"] for i in _optics_items(e)]:
+        g = groups.setdefault((item["name"], item["spec"]), {**item, "qty": 0, "refs": []})
+        g["qty"] += 1
+        g["refs"].append(ref)
+    out = []
+    for g in groups.values():
+        g["total_usd"] = round(g["unit_usd"] * g["qty"], 2)
+        g["links"] = buy_links(g["query"], fiber=True)
+        out.append(g)
+    return out
+
+
+def _hole(mm: float) -> int:
+    return int(round(mm / HOLE_PITCH_MM))
+
+
+def optics_build_steps(report: dict) -> list[str]:
+    bench = report["bench"]
+    els = {e["id"]: e for e in bench["elements"]}
+    wl = report.get("wavelength_nm", 633)
+    steps = [
+        f"Put on laser safety glasses rated for {wl:g} nm, take off watches and rings, and keep every beam at post height (about 75 mm), below eye level.",
+        f"Bolt the breadboard down. Holes are counted from the lower-left corner: column = x / {HOLE_PITCH_MM} mm, row = y / {HOLE_PITCH_MM} mm.",
+    ]
+    for e in bench["elements"]:
+        where = f"column {_hole(e['x_mm'])}, row {_hole(e['y_mm'])} (x {e['x_mm']:g} mm, y {e['y_mm']:g} mm)"
+        verb = {"laser": "the laser, pointing", "mirror": "the mirror, face normal at", "beamsplitter": "the beamsplitter cube, face normal at",
+                "lens": "the lens, axis along", "filter": "the ND filter, axis along", "dump": "the beam block, facing",
+                "detector": "the detector, facing"}.get(e["type"], e["type"])
+        steps.append(f"Mount {e['id']} ({verb} {e.get('angle_deg', 0):g}\u00b0) on its post at {where}.")
+    order = []
+    for s in report.get("segments", []):
+        if s["end"] in els and s["end"] not in order:
+            order.append(s["end"])
+    steps.append("Turn the laser on at its lowest setting. Align in beam order, one element at a time, using the alignment card:")
+    for i, eid in enumerate(order):
+        nxt = order[i + 1] if i + 1 < len(order) else None
+        e = els[eid]
+        if e["type"] in ("mirror", "beamsplitter") and nxt:
+            steps.append(f"Tilt {eid} with its two knobs until the beam lands on the centre of {nxt}.")
+        elif e["type"] in ("lens", "filter"):
+            steps.append(f"Centre {eid} on the beam: the spot after it should not move when you slide the card along the beam.")
+    steps.append("Check that every beam ends on a beam block or detector, including weak reflections off lens and filter faces.")
+    return steps
+
+
+def optics_test_steps(report: dict) -> list[str]:
+    steps = []
+    for det, mw in (report.get("received_mw") or {}).items():
+        steps.append(f"{det} should read about {mw:.3g} mW (from the ray trace, before real-world losses).")
+    steps.append("Within about 20 % is normal for a first alignment. Much lower? Re-centre the beam on each optic in order.")
+    return steps
+
+
+def optics_pack(report: dict) -> dict:
+    bench = report["bench"]
+    return {
+        "title": (bench.get("title") or "").strip() or "Your optics bench",
+        "verdict": report["verdict"],
+        "findings": report.get("findings") or [],
+        "pass_text": "This bench passed every rule in the ray trace: every beam ends on a detector or beam block. The parts, prices and steps below are for exactly this layout.",
+        "summary": f"{len(bench['elements'])} elements \u00b7 {bench.get('width_mm', 600):g} x {bench.get('depth_mm', 300):g} mm \u00b7 "
+                   f"{report.get('wavelength_nm', 633):g} nm",
+        "items": optics_line_items(report),
+        "tools": tool_items(_OPTICS_TOOLS),
+        "sections": [
+            {"title": "Build and align the bench", "steps": optics_build_steps(report)},
+            {"title": "Check the power at each detector", "steps": optics_test_steps(report)},
+        ],
+        "footer": "verdict from a deterministic 2D ray trace + fixed rules",
+    }
+
+
 def circuit_pack(netlist: dict, report: dict) -> dict:
     return {
         "title": (netlist.get("title") or "").strip() or "Your circuit",

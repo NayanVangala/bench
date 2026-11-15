@@ -1705,6 +1705,40 @@ def fiber_build_pack(body: dict) -> Response:
     )
 
 
+@app.post("/optics/check")
+def optics_check(body: dict) -> Any:
+    """Optics bench -> 2D ray trace report. Deterministic, no LLM (see optics.py)."""
+    from . import optics
+
+    try:
+        bench = optics.OpticsBench.model_validate(body)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail={"error": "validation_error", "message": str(exc).splitlines()[0]})
+    return JSONResponse(content=optics.trace_bench(bench))
+
+
+@app.post("/optics/build-pack")
+def optics_build_pack(body: dict) -> Response:
+    """PDF build pack for an optics bench that passed its ray trace (409 on STOP)."""
+    from . import buildpack, optics
+
+    try:
+        bench = optics.OpticsBench.model_validate(body)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail={"error": "validation_error", "message": str(exc).splitlines()[0]})
+    report = optics.trace_bench(bench)
+    if report["verdict"] == "STOP":
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "not_buildable", "message": "This bench fails its ray trace (STOP). Fix it first, then get the build pack."},
+        )
+    return Response(
+        buildpack.render_pdf(buildpack.optics_pack(report)),
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'attachment; filename="netproof-optics-build-pack.pdf"'},
+    )
+
+
 @app.post("/download/bom")
 async def download_bom(request: Request) -> PlainTextResponse:
     """Return bom.csv with columns id,type,value,rating,qty.

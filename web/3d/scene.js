@@ -59,7 +59,7 @@ export { addEdges, blueprintMaterial };
 // Blueprint palette (single source of truth for this file; the values
 // match components.js — one blue, #0B3D91, everywhere).
 export const BLUEPRINT = Object.freeze({
-  background: 0xffffff,
+  background: 0x34373e, // matches the lit floor colour
   fill: BLUEPRINT_FILL,
   fill2: BLUEPRINT_FILL_2,
   edge: BLUEPRINT_BLUE,
@@ -169,16 +169,26 @@ function meshBox(root) {
 function applyVerdictToGroup(group, verdict) {
   const v = normalizeVerdict(verdict);
   group.userData.verdict = v;
-  const neutral = v === 'UNKNOWN' || v === 'INFO';
-  const edgeHex = neutral ? BLUEPRINT_BLUE : VERDICT_COLORS[v];
+  const neutral = v === 'UNKNOWN' || v === 'INFO' || v === 'PASS';
+  // Neutral parts keep a faint dark outline; WARN / STOP light it up.
+  const edgeHex = neutral ? 0x000000 : VERDICT_COLORS[v];
+  const edgeOpacity = neutral ? 0.14 : 1;
   const edgeMat = group.userData.edgeMaterial;
-  if (edgeMat && edgeMat.color) edgeMat.color.setHex(edgeHex);
+  if (edgeMat && edgeMat.color) {
+    edgeMat.color.setHex(edgeHex);
+    edgeMat.transparent = true;
+    edgeMat.opacity = edgeOpacity;
+  }
   // Groups built without a shared edge material (or with extra
   // per-mesh edge materials) still recolour through the stored material.
   group.traverse((child) => {
     if (!child.isMesh) return;
     const m = child.userData.edgeMaterial;
-    if (m && m !== edgeMat && m.color) m.color.setHex(edgeHex);
+    if (m && m !== edgeMat && m.color) {
+      m.color.setHex(edgeHex);
+      m.transparent = true;
+      m.opacity = edgeOpacity;
+    }
   });
   const glow = group.userData.glowSprite;
   if (glow) {
@@ -344,8 +354,32 @@ export function createScene(container, options = {}) {
 
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(options.background ?? BLUEPRINT.background);
-  // No fog: a white blueprint must not fade to dark. No lights, no
-  // shadows: MeshBasicMaterial is unlit by definition.
+  // Lit bench: soft sky/ground fill + one shadow-casting key light.
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x3a3f48, 1.25));
+  const key = new THREE.DirectionalLight(0xffffff, 1.7);
+  key.position.set(6, 14, 8);
+  key.castShadow = true;
+  key.shadow.mapSize.set(2048, 2048);
+  key.shadow.camera.left = -14;
+  key.shadow.camera.right = 14;
+  key.shadow.camera.top = 14;
+  key.shadow.camera.bottom = -14;
+  key.shadow.camera.near = 0.5;
+  key.shadow.camera.far = 60;
+  key.shadow.bias = -0.0005;
+  key.shadow.radius = 4;
+  scene.add(key);
+  // Bench floor under the mat: catches the mat's shadow, never pickable.
+  const floor = new THREE.Mesh(
+    new THREE.PlaneGeometry(400, 400),
+    new THREE.MeshStandardMaterial({ color: 0x33373f, roughness: 1 }),
+  );
+  floor.rotation.x = -Math.PI / 2;
+  floor.position.y = -0.3;
+  floor.receiveShadow = true;
+  floor.raycast = () => {};
+  floor.userData = { kind: 'floor' };
+  scene.add(floor);
 
   const aspect = container.clientWidth / Math.max(container.clientHeight, 1);
   const initialHalfH = 5;
@@ -365,6 +399,8 @@ export function createScene(container, options = {}) {
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   renderer.setSize(container.clientWidth, container.clientHeight);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   container.appendChild(renderer.domElement);
 
   // OrbitControls: left-drag rotate, right-drag pan, wheel zoom.

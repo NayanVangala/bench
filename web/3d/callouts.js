@@ -110,7 +110,8 @@ const FOCUS_RING = '#FFD166';
 const FOCUS_KEYLINE = '#0A2A5E';
 
 const LANE_GAP = 8; // px between stacked callout boxes
-const LANE_MARGIN = 8; // px from the canvas edge
+const LANE_MARGIN = 16; // px from the canvas edge
+const LANE_TOP = 136; // px: callouts start below the floating top bar + view tools
 const CIRCUIT_PAD = 24; // px kept clear around the circuit bounding box
 const VERDICT_TOP = 12;
 const VERDICT_LEFT = 12;
@@ -464,7 +465,7 @@ function injectCalloutStyles() {
     'pointer-events:none;z-index:6;overflow:hidden;}' +
     '.netproof-callout-layer{position:absolute;left:0;top:0;right:0;bottom:0;' +
     'overflow:hidden;pointer-events:none;z-index:7;}' +
-    '.netproof-callout{display:block;box-sizing:border-box;width:260px;min-width:44px;' +
+    '.netproof-callout{position:absolute;margin:0;display:block;box-sizing:border-box;width:260px;min-width:44px;' +
     'min-height:44px;padding:10px 12px;border:1px solid #0B3D91;border-radius:8px;' +
     'background:#ffffff;color:#1c1a17;text-align:left;cursor:pointer;' +
     'font:13px/1.45 "IBM Plex Sans",system-ui,sans-serif;pointer-events:auto;}' +
@@ -1333,8 +1334,8 @@ export function layoutCallouts(cam) {
     bottom: VERDICT_TOP + verdictEl.offsetHeight,
   } : null;
   const laneTop = {
-    left: verdictRect ? verdictRect.bottom + 12 : LANE_MARGIN,
-    right: LANE_MARGIN,
+    left: Math.max(LANE_TOP, verdictRect && verdictRect.bottom > 0 ? verdictRect.bottom + 12 : 0),
+    right: LANE_TOP,
   };
 
   // Collect placeable items. Rank decides placement order inside a

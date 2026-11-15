@@ -1,0 +1,17 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "broken-image",
+        "value": "*",
+        "files": [
+          "web/index.html"
+        ],
+        "createdAt": "2026-11-15T20:11:06.578Z",
+        "reason": "Claude: #preview is display:none until an upload sets its src (renderPreview); never shown empty"
+      }
+    ]
+  }
+}

@@ -601,7 +601,9 @@ export function updateOverlays(report, meshesById, extra) {
     // A null from severityForComponent (no verdict supplied) also
     // resolves to UNKNOWN, never to green.
     const sev = severityForComponent(id, findings, report.verdict) || 'UNKNOWN';
-    const color = SEVERITY_COLORS[sev];
+    // Only WARN / STOP glow; PASS and UNKNOWN keep the part's own colours
+    // (black emissive = no tint on the lit materials).
+    const color = sev === 'WARN' || sev === 'STOP' ? SEVERITY_COLORS[sev] : 0x000000;
     tintMesh(mesh, color);
   }
 

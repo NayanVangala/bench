@@ -154,9 +154,12 @@ import asyncio
 import importlib
 import importlib.util
 import json
+import os
 import queue
 import shutil
 import threading
+import time
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from enum import Enum
 from pathlib import Path
@@ -905,6 +908,66 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Netproof", version="0.1.0", lifespan=_lifespan)
+
+
+# ---------------------------------------------------------------------------
+# AI rate limit (public deploys only). Off unless NETPROOF_AI_RATE_LIMIT is
+# set, so local runs and tests are unaffected. Counts POSTs to the routes that
+# call the LLM (mock runs never call it, so they are free):
+#   NETPROOF_AI_RATE_LIMIT  requests per visitor IP per hour
+#   NETPROOF_AI_DAILY_CAP   requests per day across all visitors (0 = no cap)
+# ponytail: in-memory, per instance, resets on restart; move to Redis if the
+# app ever runs on more than one instance.
+# ---------------------------------------------------------------------------
+_AI_PATHS = {"/run-goal", "/run-image", "/repair"}
+_AI_HITS: dict[str, deque] = defaultdict(deque)
+_AI_DAY: deque = deque()
+
+
+def _env_int(name: str) -> int:
+    try:
+        return max(0, int(os.environ.get(name, "0")))
+    except ValueError:
+        return 0
+
+
+def _client_ip(request: Request) -> str:
+    # Behind one proxy (Koyeb) the RIGHTMOST X-Forwarded-For entry is the
+    # one the proxy added; earlier entries are client-controlled.
+    fwd = request.headers.get("x-forwarded-for", "")
+    if fwd.strip():
+        return fwd.split(",")[-1].strip()
+    return request.client.host if request.client else "unknown"
+
+
+@app.middleware("http")
+async def _ai_rate_limit(request: Request, call_next):
+    per_hour = _env_int("NETPROOF_AI_RATE_LIMIT")
+    if (
+        per_hour
+        and request.method == "POST"
+        and request.url.path in _AI_PATHS
+        and request.query_params.get("mock", "").lower() not in ("1", "true")
+    ):
+        now = time.monotonic()
+        hits = _AI_HITS[_client_ip(request)]
+        while hits and now - hits[0] > 3600:
+            hits.popleft()
+        while _AI_DAY and now - _AI_DAY[0] > 86400:
+            _AI_DAY.popleft()
+        daily = _env_int("NETPROOF_AI_DAILY_CAP")
+        if len(hits) >= per_hour or (daily and len(_AI_DAY) >= daily):
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "error": "rate_limited",
+                    "message": "AI request limit reached for now. Examples, Re-check and Sweep "
+                    "still work: they only use the simulator.",
+                },
+            )
+        hits.append(now)
+        _AI_DAY.append(now)
+    return await call_next(request)
 
 
 @app.get("/", response_class=FileResponse)

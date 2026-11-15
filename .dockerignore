@@ -1,0 +1,12 @@
+.git
+.venv
+.claude
+.claude-flow
+.swarm
+.impeccable
+.pytest_cache
+**/__pycache__
+docs
+backend/tests
+*.db
+.env

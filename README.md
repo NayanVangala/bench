@@ -1,6 +1,6 @@
 # bench.
 
-_(formerly Netproof; the Python package and repo keep the `netproof` name.)_
+_(formerly Netproof; the Python package keeps the `netproof` name.)_
 
 Netproof is a circuit-checking tool for hobby electronics. You describe a
 circuit (or paste a netlist), and Netproof tells you whether it is safe to

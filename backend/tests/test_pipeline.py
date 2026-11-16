@@ -69,6 +69,7 @@ skips unless both ``netproof.spice`` and the ``ngspice`` binary exist.
 from __future__ import annotations
 
 import inspect
+import json
 import shutil
 
 import pytest
@@ -82,8 +83,15 @@ from netproof.ir import (
     Severity,
     Verdict,
 )
+from netproof.llm import read_schematic
 from netproof.parts import led_if_max, led_if_min
-from netproof.pipeline import analyze, design, repair_loop, run_pipeline
+from netproof.pipeline import (
+    analyze,
+    design,
+    repair_loop,
+    run_image,
+    run_pipeline,
+)
 
 # ---------------------------------------------------------------------------
 # Circuit fixtures: the README demo circuit, good and bad.
@@ -432,6 +440,111 @@ def _resistor_value(netlist: Netlist, component_id: str = "R1") -> float:
     comp = netlist.get(component_id)
     assert comp is not None, f"{component_id} missing from {netlist!r}"
     return comp.value
+
+
+# ---------------------------------------------------------------------------
+# Unmodeled parts: ICs / transistors / crystals / connectors the circuit
+# model cannot simulate must be listed, not silently dropped.
+# ---------------------------------------------------------------------------
+
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+
+
+class _ReadFakeClient:
+    """Fake Anthropic client: every create() returns the same reply
+    text (thread-safe: no shared mutable state, so the 3 parallel
+    reads in run_image can all use it)."""
+
+    def __init__(self, reply_text: str) -> None:
+        self.reply_text = reply_text
+        self.calls: list[dict] = []
+        self.messages = self
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.reply_text
+
+
+def _schematic_reply(unmodeled: list[dict] | None) -> str:
+    """A good 9 V LED circuit as a schematic-read reply, plus the
+    given unmodeled parts (``None`` means the key is omitted)."""
+    obj = led_circuit(GOOD_R).model_dump(mode="json")
+    if unmodeled is not None:
+        obj["unmodeled"] = unmodeled
+    return json.dumps(obj)
+
+
+UNMODELED_PARTS = [
+    {"id": "U1", "type": "microcontroller", "note": "ATmega328P; no SPICE model"},
+    {"id": "Q1", "type": "transistor", "note": "2N2222 NPN; not modelable"},
+    {"id": "Y1", "type": "crystal", "note": "16 MHz crystal; not modelable"},
+    {"id": "J1", "type": "connector", "note": "pin header; not modelable"},
+]
+
+
+def _drive_image(gen):
+    """Drive a run_image generator to completion; return
+    ``(events, PipelineResult)``."""
+    events = []
+    try:
+        while True:
+            events.append(next(gen))
+    except StopIteration as done:
+        return events, done.value
+
+
+def test_read_schematic_returns_unmodeled_parts():
+    client = _ReadFakeClient(_schematic_reply(UNMODELED_PARTS))
+    result = read_schematic(PNG_BYTES, client=client)
+
+    assert isinstance(result, Netlist)
+    assert [c.id for c in result.components] == ["V1", "R1", "D1"]
+    assert [p.model_dump() for p in result.unmodeled] == UNMODELED_PARTS
+    assert len(client.calls) == 1
+
+
+def test_read_schematic_defaults_unmodeled_to_empty():
+    client = _ReadFakeClient(_schematic_reply(None))
+    result = read_schematic(PNG_BYTES, client=client)
+
+    assert isinstance(result, Netlist)
+    assert result.unmodeled == []
+    assert len(client.calls) == 1
+
+
+def test_run_image_returns_unmodeled_parts(sim):
+    client = _ReadFakeClient(_schematic_reply(UNMODELED_PARTS))
+    events, result = _drive_image(
+        run_image(PNG_BYTES, client=client, simulator=sim)
+    )
+
+    # All 3 parallel reads ran against the fake client (no real API).
+    assert len(client.calls) == 3
+    # Unmodeled parts survive consensus (sorted by id) and are NOT
+    # in the simulated netlist.
+    assert result.unmodeled == sorted(UNMODELED_PARTS, key=lambda p: p["id"])
+    assert {c.id for c in result.netlist.components} == {"V1", "R1", "D1"}
+    assert "U1" not in {c.id for c in result.netlist.components}
+    assert result.report.verdict is Verdict.PASS
+    # The terminal event carries the same list for the UI.
+    done = [e for e in events if e.get("event") == "result"]
+    assert len(done) == 1
+    assert done[0]["data"]["unmodeled"] == result.unmodeled
+    # ... and the consensus event names them.
+    assert any(
+        "U1" in e["message"] and "unmodeled" in e["message"]
+        for e in events
+        if e["stage"] == "consensus"
+    )
+
+
+def test_run_image_unmodeled_empty_when_everything_modeled(sim):
+    client = _ReadFakeClient(_schematic_reply(None))
+    _, result = _drive_image(
+        run_image(PNG_BYTES, client=client, simulator=sim)
+    )
+    assert result.unmodeled == []
+    assert result.report.verdict is Verdict.PASS
 
 
 # ---------------------------------------------------------------------------

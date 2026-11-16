@@ -154,9 +154,9 @@ def test_design_calls_model_with_expected_params_and_goal():
 
     call = client.calls[0]
     assert call["model"] == MODEL
-    assert call["model"] == "claude-sonnet-5-5"
+    assert call["model"] == "claude-haiku-5-5"
     assert call["max_tokens"] == MAX_TOKENS
-    assert call["max_tokens"] == 4096
+    assert call["max_tokens"] == 16000
     assert len(call["messages"]) == 1
     assert "light a red LED from a 9V battery" in call["messages"][0]["content"]
 

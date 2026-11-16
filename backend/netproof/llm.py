@@ -3,7 +3,7 @@
 Default provider: Google Gemini via the official ``google-genai``
 SDK, model ``gemini-4-argon`` (override with ``GEMINI_MODEL`` env).
 Fallback provider: Anthropic official SDK, model
-``claude-sonnet-5-5``, selected per call by ``LLM_PROVIDER``
+``claude-haiku-5-5``, selected per call by ``LLM_PROVIDER``
 (``gemini`` by default, ``anthropic`` for Anthropic;
 case-insensitive). No LangChain, no other
 provider, no hardcoded netlists in any non-mock path. API keys come
@@ -85,10 +85,12 @@ __all__ = [
     "repair",
 ]
 
-MODEL = "claude-sonnet-5-5"
+MODEL = "claude-haiku-5-5"
 # Default Gemini model; override per call with the GEMINI_MODEL env var.
 GEMINI_MODEL = "gemini-4-argon"
-MAX_TOKENS = 4096
+# Haiku 5.5 thinks by default and thinking counts toward max_tokens: leave
+# room so a large design is never cut off mid-JSON.
+MAX_TOKENS = 16000
 
 # Allowed component types, from ir.ComponentType. Listed in prompts so
 # the model only emits types the IR accepts.
@@ -393,6 +395,8 @@ def _get_client(client: Any = None, provider: str | None = None) -> Any:
 
 def _response_text(response: Any) -> str:
     """Extract the text of a Messages API response (real or fake)."""
+    if getattr(response, "stop_reason", None) == "refusal":
+        raise ValueError("The AI declined this request (safety filter). Try rephrasing it.")
     content = getattr(response, "content", None)
     if isinstance(content, (list, tuple)) and content:
         for block in content:

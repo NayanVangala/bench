@@ -18,7 +18,9 @@ Covered, per the llm.py contract:
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -30,6 +32,7 @@ from netproof.llm import (
     VISION_MODEL,
     _GeminiClientAdapter,
     _call_model,
+    _has_api_key,
     _resolve_vision_model,
     design,
     read_schematic,
@@ -585,3 +588,189 @@ def test_vision_model_ignored_on_gemini_adapter(monkeypatch):
     assert genai_client.calls[0]["model"] == GEMINI_MODEL
     assert genai_client.calls[0]["model"] == "gemini-4-argon"
     assert genai_client.calls[0]["model"] != SONNET
+
+
+# ---------------------------------------------------------------------------
+# Missing API key / client build failure: clear human error, not the
+# cryptic transport error (e.g. httpx2.InvalidURL: Invalid port: ':1]').
+# ---------------------------------------------------------------------------
+# The Anthropic SDK's client construction itself can fail with that
+# InvalidURL from its proxy mounts when no key is set, so _get_client
+# maps any build failure: no key configured -> "No API key
+# configured ..."; key set but build still fails -> "Could not build
+# the LLM client ...", keeping the original error as the cause. A
+# missing google-genai SDK still raises its own clear ImportError.
+# No test here touches the network or a real SDK: the SDK modules are
+# replaced in sys.modules with fakes whose constructors raise.
+
+
+class _BrokenAnthropicModule:
+    """Stands in for the ``anthropic`` module: ``Anthropic()`` raises
+    the exact error the real SDK's client construction raises in this
+    sandbox when no key is set (proxy mounts)."""
+
+    def Anthropic(self, **kwargs):
+        raise RuntimeError("Invalid port: ':1]'")
+
+
+class _BrokenGenaiModule:
+    """Stands in for the ``google.genai`` module: ``Client()`` raises,
+    as the real SDK does with no key configured."""
+
+    def __init__(self, types_module) -> None:
+        self.types = types_module
+
+    def Client(self, **kwargs):
+        raise ValueError("API key is required (set GEMINI_API_KEY)")
+
+
+def _install_broken_genai(monkeypatch, module: _BrokenGenaiModule) -> None:
+    google_pkg = ModuleType("google")
+    google_pkg.genai = module
+    monkeypatch.setitem(sys.modules, "google", google_pkg)
+    monkeypatch.setitem(sys.modules, "google.genai", module)
+
+
+def test_has_api_key_checks_presence_only(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    assert _has_api_key("anthropic") is False
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "   ")
+    assert _has_api_key("anthropic") is False
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
+    assert _has_api_key("anthropic") is True
+
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    assert _has_api_key("gemini") is False
+    # Either Gemini key var counts; GOOGLE_API_KEY alone is enough.
+    monkeypatch.setenv("GOOGLE_API_KEY", "fake-google-key")
+    assert _has_api_key("gemini") is True
+
+
+def test_design_missing_anthropic_key_raises_no_api_key_error(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    monkeypatch.setitem(sys.modules, "anthropic", _BrokenAnthropicModule())
+
+    with pytest.raises(ValueError) as excinfo:
+        design("light a red LED", client=None)
+
+    message = str(excinfo.value)
+    assert "No API key configured" in message
+    assert "anthropic" in message
+    assert "ANTHROPIC_API_KEY" in message
+    # The cryptic transport error is replaced, never shown to the user.
+    assert "Invalid port" not in message
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+
+
+def test_design_blank_anthropic_key_counts_as_missing(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "   ")
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    monkeypatch.setitem(sys.modules, "anthropic", _BrokenAnthropicModule())
+
+    with pytest.raises(ValueError, match="No API key configured"):
+        design("light a red LED", client=None)
+
+
+def test_design_missing_gemini_key_raises_no_api_key_error(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)  # default is gemini
+    _install_broken_genai(monkeypatch, _BrokenGenaiModule(_FakeTypes))
+
+    with pytest.raises(ValueError) as excinfo:
+        design("light a red LED", client=None)
+
+    message = str(excinfo.value)
+    assert "No API key configured" in message
+    assert "gemini" in message
+    assert "GEMINI_API_KEY" in message
+    assert "GOOGLE_API_KEY" in message
+    assert isinstance(excinfo.value.__cause__, ValueError)
+
+
+def test_design_key_set_but_client_build_fails_raises_clear_error(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-fake-key")
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    monkeypatch.setitem(sys.modules, "anthropic", _BrokenAnthropicModule())
+
+    with pytest.raises(ValueError) as excinfo:
+        design("light a red LED", client=None)
+
+    message = str(excinfo.value)
+    assert "Could not build the LLM client" in message
+    assert "anthropic" in message
+    # The original error is preserved (type and message) as the cause.
+    assert "Invalid port: ':1]'" in message
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+
+
+def test_design_gemini_key_set_but_client_build_fails_raises_clear_error(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-gemini-key")
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    _install_broken_genai(monkeypatch, _BrokenGenaiModule(_FakeTypes))
+
+    with pytest.raises(ValueError) as excinfo:
+        design("light a red LED", client=None)
+
+    message = str(excinfo.value)
+    assert "Could not build the LLM client" in message
+    assert "gemini" in message
+    assert "API key is required" in message
+    assert isinstance(excinfo.value.__cause__, ValueError)
+
+
+def test_read_schematic_missing_key_raises_no_api_key_error(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    monkeypatch.setitem(sys.modules, "anthropic", _BrokenAnthropicModule())
+
+    with pytest.raises(ValueError, match="No API key configured"):
+        read_schematic(PNG_BYTES, client=None)
+
+
+def test_repair_missing_key_raises_no_api_key_error(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    monkeypatch.setitem(sys.modules, "anthropic", _BrokenAnthropicModule())
+
+    with pytest.raises(ValueError, match="No API key configured"):
+        repair(BROKEN_NETLIST, [_finding()], client=None)
+
+
+def test_injected_client_needs_no_api_key(monkeypatch):
+    # The key check only applies when a real client is built; an
+    # injected fake client works with no key set at all.
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    client = FakeClient([json.dumps(VALID_NETLIST)])
+
+    result = design("light a red LED", client=client)
+
+    assert isinstance(result, Netlist)
+    assert len(client.calls) == 1
+
+
+def test_gemini_missing_sdk_keeps_clear_import_error(monkeypatch):
+    # Only reachable when google-genai is not installed (as in this
+    # env): the missing-SDK ImportError keeps its install hint and is
+    # NOT rewritten as a missing-key error.
+    import importlib.util
+
+    try:
+        _spec = importlib.util.find_spec("google.genai")
+    except ImportError:
+        # find_spec raises when the parent "google" package is absent
+        # entirely: the SDK is definitely not installed.
+        _spec = None
+    if _spec is not None:
+        pytest.skip("google-genai SDK is installed; ImportError path not reachable")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)  # default is gemini
+
+    with pytest.raises(ImportError, match="google-genai"):
+        design("light a red LED", client=None)

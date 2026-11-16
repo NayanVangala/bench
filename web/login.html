@@ -28,6 +28,11 @@
              border-radius: 10px; padding: 10px; color: var(--ink); text-decoration: none; font-weight: 600; font-size: 14px; }
   .oauth a:hover { background: var(--card-2); }
   .msg { min-height: 20px; margin: 10px 0 0; font-size: 13px; color: var(--stop); }
+  .guest-btn { width: 100%; border: 1px solid var(--line-strong); border-radius: 10px; padding: 10px; background: transparent;
+               color: var(--ink); font-weight: 600; font-size: 14px; cursor: pointer; }
+  .guest-btn:hover { background: var(--card-2); }
+  .guest-btn:disabled { opacity: 0.6; cursor: wait; }
+  .guest-note { margin: 8px 0 0; color: var(--faint); font-size: 12px; text-align: center; }
   .fine { margin: 16px 0 0; color: var(--faint); font-size: 12px; text-align: center; }
 </style>
 </head>
@@ -53,6 +58,9 @@
         <a id="github" href="/auth/github/start" hidden>Continue with GitHub</a>
       </div>
     </div>
+    <div class="or">or</div>
+    <button type="button" class="guest-btn" id="guest-btn">Try it as guest</button>
+    <p class="guest-note">No sign-up. A throwaway guest account is created for this browser; sign up later to keep your saved builds.</p>
     <p class="fine">Your saved builds are private to your account.</p>
   </main>
 <script>
@@ -90,6 +98,25 @@
   }
   $('tab-login').addEventListener('click', function () { setMode('login'); });
   $('tab-signup').addEventListener('click', function () { setMode('signup'); });
+
+  $('guest-btn').addEventListener('click', async function () {
+    var btn = $('guest-btn');
+    btn.disabled = true;
+    btn.textContent = 'Creating guest account…';
+    $('msg').textContent = '';
+    try {
+      var res = await fetch('/auth/guest', { method: 'POST' });
+      if (res.ok) { location.replace('/'); return; }
+      var data = {};
+      try { data = await res.json(); } catch (e2) { /* non-JSON */ }
+      $('msg').textContent = data.message || 'Could not start a guest session (' + res.status + ').';
+    } catch (err) {
+      $('msg').textContent = 'Network error: ' + err.message;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Try it as guest';
+    }
+  });
 
   $('auth-form').addEventListener('submit', async function (e) {
     e.preventDefault();

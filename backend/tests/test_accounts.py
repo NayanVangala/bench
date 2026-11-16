@@ -73,6 +73,63 @@ def test_login_gate(client, monkeypatch):
     assert client.get("/", follow_redirects=False).status_code == 200
 
 
+def test_guest_login_creates_throwaway_user(client):
+    r = client.post("/auth/guest")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["is_guest"] is True and body["name"] == "Guest"
+    assert body["email"].startswith("guest-") and body["email"].endswith("@guest.local")
+    assert accounts.COOKIE in r.cookies  # session cookie set
+    me = client.get("/auth/me").json()
+    assert me["id"] == body["id"] and me["email"] == body["email"] and me["is_guest"] == 1
+    # Marked in the database, with no password to log in with.
+    from sqlalchemy import select as _select
+    with accounts.engine().connect() as c:
+        row = c.execute(_select(accounts.users).where(accounts.users.c.id == body["id"])).mappings().first()
+    assert row["is_guest"] == 1 and row["password_hash"] is None
+    assert client.post("/auth/login", json={"email": body["email"], "password": "anything-goes"}).status_code == 401
+    # A guest session works like any other: it can save builds.
+    assert client.post("/api/builds", json={"domain": "fiber", "title": "Guest lab", "data": {}}).status_code == 200
+
+
+def test_guest_users_are_unique(client):
+    a = client.post("/auth/guest").json()
+    client.cookies.clear()
+    b = client.post("/auth/guest").json()
+    assert a["id"] != b["id"] and a["email"] != b["email"]
+
+
+def test_guest_domain_reserved_for_signup(client):
+    assert client.post("/auth/signup", json={"email": "guest-abc@guest.local", "password": "longenough"}).status_code == 422
+
+
+def test_guest_rate_limited_like_login(client):
+    for _ in range(20):
+        assert client.post("/auth/guest").status_code == 200
+        client.cookies.clear()
+    r = client.post("/auth/guest")
+    assert r.status_code == 429
+    assert r.json()["error"] == "rate_limited"  # server flattens HTTPException detail to top level
+
+
+def test_guest_column_added_to_preexisting_database(client, tmp_path, monkeypatch):
+    """A users table built before is_guest existed still works (migration)."""
+    import sqlite3
+    path = tmp_path / "old.db"
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, email VARCHAR(320) NOT NULL UNIQUE,"
+                   " name VARCHAR(200), password_hash VARCHAR(300), google_id VARCHAR(100) UNIQUE,"
+                   " github_id VARCHAR(100) UNIQUE, created_at DATETIME NOT NULL)")
+        db.execute("INSERT INTO users (email, created_at) VALUES ('old@x.io', '2026-01-01 00:00:00')")
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{path}")
+    accounts.reset_engine()
+    accounts._LOGIN_HITS.clear()
+    assert client.post("/auth/guest").status_code == 200
+    assert client.get("/auth/me").json()["is_guest"] == 1
+    client.cookies.clear()
+    assert client.post("/auth/login", json={"email": "old@x.io", "password": "x"}).status_code == 401
+
+
 def test_oauth_disabled_without_keys_and_links_by_email(client, monkeypatch):
     for k in ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET"):
         monkeypatch.delenv(k, raising=False)

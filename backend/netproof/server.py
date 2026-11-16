@@ -86,9 +86,12 @@ Endpoints::
     GET /download/bom: a GET carries no netlist to render, so those
     routes were removed (they used to 400 on the missing body).
     GET /download/netlist.cir and /download/bom.csv serve the last
-    checked netlist (``_LAST_NETLIST``): one process-global value,
-    shared across tabs, lost on restart (404 until the next check),
-    so POST /download/* with the current table is the reliable path.
+    checked netlist (``_LAST_NETLIST``): one entry per owner
+    (``user:<id>`` for a signed-in session, else ``ip:<client ip>``),
+    lost on restart (404 until the next check), so POST /download/*
+    with the current table is the reliable path. A second tab of the
+    SAME user overwrites that user's download; another user's check
+    never touches it.
 
     SSE contract (``/run-image``, ``/run-goal``): ``progress`` events
     carry only agent / message / stage (plus filename/goal) / mock,
@@ -250,8 +253,15 @@ def _load_sibling(name: str) -> Optional[Any]:
 
     Tries a normal package import first, then loads the ``<name>.py`` file
     sitting next to this file, so the server works whether it is run as
-    ``netproof.server`` or loaded standalone. Failures are cached and
-    recorded in ``_module_error`` for /health and 501 messages.
+    ``netproof.server`` or loaded standalone. Failures are recorded in
+    ``_module_error`` for /health and 501 messages.
+
+    Only SUCCESSES are cached. A failed import is never cached: a
+    transient failure (a dependency that is briefly broken, a half-
+    written file mid-deploy) must not 501 every AI route until the
+    process restarts. The next call retries the import from scratch,
+    so as soon as the module is importable again the routes recover
+    with no restart.
     """
     if name in _module_cache:
         return _module_cache[name]
@@ -278,10 +288,12 @@ def _load_sibling(name: str) -> Optional[Any]:
         except Exception as exc:  # noqa: BLE001 - record and try next way
             error = f"{type(exc).__name__}: {exc}"
             module = None
-    _module_cache[name] = module
-    if module is None:
-        _module_error[name] = error or "module not found"
-    return module
+    if module is not None:
+        _module_cache[name] = module
+        _module_error.pop(name, None)
+        return module
+    _module_error[name] = error or "module not found"
+    return None
 
 
 def _sibling_status() -> dict[str, bool]:
@@ -401,13 +413,64 @@ _SIMULATOR_OVERRIDE: Any = None
 
 # Last netlist that went through a real check (covers /check, repair
 # verification and the streaming runs). Serves GET /download/netlist.cir
-# and GET /download/bom.csv, which take no request body. Process-global
-# and shared across tabs: a second tab's check overwrites the first
-# tab's download, and a restart clears it (404 until the next check).
-# POST /download/* renders from the posted netlist and has no such
-# staleness; prefer it. Deliberately no locking / per-session store:
-# the reliable fix is the POST path, not more server-side state.
-_LAST_NETLIST: Any = None
+# and GET /download/bom.csv, which take no request body. Scoped PER
+# OWNER, not one process-global value: the store is keyed by
+# ``_owner_key(request)`` (``user:<id>`` for a signed-in session, else
+# ``ip:<client ip>``), so one user's check can never overwrite -- or be
+# downloaded by -- another user on the public deploy. A second tab of
+# the same user still overwrites that user's own download, and a
+# restart clears the store (404 until the next check). POST /download/*
+# renders from the posted netlist and has no such staleness; prefer it.
+# The value starts as a dict; older code/tests that assigned None to
+# clear it still work because the helpers below treat any non-dict
+# value as an empty store.
+_LAST_NETLIST: dict[str, Any] = {}
+
+# Owner key for internal callers that record a netlist with no request
+# in hand (direct _verify_netlist / _run_stream calls, tests). HTTP
+# endpoints always pass a real per-request key instead.
+_UNKNOWN_OWNER = "ip:unknown"
+
+
+def _owner_key(request: Request | None) -> str:
+    """Scope key for one user's last netlist.
+
+    A signed ``bench_session`` cookie (see accounts.py) wins and yields
+    ``user:<id>``: distinct accounts -- including distinct guests --
+    never share, even behind one NAT. Without a session, fall back to
+    the client IP (``ip:<ip>``), which still separates different
+    networks; same-IP anonymous users share, which is the documented
+    limit of the fallback (on the public deploy AUTH_REQUIRED=1, so
+    every /check caller has a session and the IP fallback never runs).
+    """
+    if request is None:
+        return _UNKNOWN_OWNER
+    accounts = globals().get("_accounts")
+    if accounts is not None:
+        try:
+            uid = accounts.read_session(request.cookies.get(accounts.COOKIE))
+        except Exception:  # noqa: BLE001 - bad cookie must not 500 a check
+            uid = None
+        if uid is not None:
+            return f"user:{uid}"
+    return f"ip:{_client_ip(request)}"
+
+
+def _record_last_netlist(owner: str, netlist: Any) -> None:
+    """Store ``netlist`` as ``owner``'s last checked netlist."""
+    global _LAST_NETLIST
+    if not isinstance(_LAST_NETLIST, dict):
+        _LAST_NETLIST = {}
+    _LAST_NETLIST[owner] = netlist
+
+
+def _last_netlist_for(owner: str) -> Any | None:
+    """Return ``owner``'s last checked netlist, or None (never another
+    owner's). A non-dict ``_LAST_NETLIST`` (e.g. None assigned by older
+    clearing code) reads as an empty store."""
+    if not isinstance(_LAST_NETLIST, dict):
+        return None
+    return _LAST_NETLIST.get(owner)
 
 
 def set_simulator(simulator: Any) -> None:
@@ -492,7 +555,9 @@ def _run_simulation(netlist: Any) -> Any:
         ) from exc
 
 
-def _verify_netlist(netlist: Any, *, record: bool = True) -> Any:
+def _verify_netlist(
+    netlist: Any, *, record: bool = True, owner: str | None = None
+) -> Any:
     """Full check of a netlist: ERC, then simulate + rules, -> ir.Report.
 
     If pre-simulation checks already contain a STOP finding, simulation
@@ -500,16 +565,20 @@ def _verify_netlist(netlist: Any, *, record: bool = True) -> Any:
     and the report is built from the ERC findings alone. No LLM is
     involved on this path, ever.
 
-    ``record=False`` skips updating ``_LAST_NETLIST``: the sweep
+    ``record=False`` skips updating the last-netlist store: the sweep
     endpoint checks 10 variants, not one canonical netlist, so it
     must not corrupt the downloads served from the last checked
     netlist. /check, repair verification and the streaming runs keep
-    the default ``record=True``.
+    the default ``record=True``. ``owner`` scopes the recorded
+    netlist to one user (see ``_owner_key``); /check passes its
+    request's key. /repair calls with no kwargs (a test monkeypatches
+    this function with a one-arg fake) and records under its owner
+    itself after verification succeeds. Direct callers fall back to
+    ``_UNKNOWN_OWNER``.
     """
     rules = _require_module("rules")
-    global _LAST_NETLIST
     if record:
-        _LAST_NETLIST = netlist
+        _record_last_netlist(owner or _UNKNOWN_OWNER, netlist)
     pre_findings = rules.pre_sim_checks(netlist)
     if any(getattr(f, "severity", None) and str(f.severity) == "STOP" for f in pre_findings):
         return rules.verify(netlist, None)
@@ -781,6 +850,7 @@ async def _run_stream(
     image_bytes: Optional[bytes] = None,
     filename: Optional[str] = None,
     goal: Optional[str] = None,
+    owner: str | None = None,
 ) -> AsyncIterator[dict]:
     """Yield SSE-ready event dicts for /run-image or /run-goal.
 
@@ -861,8 +931,7 @@ async def _run_stream(
             yield _pipeline_progress_event(payload)
         elif tag == "done":
             result = payload
-            global _LAST_NETLIST
-            _LAST_NETLIST = result.netlist
+            _record_last_netlist(owner or _UNKNOWN_OWNER, result.netlist)
             report_data = _report_response(result.report, result.netlist)
             report_data["repairs"] = list(result.repairs)
             report_data["rounds"] = result.rounds
@@ -1241,25 +1310,28 @@ async def parts_catalog_endpoint(
 
 
 @app.post("/check")
-def check(netlist: IRNetlist, mock: bool = Query(False)) -> Any:
+def check(request: Request, netlist: IRNetlist, mock: bool = Query(False)) -> Any:
     """Check a netlist JSON -> report dict. NO LLM is ever called here.
 
     Sync ``def`` so FastAPI runs the (blocking, up to 30 s) ngspice call
     in its threadpool instead of blocking the event loop.
     """
-    global _LAST_NETLIST
     if _ir_mod is None:
         raise HTTPException(
             status_code=501,
             detail={"error": "module_unavailable", "message": "ir.py is not present.", "module": "ir"},
         )
     if mock:
-        _LAST_NETLIST = netlist
+        _record_last_netlist(_owner_key(request), netlist)
         # Same keys as a real report (plus mock): no "spice" extra.
         report = _mock_report(netlist)
         report["netlist"] = _netlist_rows(netlist, {}, {}, {})
         return JSONResponse(content=report)
-    return JSONResponse(content=_report_response(_verify_netlist(netlist), netlist))
+    return JSONResponse(
+        content=_report_response(
+            _verify_netlist(netlist, owner=_owner_key(request)), netlist
+        )
+    )
 
 
 def _sweep_error(code: str, message: str, **extra: Any) -> HTTPException:
@@ -1470,6 +1542,7 @@ def sweep(body: SweepIn, mock: bool = Query(False)) -> Any:
 
 @app.post("/run-image")
 async def run_image(
+    request: Request,
     image: UploadFile = File(...),
     goal: str | None = Form(None),
     mock: bool = Query(False),
@@ -1516,6 +1589,7 @@ async def run_image(
             mock=mock,
             image_bytes=image_bytes,
             filename=image.filename or "upload",
+            owner=_owner_key(request),
         ):
             yield event
 
@@ -1523,20 +1597,24 @@ async def run_image(
 
 
 @app.post("/run-goal")
-async def run_goal(body: GoalIn, mock: bool = Query(False)) -> EventSourceResponse:
+async def run_goal(
+    request: Request, body: GoalIn, mock: bool = Query(False)
+) -> EventSourceResponse:
     """JSON {"goal": str} -> SSE stream of pipeline events, then Report."""
     if not mock:
         _require_module("pipeline")
 
     async def _events() -> AsyncIterator[dict]:
-        async for event in _run_stream("goal", mock=mock, goal=body.goal):
+        async for event in _run_stream(
+            "goal", mock=mock, goal=body.goal, owner=_owner_key(request)
+        ):
             yield event
 
     return EventSourceResponse(_events())
 
 
 @app.post("/repair", response_model=RepairOut)
-def repair(body: RepairIn) -> RepairOut:
+def repair(request: Request, body: RepairIn) -> RepairOut:
     """Repair a netlist via llm.repair, then verify with spice + rules.
 
     LLM failure -> HTTP 502 with a visible error JSON, never a silent
@@ -1594,8 +1672,14 @@ def repair(body: RepairIn) -> RepairOut:
         ) from exc
 
     # Verify the repaired netlist (spice + rules, no LLM involved).
+    # Called with no kwargs on purpose: tests monkeypatch
+    # _verify_netlist with a one-arg fake, so no owner/record kwarg
+    # may be passed here. The repaired netlist is recorded under the
+    # requesting owner explicitly below, only on success (a failed
+    # verification must not become anyone's download).
     try:
         report = _verify_netlist(repaired)
+        _record_last_netlist(_owner_key(request), repaired)
         shaped = _report_response(report, repaired)
         return RepairOut(
             netlist=shaped["netlist"],
@@ -1930,9 +2014,12 @@ async def download_bom(request: Request) -> PlainTextResponse:
     )
 
 
-def _last_netlist_or_404() -> Any:
-    """Last checked netlist, or a 404 telling the UI to run a check first."""
-    if _LAST_NETLIST is None:
+def _last_netlist_or_404(request: Request) -> Any:
+    """The requesting owner's last checked netlist, or a 404 telling
+    the UI to run a check first. Never another owner's netlist: a user
+    who has not checked yet gets 404 even if someone else has."""
+    netlist = _last_netlist_for(_owner_key(request))
+    if netlist is None:
         raise HTTPException(
             status_code=404,
             detail={
@@ -1943,18 +2030,19 @@ def _last_netlist_or_404() -> Any:
                 ),
             },
         )
-    return _LAST_NETLIST
+    return netlist
 
 
 @app.get("/download/netlist.cir")
-async def download_netlist_cir() -> PlainTextResponse:
-    """SPICE deck of the last checked netlist (no request body needed).
+async def download_netlist_cir(request: Request) -> PlainTextResponse:
+    """SPICE deck of the requesting user's last checked netlist (no
+    request body needed).
 
-    Serves ``_LAST_NETLIST``: shared across tabs, lost on restart
-    (404 until the next check). POST /download/netlist with the
-    current table is the reliable path.
+    Serves that user's own ``_LAST_NETLIST`` entry: shared across
+    that user's tabs, lost on restart (404 until the next check).
+    POST /download/netlist with the current table is the reliable path.
     """
-    netlist = _last_netlist_or_404()
+    netlist = _last_netlist_or_404(request)
     try:
         spice_text = _render_spice_text(netlist)
     except ValueError as exc:
@@ -1970,15 +2058,17 @@ async def download_netlist_cir() -> PlainTextResponse:
 
 
 @app.get("/download/bom.csv")
-async def download_bom_csv() -> PlainTextResponse:
-    """BOM CSV of the last checked netlist (no request body needed).
+async def download_bom_csv(request: Request) -> PlainTextResponse:
+    """BOM CSV of the requesting user's last checked netlist (no request
+    body needed).
 
-    Serves ``_LAST_NETLIST``: shared across tabs, lost on restart
-    (404 until the next check). POST /download/bom with the current
-    table is the reliable path. Delivered filename is ``bom.csv``,
-    matching the POST route (it used to be ``BOM.csv`` here).
+    Serves that user's own ``_LAST_NETLIST`` entry: shared across
+    that user's tabs, lost on restart (404 until the next check).
+    POST /download/bom with the current table is the reliable path.
+    Delivered filename is ``bom.csv``, matching the POST route (it
+    used to be ``BOM.csv`` here).
     """
-    netlist = _last_netlist_or_404()
+    netlist = _last_netlist_or_404(request)
     bom = _require_module("bom")
     return PlainTextResponse(
         bom.netlist_to_bom_csv(netlist),

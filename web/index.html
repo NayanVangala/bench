@@ -804,7 +804,7 @@
   }
   function clearError() { errorBanner.classList.remove('show'); errorBanner.textContent = ''; }
 
-  function logLine(agent, message, level) {
+  function logLine(agent, message, level, skipDock) {
     var div = document.createElement('div');
     div.className = 'line' + (level === 'error' ? ' err' : '');
     var color = colorFor(agent || 'system');
@@ -813,7 +813,10 @@
       escapeHtml(message || '');
     consoleEl.appendChild(div);
     consoleEl.scrollTop = consoleEl.scrollHeight;
-    if (window.BenchSynth) window.BenchSynth.log(agent || 'system', message || '');
+    // skipDock: the caller already delivered this event to the dock
+    // via BenchSynth.event (which logs it there with state/score);
+    // logging it again here would print the same line twice.
+    if (window.BenchSynth && !skipDock) window.BenchSynth.log(agent || 'system', message || '');
   }
 
   function setVerdict(verdict, mock, note) {
@@ -1270,7 +1273,16 @@
     if (data.stage) pipelineFromStage(data.stage);
     var agent = data.agent || data.source || 'agent';
     var msg = data.message || data.text || data.detail || data.event || JSON.stringify(data);
-    logLine(agent, msg, data.level || data.type);
+    // Circuit goal runs are a real team (bench #8): Designer /
+    // Judge / Physics progress events carry the dock dialect
+    // (state/score/calls/physics). Deliver them to BenchSynth.event
+    // so the lanes light up with live state and scores, and keep the
+    // console drawer copy (logLine with skipDock) so the line is not
+    // printed twice in the dock.
+    var isTeamEvent = /^(Designer|Judge|Physics)/.test(agent) &&
+      (data.state || typeof data.score === 'number' || typeof data.calls === 'number' || typeof data.physics === 'number');
+    if (isTeamEvent && window.BenchSynth) window.BenchSynth.event(data);
+    logLine(agent, msg, data.level || data.type, isTeamEvent);
     // Progress events never apply a result: a bare netlist (or
     // netlist_used) in a progress event is not a verdict. Only a
     // verdict / findings / report applies one; the done branch above

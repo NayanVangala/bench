@@ -93,8 +93,12 @@ Endpoints::
     SSE contract (``/run-image``, ``/run-goal``): ``progress`` events
     carry only agent / message / stage (plus filename/goal) / mock,
     never a netlist, verdict, or findings, so nothing is applied
-    mid-stream. The terminal event is ``result`` and carries the full
-    shaped report plus ``done: true``; stream close is also a
+    mid-stream. Goal-mode team events additionally carry ``state`` /
+    ``score`` / ``calls`` / ``physics`` (the dock dialect) so the
+    stats dock can light up the Designer / Judge / Physics lanes.
+    The terminal event is ``result`` and carries the full
+    shaped report plus ``done: true`` (and the design-team
+    ``leaderboard`` for goal runs); stream close is also a
     terminator (the UI treats both as "run finished"). An ``error``
     event carries ``error`` / ``http_status`` / ``detail`` and ends
     the stream with no result; it is never the final result event.
@@ -708,20 +712,23 @@ def _pipeline_progress_event(event: dict) -> dict:
     ``elapsed_s``; the SSE shape the web UI consumes is
     ``{"event": "progress", "data": {...}}`` with only agent /
     message / stage / elapsed_s / mock keys, never a netlist,
-    verdict, or findings mid-stream.
+    verdict, or findings mid-stream. Design-team events (goal mode,
+    ``pipeline.design_team``) additionally carry the dock dialect —
+    ``state`` / ``score`` / ``calls`` / ``physics`` — which is
+    forwarded when present so the stats dock can light up the
+    Designer / Judge / Physics lanes with live state and scores.
     """
-    return _sse_event(
-        {
-            "event": "progress",
-            "data": {
-                "agent": event.get("agent", "pipeline"),
-                "message": event.get("message", ""),
-                "stage": event.get("stage", ""),
-                "elapsed_s": event.get("elapsed_s"),
-                "mock": False,
-            },
-        }
-    )
+    data: dict = {
+        "agent": event.get("agent", "pipeline"),
+        "message": event.get("message", ""),
+        "stage": event.get("stage", ""),
+        "elapsed_s": event.get("elapsed_s"),
+        "mock": False,
+    }
+    for key in ("state", "score", "calls", "physics"):
+        if event.get(key) is not None:
+            data[key] = event[key]
+    return _sse_event({"event": "progress", "data": data})
 
 
 def _pipeline_error_event(exc: BaseException) -> dict:
@@ -778,9 +785,9 @@ async def _run_stream(
     """Yield SSE-ready event dicts for /run-image or /run-goal.
 
     The real work is ``pipeline.run_image`` (image: 3 parallel
-    reads + >= 2/3 consensus) or ``pipeline.run_goal`` (goal:
-    best-of-3 design, every candidate simulated), each followed by
-    verify + repair-while-STOP. The pipeline generator is blocking,
+    reads + >= 2/3 consensus) or ``pipeline.run_goal`` (goal: a team
+    of 4 strategists, every candidate simulated, winner by verdict
+    rank), each followed by verify + repair-while-STOP. The pipeline generator is blocking,
     so it runs on a worker thread and forwards its progress events
     through a queue; this coroutine only translates them to SSE.
     The pipeline's own terminal event is NOT forwarded as-is: the
@@ -826,7 +833,12 @@ async def _run_stream(
                     image_bytes, simulator=_SIMULATOR_OVERRIDE
                 )
             else:
-                gen = pipeline.run_goal(goal, simulator=_SIMULATOR_OVERRIDE)
+                # Goal mode is a real team (bench #8): four strategists
+                # propose in parallel and the dock shows one lane per
+                # designer plus Judge / Physics.
+                gen = pipeline.run_goal(
+                    goal, simulator=_SIMULATOR_OVERRIDE, team=True
+                )
             while True:
                 try:
                     event = next(gen)
@@ -856,6 +868,9 @@ async def _run_stream(
             report_data["rounds"] = result.rounds
             report_data["round"] = result.rounds
             report_data["unmodeled"] = list(getattr(result, "unmodeled", []) or [])
+            report_data["leaderboard"] = list(
+                getattr(result, "leaderboard", []) or []
+            )
             report_data["done"] = True
             yield _sse_event({"event": "result", "data": report_data})
             return

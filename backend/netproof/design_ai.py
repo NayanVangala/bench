@@ -197,8 +197,24 @@ def propose_team(domain: Domain, goal: str | None = None, image_bytes: bytes | N
     from .optics import trace_bench
 
     emit = on_event or (lambda e: None)
-    client = llm._get_client(client, provider)
-    label = _model_label(provider)
+    picked = DESIGNERS[:max(1, designers)]
+    # Lanes first: the stats dock keys its lanes off Designer working
+    # events, and _get_client raises with no API key (or an unknown
+    # provider) before any designer runs. Emit the team announcement
+    # plus one working event per designer up front (circuit
+    # design_team does the same), so a no-key run still shows lanes;
+    # if client construction fails they flip to failed below instead
+    # of staying stuck on working or never appearing at all.
+    emit({"stage": "model", "agent": "team", "message": f"{len(picked)} designers proposing in parallel: " + ", ".join(n for n, _ in picked)})
+    for name, strategy in picked:
+        emit({"stage": "agent", "agent": f"Designer {name}", "state": "working", "message": strategy.replace("Strategy: ", "")})
+    try:
+        client = llm._get_client(client, provider)
+        label = _model_label(provider)
+    except Exception as exc:  # noqa: BLE001 - lanes report the failure, then it propagates
+        for name, _ in picked:
+            emit({"stage": "agent", "agent": f"Designer {name}", "state": "failed", "message": str(exc)[:160]})
+        raise
     notes = ""
     if image_bytes:
         emit({"stage": "model", "agent": "team", "message": f"{len(ANALYSTS)} analysts reading the image in parallel ({label})"})
@@ -216,9 +232,11 @@ def propose_team(domain: Domain, goal: str | None = None, image_bytes: bytes | N
             results = list(pool.map(lambda s: _safe(analyse, s, emit, f"Analyst {s[0]}"), ANALYSTS))
         notes = "\n\n".join(r for r in results if isinstance(r, str))
 
-    picked = DESIGNERS[:max(1, designers)]
-    emit({"stage": "model", "agent": "team", "message": f"{len(picked)} designers proposing in parallel: " + ", ".join(n for n, _ in picked)})
-
+    # Team announcement + Designer working events were already emitted
+    # before _get_client above, so the dock has lanes even if client
+    # construction failed; the per-designer working event is re-emitted
+    # inside design() when its thread actually starts (idempotent in
+    # the dock, keyed by agent name).
     def design(spec):
         name, strategy = spec
         m: dict = {}

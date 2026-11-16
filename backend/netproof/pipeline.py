@@ -22,7 +22,11 @@ model calls of its own. It wires together the real sibling modules:
   ``spice.SimResult`` or a plain dict with ``node_voltages`` /
   ``branch_currents`` / ``power`` keys.
 * ``llm.py``    -- the ONLY module that talks to the LLM:
-  ``read_schematic(image_bytes, client=None) -> Netlist``,
+  ``read_schematic(image_bytes, client=None) ->
+  SchematicNetlist`` (a ``Netlist`` plus an ``unmodeled`` list of
+  ``{id, type, note}`` dicts for parts on the schematic the circuit
+  model cannot simulate — ICs, transistors, crystals, connectors —
+  listed instead of silently dropped),
   ``design(goal, client=None) -> Netlist`` (ONE netlist per call),
   ``repair(netlist, findings, client=None) ->
   (netlist, reasons)``. There is NO ``llm.propose_repair``. Failures
@@ -95,6 +99,10 @@ Other entry points (original brief)
   schematic 3 times in parallel (``ThreadPoolExecutor``) and merges
   with ``consensus_netlists``; a read failure never produces a
   guessed netlist, and fewer than 2 successful reads raises.
+  Unmodeled parts reported by any read are merged (deduped by id,
+  first note wins, ids that land in the consensus netlist dropped)
+  into ``PipelineResult.unmodeled`` (``[{id, type, note}]``) and the
+  terminal event's ``data``.
   ``run_goal`` designs best-of-3, then repairs while STOP. Both
   return a ``PipelineResult`` as the generator's return value
   (``StopIteration.value``).
@@ -207,7 +215,10 @@ class PipelineResult:
     are the ``{stage, agent, message, elapsed_s}`` dicts yielded
     along the way; ``repairs`` collects every reason string the
     repair stage returned; ``rounds`` is the number of repair rounds
-    actually run.
+    actually run; ``unmodeled`` (``run_image`` only) lists the parts
+    seen on the schematic that the circuit model cannot simulate,
+    as ``[{id, type, note}]`` dicts, merged across the parallel
+    reads — empty for ``run_pipeline`` / ``run_goal``.
     """
 
     netlist: Netlist
@@ -215,6 +226,7 @@ class PipelineResult:
     events: list[dict] = field(default_factory=list)
     repairs: list[str] = field(default_factory=list)
     rounds: int = 0
+    unmodeled: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -707,30 +719,92 @@ def _call_design(
         raise _llm_error(exc) from exc
 
 
+def _normalize_unmodeled(entry: Any) -> dict | None:
+    """Normalize one unmodeled part (dict, ``llm.UnmodeledPart``, or
+    any object with ``id`` / ``type`` / ``note`` attributes) to a
+    plain ``{"id", "type", "note"}`` dict. Returns ``None`` when the
+    entry carries no usable id (it is dropped, never invented)."""
+    if isinstance(entry, dict):
+        part_id = str(entry.get("id", "") or "").strip()
+        part_type = str(entry.get("type", "") or "").strip()
+        note = str(entry.get("note", "") or "")
+    else:
+        part_id = str(getattr(entry, "id", "") or "").strip()
+        part_type = str(getattr(entry, "type", "") or "").strip()
+        note = str(getattr(entry, "note", "") or "")
+    if not part_id:
+        return None
+    return {"id": part_id, "type": part_type, "note": note}
+
+
+def _split_read_result(raw: Any) -> tuple[Netlist, list[dict]]:
+    """Split one schematic-read result into ``(netlist, unmodeled)``.
+
+    Accepts every shape a read can return: a ``(netlist, unmodeled)``
+    tuple, a netlist dict carrying an ``"unmodeled"`` key, or a plain
+    ``Netlist`` (including ``llm.SchematicNetlist``, whose
+    ``.unmodeled`` attribute is read). A plain ``Netlist`` with no
+    unmodeled information yields ``[]`` — reads from older fakes keep
+    working unchanged.
+    """
+    if isinstance(raw, tuple) and len(raw) == 2:
+        netlist, unmodeled = raw
+        parts = [
+            p
+            for p in (
+                _normalize_unmodeled(e) for e in (unmodeled or [])
+            )
+            if p is not None
+        ]
+        return _coerce_netlist(netlist), parts
+    if isinstance(raw, dict) and "unmodeled" in raw:
+        parts = [
+            p
+            for p in (
+                _normalize_unmodeled(e) for e in (raw.get("unmodeled") or [])
+            )
+            if p is not None
+        ]
+        return _coerce_netlist(raw), parts
+    netlist = _coerce_netlist(raw)
+    parts = [
+        p
+        for p in (
+            _normalize_unmodeled(e)
+            for e in (getattr(netlist, "unmodeled", None) or [])
+        )
+        if p is not None
+    ]
+    return netlist, parts
+
+
 def _call_read(
     llm_obj: Any,
     read_fn: Any,
     image_bytes: bytes,
     client: Any = None,
-) -> Netlist:
+) -> tuple[Netlist, list[dict]]:
     """Transcribe one schematic image with the LLM. ``read_fn`` (a
     plain callable) wins, then ``llm.read_schematic``, then the real
-    ``llm.read_schematic``. Failures propagate to the caller, which
-    wraps them as ``LLM call failed``."""
+    ``llm.read_schematic``. Returns ``(netlist, unmodeled)`` where
+    ``unmodeled`` is the list of ``{id, type, note}`` dicts for parts
+    the circuit model cannot simulate (``[]`` when every part was
+    modeled). Failures propagate to the caller, which wraps them as
+    ``LLM call failed``."""
     if read_fn is not None:
-        return _coerce_netlist(
+        return _split_read_result(
             _call_with_optional_client(read_fn, image_bytes, client=client)
         )
     if llm_obj is not None:
         method = getattr(llm_obj, "read_schematic", None)
         if callable(method):
-            return _coerce_netlist(
+            return _split_read_result(
                 _call_with_optional_client(method, image_bytes, client=client)
             )
         raise RuntimeError(
             "LLM call failed: injected llm has no read_schematic method"
         )
-    return _coerce_netlist(
+    return _split_read_result(
         _call_with_optional_client(
             _llm_module.read_schematic, image_bytes, client=client
         )
@@ -1245,19 +1319,22 @@ def run_image(
     yield emit("start", "pipeline", "pipeline started")
     yield emit("read", "reader", f"{N_CANDIDATES} readers transcribing the schematic in parallel")
 
-    def _read_once() -> Netlist:
+    def _read_once() -> tuple[Netlist, list[dict]]:
         try:
             return _call_read(llm, read_fn, image_bytes, client)
         except Exception as exc:  # noqa: BLE001 - wrapped below
             raise RuntimeError(f"LLM call failed: {exc}") from exc
 
     runs: list[Netlist] = []
+    unmodeled_runs: list[list[dict]] = []
     failures: list[str] = []
     with ThreadPoolExecutor(max_workers=N_CANDIDATES) as pool:
         futures = [pool.submit(_read_once) for _ in range(N_CANDIDATES)]
         for future in futures:
             try:
-                runs.append(future.result())
+                netlist, unmodeled = future.result()
+                runs.append(netlist)
+                unmodeled_runs.append(unmodeled)
             except Exception as exc:  # noqa: BLE001 - collected, raised below
                 failures.append(str(exc))
     if len(runs) < 2:
@@ -1273,6 +1350,20 @@ def run_image(
         yield emit("read", f"Reader {i}", f"failed: {msg[:120]}")
     consensus = consensus_netlists(runs)
     netlist = consensus.netlist
+    # Merge unmodeled parts across the parallel reads: dedupe by id
+    # (first note wins), drop any id that landed in the consensus
+    # netlist after all (a part modeled by the majority is modeled),
+    # sort by id so the order is deterministic.
+    consensus_ids = {c.id for c in netlist.components}
+    seen_unmodeled: set[str] = set()
+    unmodeled: list[dict] = []
+    for run_unmodeled in unmodeled_runs:
+        for part in run_unmodeled:
+            if part["id"] in consensus_ids or part["id"] in seen_unmodeled:
+                continue
+            seen_unmodeled.add(part["id"])
+            unmodeled.append(part)
+    unmodeled.sort(key=lambda p: p["id"])
     yield emit(
         "consensus",
         "reader",
@@ -1280,6 +1371,12 @@ def run_image(
         + (
             f"; {len(consensus.uncertain)} seen-once component(s) excluded"
             if consensus.uncertain
+            else ""
+        )
+        + (
+            f"; {len(unmodeled)} unmodeled part(s) noted: "
+            + ", ".join(p["id"] for p in unmodeled)
+            if unmodeled
             else ""
         ),
     )
@@ -1340,6 +1437,7 @@ def run_image(
         "netlist": netlist.model_dump(mode="json"),
         "repairs": repairs,
         "rounds": rounds,
+        "unmodeled": unmodeled,
     }
     yield done_event
     return PipelineResult(
@@ -1348,6 +1446,7 @@ def run_image(
         events=events,
         repairs=repairs,
         rounds=rounds,
+        unmodeled=unmodeled,
     )
 
 

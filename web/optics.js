@@ -333,7 +333,7 @@
       var blob = await res.blob();
       var a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = 'netproof-optics-build-pack.pdf';
+      a.download = 'bench-optics-build-pack.pdf';
       document.body.appendChild(a);
       a.click();
       a.remove();

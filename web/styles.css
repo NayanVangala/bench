@@ -179,7 +179,9 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
   box-shadow: var(--shadow); min-width: 0;
 }
 .brand { display: flex; align-items: center; gap: 8px; padding: 0 10px 0 6px; color: var(--ink); }
-.wordmark { font-weight: 700; font-size: 17px; letter-spacing: -0.01em; }
+.wordmark { font-weight: 800; font-size: 19px; letter-spacing: -0.03em; }
+.wordmark-dot { color: var(--accent); }
+body:not([data-committed]) .status-chip { display: none !important; }
 .drawer-tabs { display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; }
 .drawer-tabs::-webkit-scrollbar { display: none; }
 .drawer-tab {
@@ -269,15 +271,37 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .btn-row .dark-btn { margin-left: auto; }
 .btn-col { display: grid; gap: 8px; }
 
-/* ---- Domain switch: circuit / fiber link / optics bench ---------------- */
-.domain-switch {
-  display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; padding: 4px; margin-bottom: 12px;
-  background: var(--card-2); border-radius: 12px;
+/* ---- Start: three bubbles fill the panel until a mode is chosen ------- */
+.start { display: flex; flex-direction: column; gap: 10px; min-height: 100%; }
+.bubble {
+  flex: 1 1 0; min-height: 76px; display: flex; flex-direction: column; overflow: hidden;
+  background: var(--card); border: 1px solid var(--line); border-radius: 16px;
+  transition: flex-grow 280ms ease, border-color 200ms ease, box-shadow 200ms ease;
 }
-.domain-switch button {
-  border: 0; background: transparent; border-radius: 9px; padding: 8px 6px; font-size: 13px; font-weight: 600; color: var(--muted);
+.bubble.active { flex-grow: 5; border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+.bubble-head {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left;
+  border: 0; background: transparent; padding: 14px 16px; width: 100%; flex: 1 0 auto;
 }
-.domain-switch button[aria-pressed="true"] { background: var(--card); color: var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,0.12); }
+.bubble.active .bubble-head { flex: 0 0 auto; }
+.bubble-title { font-size: 18px; font-weight: 700; color: var(--ink); }
+.bubble-sub { font-size: 12.5px; color: var(--muted); }
+.bubble-body { display: none; padding: 0 16px 16px; flex-direction: column; gap: 8px; overflow-y: auto; }
+.bubble.active .bubble-body { display: flex; }
+.bubble-body .btn-row { margin-top: 0; justify-content: space-between; }
+.bubble-or { margin-top: 6px; }
+.mode-bar { display: none; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 12px; }
+.mode-name { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+
+/* Before a mode is chosen: only the bubbles. After: only that mode. */
+body:not([data-committed]) .drawer-panel,
+body:not([data-committed]) .drawer-foot,
+body:not([data-committed]) .drawer-tabs { display: none !important; }
+body[data-committed] .start { display: none; }
+body[data-committed] .mode-bar { display: flex; }
+body:not([data-committed]) .drawer-scroll { display: flex; flex-direction: column; }
+@media (prefers-reduced-motion: reduce) { .bubble { transition: none; } }
+
 body:not([data-domain="fiber"]) #panel-fiber, body:not([data-domain="fiber"]) #fiber-check-btn,
 body:not([data-domain="optics"]) #panel-optics, body:not([data-domain="optics"]) #optics-check-btn { display: none; }
 body[data-domain="fiber"] .drawer-panel:not(#panel-fiber),
@@ -454,6 +478,7 @@ body[data-domain="fiber"] #panel-fiber, body[data-domain="optics"] #panel-optics
     width: auto; max-height: 64vh; border-radius: 16px;
   }
   #drawer:not(.open) .drawer-scroll { display: none; }
+  body:not([data-committed]) #drawer .drawer-scroll { display: flex; }
   #drawer:not(.open) .drawer-foot { border-top: 0; }
   .scene-tools { top: 108px; bottom: auto; }
   #chip-checks, #chip-ngspice { display: none; }

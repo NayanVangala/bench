@@ -526,7 +526,7 @@ def circuit_pack(netlist: dict, report: dict) -> dict:
                        "rows": [[r["ref"], r["type"].replace("_", " "), r["footprint"]] for r in pcb_footprints(netlist)]},
              "steps": PCB_STEPS,
              "note": "Board houses show a live quote when you upload; small two-layer boards are usually the cheapest option. "
-                     "Netproof does not generate board layouts yet."},
+                     "bench. does not generate board layouts yet."},
         ],
         "footer": "verdict from an ngspice DC operating point + fixed rules",
     }
@@ -556,7 +556,7 @@ def render_pdf(pack: dict) -> bytes:
     parts, tools = pack["items"], pack["tools"]
     parts_total = round(sum(p["total_usd"] for p in parts), 2)
     tools_total = round(sum(t["total_usd"] for t in tools), 2)
-    footer_text = f"Netproof build pack · {pack['footer']} · prices: single-unit estimates, {PRICES_AS_OF}"
+    footer_text = f"bench. build pack · {pack['footer']} · prices: single-unit estimates, {PRICES_AS_OF}"
 
     class PDF(FPDF):
         def footer(self):
@@ -634,7 +634,7 @@ def render_pdf(pack: dict) -> bytes:
     pdf.set_xy(16, 9)
     pdf.set_font("Mono", "", 8)
     pdf.set_text_color(200, 203, 210)
-    pdf.cell(0, 5, f"NETPROOF BUILD PACK · {date.today():%B %d, %Y}".upper())
+    pdf.cell(0, 5, f"BENCH. BUILD PACK · {date.today():%B %d, %Y}".upper())
     pdf.set_xy(16, 15)
     pdf.set_font("Sans", "B", 17)
     pdf.set_text_color(255, 255, 255)

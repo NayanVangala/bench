@@ -228,7 +228,7 @@ MAX_UPLOAD_BYTES = 10_000_000  # 10 MB cap on /run-image uploads.
 MAX_REPAIR_ROUNDS = 3  # Repair runs at most 3 rounds (see web/index.html).
 
 NGSPICE_INSTALL_HINT = (
-    "ngspice was not found on PATH. Netproof refuses to start without it: "
+    "ngspice was not found on PATH. bench. refuses to start without it: "
     "simulation and verification run through ngspice. Install it "
     "(e.g. macOS: 'brew install ngspice'; Debian/Ubuntu: "
     "'sudo apt install ngspice') and make sure 'ngspice' is on PATH, "
@@ -916,7 +916,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     yield
 
 
-app = FastAPI(title="Netproof", version="0.1.0", lifespan=_lifespan)
+app = FastAPI(title="bench.", version="0.1.0", lifespan=_lifespan)
 
 
 # ---------------------------------------------------------------------------
@@ -1672,7 +1672,7 @@ def build_pack(netlist: IRNetlist) -> Response:
     return Response(
         pdf,
         media_type="application/pdf",
-        headers={"Content-Disposition": 'attachment; filename="netproof-build-pack.pdf"'},
+        headers={"Content-Disposition": 'attachment; filename="bench-build-pack.pdf"'},
     )
 
 
@@ -1710,7 +1710,7 @@ def fiber_build_pack(body: dict) -> Response:
     return Response(
         buildpack.render_pdf(buildpack.fiber_pack(report)),
         media_type="application/pdf",
-        headers={"Content-Disposition": 'attachment; filename="netproof-fiber-build-pack.pdf"'},
+        headers={"Content-Disposition": 'attachment; filename="bench-fiber-build-pack.pdf"'},
     )
 
 
@@ -1744,7 +1744,7 @@ def optics_build_pack(body: dict) -> Response:
     return Response(
         buildpack.render_pdf(buildpack.optics_pack(report)),
         media_type="application/pdf",
-        headers={"Content-Disposition": 'attachment; filename="netproof-optics-build-pack.pdf"'},
+        headers={"Content-Disposition": 'attachment; filename="bench-optics-build-pack.pdf"'},
     )
 
 

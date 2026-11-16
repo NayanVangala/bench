@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
-<title>Netproof</title>
+<title>bench.</title>
 <script>
   // Theme before first paint: persisted choice wins, else the OS
   // preference. No flash of the wrong theme.
@@ -170,7 +170,7 @@
 <body>
 <a class="skip-link" href="#drawer">Skip to controls</a>
 <main id="main">
-  <noscript><p class="noscript"><strong>Netproof needs JavaScript.</strong> The checks run on the server, but this page drives them from the browser.</p></noscript>
+  <noscript><p class="noscript"><strong>bench. needs JavaScript.</strong> The checks run on the server, but this page drives them from the browser.</p></noscript>
 
   <!-- Stage: the 3D bench fills the window; everything else floats on it. -->
   <div id="canvas" class="is-empty">
@@ -190,19 +190,19 @@
     </section>
     <div id="empty-state">
       <p class="eyebrow">Bench empty</p>
-      <p class="empty-title">Pick an example or describe a circuit</p>
-      <p class="empty-note">Every verdict comes from an ngspice run checked against fixed rules.</p>
+      <p class="empty-title">Start on the left</p>
+      <p class="empty-note">Describe what you want to build, upload an image, or open an example.</p>
     </div>
   </div>
 
   <header class="topbar">
-    <nav class="nav-pill" aria-label="Netproof">
+    <nav class="nav-pill" aria-label="bench.">
       <span class="brand">
         <svg width="22" height="22" viewBox="0 0 28 28" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M3 14 H8" /><path d="M8 14 l2.5 -5 l2.5 10 l2.5 -10 l2.5 10 l2.5 -5" /><path d="M23 14 H25" />
           <circle cx="3" cy="14" r="1.6" fill="currentColor" stroke="none" /><circle cx="25" cy="14" r="1.6" fill="currentColor" stroke="none" />
         </svg>
-        <span class="wordmark">Netproof</span>
+        <span class="wordmark">bench<span class="wordmark-dot">.</span></span>
       </span>
       <div class="drawer-tabs" role="tablist" aria-label="Panels">
         <button type="button" class="drawer-tab" role="tab" id="tab-check" aria-selected="true" aria-controls="panel-check"><span class="n">1</span>Check</button>
@@ -232,10 +232,59 @@
 
   <aside id="drawer" role="complementary" aria-label="Controls">
     <div class="drawer-scroll">
-      <div class="domain-switch" role="group" aria-label="What are you building?">
-        <button type="button" data-domain="circuit" aria-pressed="true">Circuit</button>
-        <button type="button" data-domain="fiber" aria-pressed="false">Fiber link</button>
-        <button type="button" data-domain="optics" aria-pressed="false">Optics bench</button>
+      <div id="start" class="start" aria-label="Start a build">
+        <section class="bubble active" data-bubble="circuit">
+          <button type="button" class="bubble-head" aria-expanded="true">
+            <span class="bubble-title">Circuit</span><span class="bubble-sub">Breadboard &amp; PCB electronics, simulated with ngspice</span>
+          </button>
+          <div class="bubble-body">
+            <textarea class="goal-box" data-start-goal rows="3" placeholder="e.g. Light a red LED from a 9 V battery, or upload a schematic" aria-label="Describe your circuit"></textarea>
+            <p class="attached-line mono" data-start-file hidden></p>
+            <div class="btn-row">
+              <button type="button" class="chip-btn" data-start-image>Image<span class="file-dot" aria-hidden="true"></span></button>
+              <button type="button" class="dark-btn" data-start-go>Start &rarr;</button>
+            </div>
+            <p class="eyebrow bubble-or">Or open an example</p>
+            <div class="example-grid"><button type="button" class="example-btn" data-start-example="good_led"><span class="vdot pass" aria-hidden="true"></span>Good LED</button><button type="button" class="example-btn" data-start-example="led_overcurrent"><span class="vdot stop" aria-hidden="true"></span>LED overcurrent</button><button type="button" class="example-btn" data-start-example="resistor_warn"><span class="vdot warn" aria-hidden="true"></span>Resistor running hot</button><button type="button" class="example-btn" data-start-example="shorted_source"><span class="vdot stop" aria-hidden="true"></span>Shorted source</button></div>
+            <input type="file" accept="image/*" hidden data-start-input>
+          </div>
+        </section>
+        <section class="bubble" data-bubble="fiber">
+          <button type="button" class="bubble-head" aria-expanded="false">
+            <span class="bubble-title">Fiber link</span><span class="bubble-sub">Lasers, fiber, splitters and detectors, checked with a power budget</span>
+          </button>
+          <div class="bubble-body">
+            <textarea class="goal-box" data-start-goal rows="3" placeholder="e.g. 1310 nm laser over 10 km of single-mode fiber into a 1x8 splitter" aria-label="Describe your fiber link"></textarea>
+            <p class="attached-line mono" data-start-file hidden></p>
+            <div class="btn-row">
+              <button type="button" class="chip-btn" data-start-image>Image<span class="file-dot" aria-hidden="true"></span></button>
+              <button type="button" class="dark-btn" data-start-go>Start &rarr;</button>
+            </div>
+            <p class="eyebrow bubble-or">Or open an example</p>
+            <div class="example-grid"><button type="button" class="example-btn" data-start-example="good"><span class="vdot pass" aria-hidden="true"></span>Lab link + 1x2 tap</button><button type="button" class="example-btn" data-start-example="overload"><span class="vdot stop" aria-hidden="true"></span>10 mW into a meter</button><button type="button" class="example-btn" data-start-example="deep_split"><span class="vdot stop" aria-hidden="true"></span>20 km, 1x64 split</button><button type="button" class="example-btn" data-start-example="apc"><span class="vdot stop" aria-hidden="true"></span>APC into PC</button></div>
+            <input type="file" accept="image/*" hidden data-start-input>
+          </div>
+        </section>
+        <section class="bubble" data-bubble="optics">
+          <button type="button" class="bubble-head" aria-expanded="false">
+            <span class="bubble-title">Optics bench</span><span class="bubble-sub">Free-space optics on a breadboard, checked with a ray trace</span>
+          </button>
+          <div class="bubble-body">
+            <textarea class="goal-box" data-start-goal rows="3" placeholder="e.g. 532 nm laser, two mirrors, split 50:50 to two detectors, or upload a paper figure" aria-label="Describe your optics bench"></textarea>
+            <p class="attached-line mono" data-start-file hidden></p>
+            <div class="btn-row">
+              <button type="button" class="chip-btn" data-start-image>Image<span class="file-dot" aria-hidden="true"></span></button>
+              <button type="button" class="dark-btn" data-start-go>Start &rarr;</button>
+            </div>
+            <p class="eyebrow bubble-or">Or open an example</p>
+            <div class="example-grid"><button type="button" class="example-btn" data-start-example="good"><span class="vdot pass" aria-hidden="true"></span>Periscope to detector</button><button type="button" class="example-btn" data-start-example="stray"><span class="vdot stop" aria-hidden="true"></span>Unblocked split arm</button><button type="button" class="example-btn" data-start-example="misaligned"><span class="vdot stop" aria-hidden="true"></span>Mirror mis-angled</button><button type="button" class="example-btn" data-start-example="overload"><span class="vdot stop" aria-hidden="true"></span>20 mW into a detector</button></div>
+            <input type="file" accept="image/*" hidden data-start-input>
+          </div>
+        </section>
+      </div>
+      <div class="mode-bar" id="mode-bar">
+        <button type="button" class="ghost-btn" id="new-build-btn">&larr; New build</button>
+        <span class="mode-name mono" id="mode-name"></span>
       </div>
 
       <div class="drawer-panel" id="panel-fiber" aria-label="Fiber link">
@@ -243,7 +292,7 @@
           <summary class="eyebrow">How it works</summary>
           <ol class="how-steps">
             <li><b>Describe</b> your link in words, or upload a photo or diagram. You can also start blank or from an example.</li>
-            <li><b>Check</b>: Netproof runs the optical power budget and marks problems in red on the bench.</li>
+            <li><b>Check</b>: we run the optical power budget and marks problems in red on the bench.</li>
             <li><b>Fix</b>: edit elements in the Link table (or describe it again) until it passes.</li>
             <li><b>Build</b>: download the build pack PDF with parts, prices, buy links, assembly and power-meter checks.</li>
           </ol>
@@ -315,7 +364,7 @@
           <summary class="eyebrow">How it works</summary>
           <ol class="how-steps">
             <li><b>Describe</b> your setup in words, or upload a photo or paper figure. You can also start blank or from an example.</li>
-            <li><b>Check</b>: Netproof traces every beam on the breadboard and flags stray beams, misses and overloads.</li>
+            <li><b>Check</b>: we trace every beam on the breadboard and flags stray beams, misses and overloads.</li>
             <li><b>Fix</b>: drag parts on the 3D breadboard (they snap to the holes), rotate them in the table, or add a beam dump.</li>
             <li><b>Build</b>: download the build pack PDF with Thorlabs parts, prices, hole positions and alignment steps.</li>
           </ol>
@@ -387,7 +436,7 @@
           <summary class="eyebrow">How it works</summary>
           <ol class="how-steps">
             <li><b>Describe</b> a circuit or upload a schematic (01), or pick an example (02).</li>
-            <li><b>Check</b>: Netproof simulates it with ngspice and marks problems on the 3D bench.</li>
+            <li><b>Check</b>: we simulate it with ngspice and marks problems on the 3D bench.</li>
             <li><b>Fix</b>: edit values in the Netlist tab and Re-check, or press Repair to let the AI propose a fix that is re-simulated.</li>
             <li><b>Build</b>: when it passes, get the build pack PDF with parts, prices, breadboard steps and PCB footprints.</li>
           </ol>
@@ -1673,7 +1722,7 @@
     var isCir = kind === 'cir';
     var isPack = kind === 'pack';
     var url = isPack ? '/build-pack' : isCir ? '/download/netlist' : '/download/bom';
-    var filename = isPack ? 'netproof-build-pack.pdf' : isCir ? 'netlist.cir' : 'bom.csv';
+    var filename = isPack ? 'bench-build-pack.pdf' : isCir ? 'netlist.cir' : 'bom.csv';
     clearError();
     var payload = collectNetlistPayload();
     if (!payload.components.length) { showError('Netlist is empty', 'Add at least one netlist row before downloading.'); return; }
@@ -1858,7 +1907,7 @@
     var gzipped, body;
     if (encoded.indexOf('v1.') === 0)       { gzipped = true;  body = encoded.slice(3); }
     else if (encoded.indexOf('v1u.') === 0) { gzipped = false; body = encoded.slice(4); }
-    else throw new Error('Unsupported share-link version. This link was made by a newer Netproof.');
+    else throw new Error('Unsupported share-link version. This link was made by a newer version of bench.');
     if (!/^[A-Za-z0-9\-_]+$/.test(body)) throw new Error('Share link is corrupted (bad characters).');
     var bytes = base64urlToBytes(body);
     if (gzipped) {
@@ -2625,5 +2674,6 @@
 </script>
 <script src="fiber.js" defer></script>
 <script src="optics.js" defer></script>
+<script src="start.js" defer></script>
 </body>
 </html>

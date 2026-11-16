@@ -222,9 +222,6 @@ window.NetproofDesign = function (dom, onResult, onBlank) {
   function setDomain(d) {
     domain = d;
     document.body.setAttribute('data-domain', d);
-    document.querySelectorAll('.domain-switch [data-domain]').forEach(function (b) {
-      b.setAttribute('aria-pressed', b.getAttribute('data-domain') === d ? 'true' : 'false');
-    });
     $('trust-line').textContent = d === 'fiber'
       ? 'Verdicts come from the optical power budget + fixed rules, never the AI.'
       : d === 'optics' ? 'Verdicts come from the ray trace + fixed rules, never the AI.'
@@ -424,7 +421,7 @@ window.NetproofDesign = function (dom, onResult, onBlank) {
       var blob = await res.blob();
       var a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = 'netproof-fiber-build-pack.pdf';
+      a.download = 'bench-fiber-build-pack.pdf';
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -432,9 +429,6 @@ window.NetproofDesign = function (dom, onResult, onBlank) {
     } catch (e) { showError('Network error: ' + e.message); }
   }
 
-  document.querySelectorAll('.domain-switch [data-domain]').forEach(function (b) {
-    b.addEventListener('click', function () { if (!b.disabled) setDomain(b.getAttribute('data-domain')); });
-  });
   document.querySelectorAll('[data-fiber-example]').forEach(function (b) {
     b.addEventListener('click', function () { loadExample(b.getAttribute('data-fiber-example')); });
   });
@@ -451,4 +445,5 @@ window.NetproofDesign = function (dom, onResult, onBlank) {
     });
   $('fiber-pack-cta').addEventListener('click', buildPack);
   document.body.setAttribute('data-domain', 'circuit');
+  window.NetproofSetDomain = setDomain;
 })();

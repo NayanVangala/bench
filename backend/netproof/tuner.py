@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import copy
 import math
+import os
+import time
 from typing import Any, Callable
 
 from . import fiber as fiber_mod
@@ -21,6 +23,76 @@ from . import optics as optics_mod
 from .parts import format_si
 
 Emit = Callable[[dict], None]
+
+# ---------------------------------------------------------------------------
+# Bounded cost guard: every tune run gets a budget of score evaluations and
+# wall-clock seconds. The search stops cleanly (best design so far, clear
+# "capped" event) instead of looping forever on a huge netlist/bench or a
+# pathological objective. Configurable via env, overridable per-run via prefs.
+# ---------------------------------------------------------------------------
+
+DEFAULT_MAX_EVALS = 500
+DEFAULT_MAX_SECONDS = 120.0
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name) or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name) or default)
+    except (TypeError, ValueError):
+        return default
+
+
+class _TuneBudget:
+    """Counts score evaluations (one ngspice sim / fiber check / ray trace that
+    produces a score) and wall time for a single tune run."""
+
+    def __init__(self, max_evals: Any = None, max_seconds: Any = None):
+        self.max_evals = max(1, int(max_evals)) if max_evals is not None else max(1, _env_int("NETPROOF_TUNER_MAX_EVALS", DEFAULT_MAX_EVALS))
+        self.max_seconds = max(0.0, float(max_seconds)) if max_seconds is not None else max(0.0, _env_float("NETPROOF_TUNER_MAX_SECONDS", DEFAULT_MAX_SECONDS))
+        self.evals = 0
+        self.started = time.monotonic()
+        self.capped = False
+        self.cap_reason = ""
+
+    def count(self) -> None:
+        """Record a mandatory evaluation (start/final check): counted, never blocked."""
+        self.evals += 1
+
+    def try_eval(self) -> bool:
+        """Record one search evaluation; False once a cap is hit (and why)."""
+        if self.capped:
+            return False
+        if self.evals >= self.max_evals:
+            self.capped = True
+            self.cap_reason = f"evaluation cap ({self.max_evals} evaluations)"
+            return False
+        if time.monotonic() - self.started > self.max_seconds:
+            self.capped = True
+            self.cap_reason = f"time cap ({self.max_seconds:g} s)"
+            return False
+        self.evals += 1
+        return True
+
+    def elapsed(self) -> float:
+        return time.monotonic() - self.started
+
+
+def _budget_for(prefs: dict) -> _TuneBudget:
+    return _TuneBudget(prefs.get("max_evals"), prefs.get("max_seconds"))
+
+
+def _emit_cap(emit: Emit, budget: _TuneBudget) -> None:
+    emit({"stage": "tune", "capped": True, "evals": budget.evals,
+          "message": f"Tuner stopped: reached the {budget.cap_reason} — returning the best design found so far"})
+
+
 
 E12 = [1.0, 1.2, 1.5, 1.8, 2.2, 2.7, 3.3, 3.9, 4.7, 5.6, 6.8, 8.2]
 RESISTOR_VALUES = [round(m * d, 6) for d in (10, 100, 1000, 10000) for m in E12] + [100000.0]
@@ -54,8 +126,10 @@ def _circuit_score(report: dict, target_a: float) -> float:
 def tune_circuit(netlist: dict, prefs: dict, check: Callable[[dict], dict], emit: Emit) -> dict:
     objective = prefs.get("objective") or "balanced"
     target_a = float(prefs.get("target_ma") or CIRCUIT_TARGET_MA.get(objective, 12.0)) / 1000
+    budget = _budget_for(prefs)
     best = copy.deepcopy(netlist)
     best_report = check(best)
+    budget.count()
     start = best_score = _circuit_score(best_report, target_a)
     emit({"stage": "tune", "message": f"Start: score {start:.1f}, LED target {target_a * 1000:g} mA ({objective})", "score": start})
     # Only resistors that share a node with an LED/diode set its current;
@@ -68,6 +142,8 @@ def tune_circuit(netlist: dict, prefs: dict, check: Callable[[dict], dict], emit
     for c in resistors:
         idx = next(i for i, x in enumerate(best["components"]) if x["id"] == c["id"])
         for value in RESISTOR_VALUES:
+            if not budget.try_eval():
+                break
             cand = copy.deepcopy(best)
             cand["components"][idx]["value"] = value
             rep = check(cand)
@@ -80,6 +156,10 @@ def tune_circuit(netlist: dict, prefs: dict, check: Callable[[dict], dict], emit
             else:
                 emit({"stage": "tune", "tune": "rejected", "tick": True, "step": tried,
                       "message": f"Try {label}: score {s:.1f} (best {best_score:.1f}), rejected"})
+        if budget.capped:
+            break
+    if budget.capped:
+        _emit_cap(emit, budget)
     # Rating: smallest standard rating that keeps each resistor under 50 % load.
     power = {k.lower(): v for k, v in (best_report.get("power") or {}).items()}
     for comp in best["components"]:
@@ -90,6 +170,7 @@ def tune_circuit(netlist: dict, prefs: dict, check: Callable[[dict], dict], emit
         if rating != (comp.get("rating_watts") or 0.25):
             comp["rating_watts"] = rating
     final = check(best)
+    budget.count()
     changes = []
     before = {c["id"]: c for c in netlist["components"]}
     for c in best["components"]:
@@ -100,7 +181,8 @@ def tune_circuit(netlist: dict, prefs: dict, check: Callable[[dict], dict], emit
             changes.append(f"{c['id']} rating: {(b.get('rating_watts') or 0.25):g} W → {c['rating_watts']:g} W")
     end = _circuit_score(final, target_a)
     emit({"stage": "tune", "message": f"Done: score {start:.1f} → {end:.1f} after {tried} simulations", "score": end})
-    return {"design": best, "report": final, "changes": changes, "score_before": start, "score_after": end}
+    return {"design": best, "report": final, "changes": changes, "score_before": start, "score_after": end,
+            "capped": budget.capped, "evals": budget.evals}
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +215,7 @@ def _fiber_score(report: dict, target: float, n_atten: int, objective: str) -> f
 def tune_fiber(link: dict, prefs: dict, emit: Emit) -> dict:
     objective = prefs.get("objective") or "balanced"
     target = _fiber_target(link, objective, prefs.get("target_dbm"))
+    budget = _budget_for(prefs)
     base = copy.deepcopy(link)
     changes = []
     for e in base["elements"]:
@@ -141,12 +224,15 @@ def tune_fiber(link: dict, prefs: dict, emit: Emit) -> dict:
             e["polish_b"] = e["polish_a"]
             emit({"stage": "tune", "message": f"Matched connector polish at {e['id']}"})
     start_report = fiber_mod.check_link(link)
+    budget.count()
     start = _fiber_score(start_report, target, sum(1 for e in link["elements"] if e["type"] == "attenuator"), objective)
     emit({"stage": "tune", "message": f"Start: score {start:.1f}, received {start_report['received_dbm']:.1f} dBm, target {target:.1f} dBm ({objective})", "score": start})
     stripped = copy.deepcopy(base)
     stripped["elements"] = [e for e in stripped["elements"] if e["type"] != "attenuator"]
     best, best_report, best_score = None, None, -1e9
     for db in ATTENUATIONS_DB:
+        if not budget.try_eval():
+            break
         cand = copy.deepcopy(stripped)
         if db:
             used = {e["id"] for e in cand["elements"]}
@@ -158,12 +244,22 @@ def tune_fiber(link: dict, prefs: dict, emit: Emit) -> dict:
               "message": f"{db:g} dB attenuation → {rep['received_dbm']:.1f} dBm, score {s:.1f}" + (", rejected" if s <= best_score else ", kept")})
         if s > best_score + 1e-9:
             best, best_report, best_score = cand, rep, s
+    if budget.capped:
+        _emit_cap(emit, budget)
+    if best is None:
+        # Cap hit before any attenuator candidate was tried: fall back to the
+        # stripped link (no attenuator) so the caller still gets a valid design.
+        best = stripped
+        best_report = fiber_mod.check_link(best)
+        budget.count()
+        best_score = _fiber_score(best_report, target, 0, objective)
     before_att = sum(e.get("loss_db") or 10 for e in link["elements"] if e["type"] == "attenuator")
     after_att = sum(e.get("loss_db") or 0 for e in best["elements"] if e["type"] == "attenuator")
     if before_att != after_att:
         changes.append(f"Attenuation: {before_att:g} dB → {after_att:g} dB")
     emit({"stage": "tune", "message": f"Done: score {start:.1f} → {best_score:.1f}, received {best_report['received_dbm']:.1f} dBm", "score": best_score})
-    return {"design": best, "report": best_report, "changes": changes, "score_before": start, "score_after": best_score}
+    return {"design": best, "report": best_report, "changes": changes, "score_before": start, "score_after": best_score,
+            "capped": budget.capped, "evals": budget.evals}
 
 
 # ---------------------------------------------------------------------------
@@ -189,11 +285,14 @@ def _new_id(bench: dict, prefix: str) -> str:
     return next(f"{prefix}{k}" for k in range(1, 999) if f"{prefix}{k}" not in used)
 
 
-def autofix_optics(bench: dict, emit: Emit) -> tuple[dict, list[str]]:
+def autofix_optics(bench: dict, emit: Emit, budget: _TuneBudget | None = None) -> tuple[dict, list[str]]:
     """End stray beams on dumps just inside the table edge; ND filters for overloads."""
+    budget = budget or _TuneBudget()
     b = copy.deepcopy(bench)
     changes = []
     for _ in range(6):
+        if not budget.try_eval():
+            break
         rep = optics_mod.trace_bench(b)
         fixed = False
         for seg in rep["segments"]:
@@ -209,7 +308,7 @@ def autofix_optics(bench: dict, emit: Emit) -> tuple[dict, list[str]]:
                     "angle_deg": round(math.degrees(math.atan2(uy, ux)), 1)}
             trial = copy.deepcopy(b)
             trial["elements"].append(dump)
-            if _counts(optics_mod.trace_bench(trial))[0] <= _counts(rep)[0]:
+            if budget.try_eval() and _counts(optics_mod.trace_bench(trial))[0] <= _counts(rep)[0]:
                 b = trial
                 changes.append(f"Added beam dump {did} for the stray beam from {seg['source']}")
                 emit({"stage": "autofix", "message": f"Stray {seg['power_mw']:.2g} mW beam from {seg['source']}: added dump {did}"})
@@ -218,6 +317,7 @@ def autofix_optics(bench: dict, emit: Emit) -> tuple[dict, list[str]]:
         if not fixed:
             break
     rep = optics_mod.trace_bench(b)
+    budget.count()
     for f in rep["findings"]:
         if f["rule_id"] != "DETECTOR_OVERLOAD":
             continue
@@ -241,11 +341,14 @@ def autofix_optics(bench: dict, emit: Emit) -> tuple[dict, list[str]]:
 
 def tune_optics(bench: dict, prefs: dict, emit: Emit) -> dict:
     objective = prefs.get("objective") or "max_power"
+    budget = _budget_for(prefs)
     start_report = optics_mod.trace_bench(bench)
+    budget.count()
     start = _optics_score(start_report, bench, objective)
     emit({"stage": "tune", "message": f"Start: score {start:.1f} ({objective})", "score": start})
-    best, changes = autofix_optics(bench, emit)
+    best, changes = autofix_optics(bench, emit, budget)
     best_report = optics_mod.trace_bench(best)
+    budget.count()
     best_score = _optics_score(best_report, best, objective)
     emit({"stage": "tune", "message": f"After autofix: score {best_score:.1f}", "score": best_score})
     # Knobs in beam order: mirror / beamsplitter angles (coarse then fine), splits.
@@ -258,10 +361,12 @@ def tune_optics(bench: dict, prefs: dict, emit: Emit) -> dict:
     for eid in order:
         for deltas in ([-4, -3, -2, -1, 1, 2, 3, 4], [-0.6, -0.3, 0.3, 0.6]):
             improved = True
-            while improved:
+            while improved and not budget.capped:
                 improved = False
                 idx = next(i for i, e in enumerate(best["elements"]) if e["id"] == eid)
                 for d in deltas:
+                    if not budget.try_eval():
+                        break
                     cand = copy.deepcopy(best)
                     cand["elements"][idx]["angle_deg"] = round((cand["elements"][idx].get("angle_deg") or 0) + d, 2)
                     rep = optics_mod.trace_bench(cand)
@@ -274,10 +379,16 @@ def tune_optics(bench: dict, prefs: dict, emit: Emit) -> dict:
                         break
                     emit({"stage": "tune", "tune": "rejected", "tick": True, "step": steps,
                           "message": f"Try {label}: score {s:.1f} (best {best_score:.1f}), rejected"})
+            if budget.capped:
+                break
+        if budget.capped:
+            break
         e = next(x for x in best["elements"] if x["id"] == eid)
         if e["type"] == "beamsplitter" and objective == "balanced_arms":
             idx = best["elements"].index(e)
             for split in [0.3, 0.4, 0.45, 0.5, 0.55, 0.6, 0.7]:
+                if not budget.try_eval():
+                    break
                 cand = copy.deepcopy(best)
                 cand["elements"][idx]["split"] = split
                 rep = optics_mod.trace_bench(cand)
@@ -289,6 +400,10 @@ def tune_optics(bench: dict, prefs: dict, emit: Emit) -> dict:
                 else:
                     emit({"stage": "tune", "tune": "rejected", "tick": True, "step": steps,
                           "message": f"Try {eid} split {split:g}: score {s:.1f} (best {best_score:.1f}), rejected"})
+        if budget.capped:
+            break
+    if budget.capped:
+        _emit_cap(emit, budget)
     before = {e["id"]: e for e in bench["elements"]}
     for e in best["elements"]:
         b = before.get(e["id"])
@@ -297,4 +412,5 @@ def tune_optics(bench: dict, prefs: dict, emit: Emit) -> dict:
         if b and b.get("split") != e.get("split") and e["type"] == "beamsplitter":
             changes.append(f"{e['id']} split: {b.get('split') or 0.5:g} → {e['split']:g}")
     emit({"stage": "tune", "message": f"Done: score {start:.1f} → {best_score:.1f} after {steps} traces", "score": best_score})
-    return {"design": best, "report": best_report, "changes": changes, "score_before": start, "score_after": best_score}
+    return {"design": best, "report": best_report, "changes": changes, "score_before": start, "score_after": best_score,
+            "capped": budget.capped, "evals": budget.evals}

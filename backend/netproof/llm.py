@@ -71,7 +71,7 @@ import json
 import os
 from typing import Any
 
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from .ir import ComponentType, Finding, Netlist
 
@@ -79,6 +79,8 @@ __all__ = [
     "MODEL",
     "GEMINI_MODEL",
     "MAX_TOKENS",
+    "UnmodeledPart",
+    "SchematicNetlist",
     "get_provider",
     "read_schematic",
     "design",
@@ -131,6 +133,63 @@ _RETRY_TEXT = (
     "Return ONLY strict JSON matching the schema above, with no prose, "
     "no markdown, no code fences, and no commentary."
 )
+
+
+class UnmodeledPart(BaseModel):
+    """One part seen on a schematic that the circuit model cannot
+    simulate, so it is listed instead of silently dropped.
+
+    ``id`` is the part's reference designator (e.g. ``"U1"``);
+    ``type`` is what kind of part it is (e.g. ``"microcontroller"``,
+    ``"transistor"``, ``"crystal"``, ``"connector"``); ``note`` is a
+    short plain-English reason it cannot be simulated.
+    """
+
+    model_config = {"frozen": True}
+
+    id: str = Field(min_length=1)
+    type: str = Field(min_length=1)
+    note: str = ""
+
+    @field_validator("id", "type", "note", mode="before")
+    @classmethod
+    def _strip(cls, v: object) -> object:
+        return v.strip() if isinstance(v, str) else v
+
+
+class SchematicNetlist(Netlist):
+    """A :class:`Netlist` transcribed from a schematic image, plus
+    the parts on that schematic the circuit model cannot simulate.
+
+    A plain :class:`Netlist` in every other respect (``isinstance``
+    checks, validation, ``model_dump`` all behave as before), so
+    existing callers keep working; ``unmodeled`` is empty when every
+    part on the schematic was modeled.
+    """
+
+    unmodeled: list[UnmodeledPart] = Field(default_factory=list)
+
+
+# Extra schema text for read_schematic only (design/repair never see
+# it): the model must list the parts it cannot model instead of
+# silently dropping them.
+_UNMODELED_TEXT = """Also list every part on the schematic that the netlist above
+cannot represent — integrated circuits, transistors, crystals,
+connectors, and anything else with no simulatable model — in an
+"unmodeled" array:
+
+  "unmodeled": [
+    {"id": "U1", "type": "microcontroller",
+     "note": "ATmega328P; no SPICE model in the circuit model"},
+    {"id": "Q1", "type": "transistor",
+     "note": "2N2222 NPN; transistors are not modelable"}
+  ]
+
+Each entry needs "id" (its reference designator) and "type" (what kind
+of part it is); "note" is a short plain-English reason it cannot be
+simulated. Never silently drop such a part: if it is on the schematic
+and not in "components", it must appear in "unmodeled". Omit the
+"unmodeled" key, or use an empty array, when every part is modeled."""
 
 
 # ---------------------------------------------------------------------------
@@ -469,6 +528,81 @@ def _parse_netlist(obj: Any) -> Netlist:
         raise ValueError(f"LLM netlist failed validation: {exc}") from exc
 
 
+def _parse_schematic_reply(obj: Any) -> SchematicNetlist:
+    """Validate a schematic-read reply: a netlist plus the parts on
+    the schematic the circuit model cannot simulate.
+
+    ``"unmodeled"`` is optional (absent means every part was modeled).
+    Each entry needs a non-empty ``id`` and ``type``; ``note`` defaults
+    to ``""``. Entries whose id collides with a modeled component, or
+    that repeat an earlier unmodeled id, are dropped deterministically
+    (first occurrence wins) — the model contradicting itself about a
+    part never surfaces the same id twice.
+    """
+    if not isinstance(obj, dict):
+        raise ValueError(
+            "expected a JSON object for a schematic read, "
+            f"got {type(obj).__name__}"
+        )
+    netlist = _parse_netlist(obj)
+    raw_unmodeled = obj.get("unmodeled", [])
+    if raw_unmodeled is None:
+        raw_unmodeled = []
+    if not isinstance(raw_unmodeled, list):
+        raise ValueError("schematic 'unmodeled' must be an array")
+    modeled_ids = {c.id for c in netlist.components}
+    seen: set[str] = set()
+    parts: list[UnmodeledPart] = []
+    for entry in raw_unmodeled:
+        if not isinstance(entry, dict):
+            raise ValueError(
+                "schematic 'unmodeled' entries must be objects, "
+                f"got {entry!r}"
+            )
+        try:
+            part = UnmodeledPart.model_validate(entry)
+        except ValidationError as exc:
+            raise ValueError(
+                f"schematic 'unmodeled' entry failed validation: {exc}"
+            ) from exc
+        if part.id in modeled_ids or part.id in seen:
+            continue
+        seen.add(part.id)
+        parts.append(part)
+    return SchematicNetlist(
+        components=list(netlist.components),
+        title=netlist.title,
+        unmodeled=parts,
+    )
+
+
+def _request_schematic(
+    client: Any, messages: list[dict[str, Any]]
+) -> SchematicNetlist:
+    """Call the model, validate the reply as a schematic read (netlist
+    + unmodeled parts), one retry max. On the second failure a
+    ``ValueError`` is raised — never a fallback netlist, and never a
+    silently dropped part list.
+    """
+    first_error: str | None = None
+    try:
+        return _parse_schematic_reply(_extract_json(_call_model(client, messages)))
+    except ValueError as exc:
+        first_error = str(exc)
+    retry_messages = messages + [
+        {"role": "user", "content": _RETRY_TEXT.format(error=first_error)},
+    ]
+    try:
+        return _parse_schematic_reply(
+            _extract_json(_call_model(client, retry_messages))
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "LLM failed to return a valid schematic read after one retry. "
+            f"First error: {first_error}. Retry error: {exc}"
+        ) from exc
+
+
 def _request_netlist(client: Any, messages: list[dict[str, Any]]) -> Netlist:
     """Call the model, validate the reply as a Netlist, one retry max.
 
@@ -513,11 +647,16 @@ def _detect_media_type(image_bytes: bytes) -> str:
 
 def read_schematic(
     image_bytes: bytes, client: Any = None, provider: str | None = None
-) -> Netlist:
+) -> SchematicNetlist:
     """Transcribe a schematic image into a Netlist.
 
-    Vision prompt asks for JSON netlist only. Invalid JSON gets one
-    retry, then a loud ValueError — never a silent fallback.
+    Returns a :class:`SchematicNetlist` — a plain Netlist plus an
+    ``unmodeled`` list of ``{id, type, note}`` dicts for every part
+    on the schematic the circuit model cannot simulate (ICs,
+    transistors, crystals, connectors, ...), so such parts are listed
+    instead of silently dropped. ``unmodeled`` is empty when every
+    part was modeled. Invalid JSON (or an invalid unmodeled entry)
+    gets one retry, then a loud ValueError — never a silent fallback.
     """
     if not isinstance(image_bytes, (bytes, bytearray)) or not image_bytes:
         raise ValueError("read_schematic requires non-empty image bytes")
@@ -546,12 +685,14 @@ def read_schematic(
                         "value and note it only by choosing that value — "
                         "do not add prose. "
                         + _SCHEMA_TEXT
+                        + "\n\n"
+                        + _UNMODELED_TEXT
                     ),
                 },
             ],
         }
     ]
-    return _request_netlist(client, messages)
+    return _request_schematic(client, messages)
 
 
 # ---------------------------------------------------------------------------

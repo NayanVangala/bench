@@ -4,6 +4,12 @@ signed session cookies, and a per-user builds store.
 Storage is SQLAlchemy Core over ``DATABASE_URL`` (Render Postgres in
 production; SQLite locally and in tests). Tables are created on first use.
 
+Guest access: POST /auth/guest creates a throwaway user (random
+``guest-…@guest.local`` email, no password, ``is_guest=1``) and sets the
+same signed session cookie as a normal login. A guest can never log in
+with a password and can never sign up with a ``@guest.local`` address;
+its saved builds live only under that throwaway account.
+
 Environment:
   DATABASE_URL          postgres://... or sqlite:///path (default sqlite:///./bench.db)
   SECRET_KEY            signs session cookies (set in production; a random
@@ -33,7 +39,8 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import (Column, DateTime, ForeignKey, Integer, MetaData, String, Table, Text,
-                        create_engine, delete, insert, select, update)
+                        create_engine, delete, insert, select, text, update)
+from sqlalchemy.exc import IntegrityError
 
 # ---------------------------------------------------------------------------
 # Database
@@ -48,6 +55,9 @@ users = Table(
     Column("password_hash", String(300)),
     Column("google_id", String(100), unique=True),
     Column("github_id", String(100), unique=True),
+    # 1 for throwaway guest accounts (POST /auth/guest): no password, random
+    # guest-...@guest.local email. 0 for normal / OAuth accounts.
+    Column("is_guest", Integer, nullable=False, server_default="0"),
     Column("created_at", DateTime(timezone=True), nullable=False),
 )
 builds = Table(
@@ -80,7 +90,22 @@ def engine():
     if _engine is None:
         _engine = create_engine(_db_url(), pool_pre_ping=True, future=True)
         metadata.create_all(_engine)
+        _ensure_is_guest_column()
     return _engine
+
+
+def _ensure_is_guest_column() -> None:
+    """Add users.is_guest to databases created before the column existed.
+
+    ``create_all`` only creates missing tables, it never alters an existing
+    ``users`` table, so check the live columns and ALTER if needed. Works
+    on both SQLite and Postgres; a fresh database already has the column.
+    """
+    from sqlalchemy import inspect
+    cols = [c["name"] for c in inspect(_engine).get_columns("users")]
+    if "is_guest" not in cols:
+        with _engine.begin() as c:
+            c.execute(text("ALTER TABLE users ADD COLUMN is_guest INTEGER NOT NULL DEFAULT 0"))
 
 
 def reset_engine() -> None:
@@ -172,7 +197,7 @@ def current_user(request: Request) -> Optional[dict]:
     if uid is None:
         return None
     with engine().connect() as c:
-        row = c.execute(select(users.c.id, users.c.email, users.c.name).where(users.c.id == uid)).mappings().first()
+        row = c.execute(select(users.c.id, users.c.email, users.c.name, users.c.is_guest).where(users.c.id == uid)).mappings().first()
     return dict(row) if row else None
 
 
@@ -260,6 +285,37 @@ def auth_me(request: Request) -> dict:
     return require_user(request)
 
 
+GUEST_EMAIL_DOMAIN = "guest.local"
+
+
+def create_guest_user() -> tuple[int, str]:
+    """Create a throwaway guest user: random unguessable email, no password.
+
+    Retries on the (negligible) chance the random email collides with an
+    existing row. The returned user can never log in with a password
+    (``password_hash`` is NULL, so ``verify_password`` always fails) and
+    ``is_guest=1`` marks it in the database and in ``/auth/me``.
+    """
+    for _ in range(5):
+        email = f"guest-{secrets.token_hex(16)}@{GUEST_EMAIL_DOMAIN}"
+        try:
+            with engine().begin() as c:
+                uid = c.execute(insert(users).values(email=email, name="Guest", password_hash=None,
+                                                     is_guest=1, created_at=_now())).inserted_primary_key[0]
+            return uid, email
+        except IntegrityError:
+            continue
+    raise HTTPException(status_code=503, detail={"error": "guest_failed", "message": "Could not create a guest account. Try again."})
+
+
+@router.post("/auth/guest")
+def guest_login(request: Request):
+    if _too_many_logins(request):
+        raise HTTPException(status_code=429, detail={"error": "rate_limited", "message": "Too many attempts. Try again in a few minutes."})
+    uid, email = create_guest_user()
+    return _set_session(JSONResponse({"id": uid, "email": email, "name": "Guest", "is_guest": True}), request, uid)
+
+
 @router.post("/auth/signup")
 def signup(body: SignupIn, request: Request):
     if _too_many_logins(request):
@@ -267,6 +323,8 @@ def signup(body: SignupIn, request: Request):
     email = body.email.strip().lower()
     if not _EMAIL.match(email):
         raise HTTPException(status_code=422, detail={"error": "bad_email", "message": "Enter a valid email address."})
+    if email.endswith("@" + GUEST_EMAIL_DOMAIN):
+        raise HTTPException(status_code=422, detail={"error": "bad_email", "message": "That email domain is reserved for guest accounts."})
     with engine().begin() as c:
         if c.execute(select(users.c.id).where(users.c.email == email)).first():
             raise HTTPException(status_code=409, detail={"error": "email_taken", "message": "An account with this email already exists. Log in instead."})

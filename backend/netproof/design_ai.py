@@ -205,14 +205,15 @@ def propose_team(domain: Domain, goal: str | None = None, image_bytes: bytes | N
 
         def analyse(spec):
             name, task = spec
+            emit({"stage": "agent", "agent": f"Analyst {name}", "state": "working", "message": task.split(":")[0].split(".")[0]})
             text = llm._call_model(client, [{"role": "user", "content": [
                 _image_block(image_bytes),
                 {"type": "text", "text": f"You are the {name} analyst for a {'fiber-optic link' if domain == 'fiber' else 'free-space optics bench'}. {task} Plain text, under 150 words." + (f" Goal: {goal}" if goal else "")}]}])
-            emit({"stage": "parse", "agent": f"Analyst {name}", "message": " ".join(text.split())[:180]})
+            emit({"stage": "parse", "agent": f"Analyst {name}", "state": "done", "calls": 1, "message": " ".join(text.split())[:180]})
             return f"{name} analyst notes:\n{text.strip()}"
 
         with ThreadPoolExecutor(max_workers=len(ANALYSTS)) as pool:
-            results = list(pool.map(lambda s: _safe(analyse, s), ANALYSTS))
+            results = list(pool.map(lambda s: _safe(analyse, s, emit, f"Analyst {s[0]}"), ANALYSTS))
         notes = "\n\n".join(r for r in results if isinstance(r, str))
 
     picked = DESIGNERS[:max(1, designers)]
@@ -221,23 +222,30 @@ def propose_team(domain: Domain, goal: str | None = None, image_bytes: bytes | N
     def design(spec):
         name, strategy = spec
         m: dict = {}
+        calls = [1]
+        emit({"stage": "agent", "agent": f"Designer {name}", "state": "working", "message": strategy.replace("Strategy: ", "")})
+
+        def relay(e):
+            if e.get("stage") == "retry":
+                calls[0] += 1
+                emit({**e, "agent": f"Designer {name}", "state": "working"})
+
         cand = propose(domain, goal, image_bytes, client=client, meta=m,
-                       extra=strategy + ("\n\n" + notes if notes else ""),
-                       on_event=lambda e: emit({**e, "agent": f"Designer {name}"}) if e.get("stage") == "retry" else None)
+                       extra=strategy + ("\n\n" + notes if notes else ""), on_event=relay)
         report = check_link(cand) if domain == "fiber" else trace_bench(cand)
         score = _score(domain, cand, report)
-        emit({"stage": "verify", "agent": f"Designer {name}", "score": score,
+        emit({"stage": "verify", "agent": f"Designer {name}", "state": "done", "calls": calls[0], "physics": 1, "score": score,
               "message": f"{len(cand['elements'])} elements \u2192 {report['verdict']}, score {score:.1f}"})
         return {"name": name, "design": cand, "report": report, "score": score, "bboxes": m.get("bboxes") or {}}
 
     with ThreadPoolExecutor(max_workers=len(picked)) as pool:
-        results = [r for r in pool.map(lambda s: _safe(design, s), picked) if isinstance(r, dict)]
+        results = [r for r in pool.map(lambda s: _safe(design, s, emit, f"Designer {s[0]}"), picked) if isinstance(r, dict)]
     if not results:
         raise ValueError("Every designer failed to return a valid design.")
     results.sort(key=lambda r: r["score"], reverse=True)
     best = results[0]
     board = ", ".join(f"{r['name']} {r['score']:.1f}" for r in results)
-    emit({"stage": "verify", "agent": "Judge", "score": best["score"],
+    emit({"stage": "verify", "agent": "Judge", "state": "done", "score": best["score"],
           "message": f"Picked Designer {best['name']} ({board})"})
     if meta is not None:
         meta["bboxes"] = best["bboxes"]
@@ -245,9 +253,11 @@ def propose_team(domain: Domain, goal: str | None = None, image_bytes: bytes | N
     return best["design"]
 
 
-def _safe(fn, arg):
-    """One agent failing never sinks the team; its error is returned instead."""
+def _safe(fn, arg, emit=None, agent=""):
+    """One agent failing never sinks the team; its error is reported and returned."""
     try:
         return fn(arg)
     except Exception as exc:  # noqa: BLE001
+        if emit:
+            emit({"stage": "agent", "agent": agent, "state": "failed", "message": str(exc)[:160]})
         return exc

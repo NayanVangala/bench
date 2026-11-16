@@ -317,8 +317,8 @@ body:not([data-committed]) .status-chip { display: none !important; }
 .b-meta { font-size: 11.5px; color: var(--muted); }
 /* Synthesis log over the bench (image -> model -> check -> fly-in -> tune) */
 .synth {
-  position: fixed; z-index: 12; bottom: var(--gap); left: calc(var(--panel-w) + var(--gap) * 2);
-  width: 460px; max-width: calc(100vw - var(--panel-w) - var(--gap) * 4);
+  /* Full-width stats dock along the bottom of the 3D bench */
+  position: fixed; z-index: 12; bottom: var(--gap); left: calc(var(--panel-w) + var(--gap) * 2); right: var(--gap);
   background: rgba(20, 22, 27, 0.92); color: #e6e8ec; border: 1px solid rgba(255,255,255,0.08);
   border-radius: 14px; box-shadow: var(--shadow); padding: 10px 12px; backdrop-filter: blur(6px);
 }
@@ -339,7 +339,27 @@ body:not([data-committed]) .status-chip { display: none !important; }
 .synth-spark { width: 100%; height: 36px; display: block; }
 .synth-spark polyline { fill: none; stroke: #f39a2b; stroke-width: 1.8; vector-effect: non-scaling-stroke; }
 .synth-spark text { font: 9px "JetBrains Mono", monospace; fill: #aab0ba; }
-.synth-log { max-height: 150px; overflow-y: auto; font-size: 11.5px; line-height: 1.5; margin-top: 4px; }
+.synth-log { height: 168px; overflow-y: auto; font-size: 11.5px; line-height: 1.5; }
+.synth-body { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 0.8fr) minmax(0, 1.5fr); gap: 14px; }
+.synth.min .synth-body, .synth.min .synth-steps { display: none; }
+.synth-col { min-width: 0; }
+.synth-h { margin: 0 0 4px; font: 600 10.5px "JetBrains Mono", monospace; letter-spacing: 0.08em; text-transform: uppercase; color: #6b717c; }
+.synth-agents { height: 168px; overflow-y: auto; display: grid; align-content: start; gap: 3px; }
+.synth-agents .empty { color: #6b717c; font-size: 12px; }
+.agent { display: grid; grid-template-columns: 10px 104px minmax(0, 1fr) auto; align-items: center; gap: 6px; font-size: 11.5px; padding: 3px 6px; border-radius: 7px; background: rgba(255,255,255,0.035); }
+.agent .dot { width: 8px; height: 8px; border-radius: 50%; background: #6b717c; }
+.agent.working .dot { background: #ffd479; animation: agentPulse 1s ease-in-out infinite; }
+.agent.done .dot { background: #7ee2a1; }
+.agent.failed .dot { background: #ff8a8a; }
+.agent .nm { font-weight: 600; color: #e6e8ec; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agent .msg { color: #aab0ba; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agent .sc { font: 11px "JetBrains Mono", monospace; color: #8b919c; }
+.agent.winner { outline: 1px solid rgba(126,226,161,0.5); }
+@keyframes agentPulse { 50% { opacity: 0.35; } }
+.synth-stats { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 0 0 6px; font-size: 11.5px; }
+.synth-stats dt { color: #8b919c; }
+.synth-stats dd { margin: 0; text-align: right; color: #e6e8ec; white-space: nowrap; }
+.synth-log .line.kept .s { color: #7ee2a1; }
 .synth-log .t { color: #6b717c; }
 .synth-log .s { color: #7dd3fc; }
 .synth-log .err { color: #ff8a8a; }

@@ -1243,7 +1243,7 @@ def run_image(
         raise ValueError("run_image requires non-empty image bytes")
     image_bytes = bytes(image_bytes)
     yield emit("start", "pipeline", "pipeline started")
-    yield emit("read", "reader", "transcribing schematic (3 attempts)")
+    yield emit("read", "reader", f"{N_CANDIDATES} readers transcribing the schematic in parallel")
 
     def _read_once() -> Netlist:
         try:
@@ -1266,6 +1266,11 @@ def run_image(
             f"{len(runs)} of {N_CANDIDATES} reads succeeded; "
             f"last error: {failures[-1] if failures else 'none'}"
         )
+    for i, run in enumerate(runs, 1):
+        yield emit("read", f"Reader {i}", f"read {len(run.components)} part(s): "
+                   + ", ".join(c.id for c in run.components[:12]))
+    for i, msg in enumerate(failures, len(runs) + 1):
+        yield emit("read", f"Reader {i}", f"failed: {msg[:120]}")
     consensus = consensus_netlists(runs)
     netlist = consensus.netlist
     yield emit(

@@ -1836,9 +1836,9 @@ async def design_stream(domain: str, goal: str | None = Form(None), image: Uploa
         meta: dict = {}
         design = design_ai.propose_team(domain, goal, image_bytes or None, on_event=emit, meta=meta,
                                         designers=int(os.environ.get("NETPROOF_AGENTS", "4") or 4))
-        emit({"stage": "verify", "message": "Running the " + ("optical power budget" if domain == "fiber" else "ray trace") + "\u2026"})
+        emit({"stage": "verify", "agent": "Physics", "state": "working", "message": "Running the " + ("optical power budget" if domain == "fiber" else "ray trace") + " on the winner\u2026"})
         report = fiber.check_link(design) if domain == "fiber" else optics.trace_bench(design)
-        emit({"stage": "verify", "message": f"Verdict {report['verdict']}: " + (", ".join(f["rule_id"] for f in report["findings"]) or "no rules fired")})
+        emit({"stage": "verify", "agent": "Physics", "state": "done", "message": f"Verdict {report['verdict']}: " + (", ".join(f["rule_id"] for f in report["findings"]) or "no rules fired")})
         return {"design": design, "report": report, "bboxes": meta.get("bboxes") or {}, "leaderboard": meta.get("leaderboard") or []}
 
     return EventSourceResponse(_run_streamed(work, first, "Waiting for the AI\u2026"))
@@ -1873,7 +1873,9 @@ async def tune(domain: str, body: TuneIn) -> EventSourceResponse:
         model = IRNetlist.model_validate(nl)
         return _report_response(_verify_netlist(model, record=False), model)
 
-    def work(emit):
+    def work(raw_emit):
+        def emit(ev):
+            raw_emit({"agent": "Tuner", **ev})
         if domain == "circuit":
             return tuner.tune_circuit(design, body.prefs, check_circuit, emit)
         if domain == "fiber":

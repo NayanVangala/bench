@@ -14,6 +14,71 @@
   var STEPS = [['read', 'Read'], ['ai', 'AI'], ['validate', 'Validate'], ['check', 'Check'], ['flyin', 'Fly-in'], ['tune', 'Tune']];
   var STAGE_TO_STEP = { input: 'read', model: 'ai', wait: 'ai', retry: 'ai', parse: 'validate', verify: 'check', autofix: 'tune', tune: 'tune' };
   var t0 = 0, timer = null, scores = [], imageUrl = null, active = null;
+  var lanes = {}, laneOrder = [], stats = null;
+  // Agent names worth a lane (circuit pipeline names are lower case).
+  var LANE_RE = /^(Analyst|Designer|Reader|Judge|Physics|Tuner|reader|designer|verifier|repair)/;
+
+  function resetStats() {
+    lanes = {}; laneOrder = [];
+    stats = { calls: 0, physics: 0, tried: 0, kept: 0, rejected: 0, candidates: 0, events: 0, start: null, best: null };
+    renderAgents(); renderStats();
+  }
+  function lane(name, ev) {
+    if (!LANE_RE.test(name)) return;
+    var l = lanes[name];
+    if (!l) { l = lanes[name] = { state: 'working', msg: '', score: null, t0: Date.now(), t: 0 }; laneOrder.push(name); }
+    l.state = ev.state || 'working';
+    if (ev.message) l.msg = ev.message;
+    if (typeof ev.score === 'number' && name !== 'Tuner') l.score = ev.score;
+    if (l.state !== 'working') l.t = (Date.now() - l.t0) / 1000;
+    renderAgents();
+  }
+  function renderAgents() {
+    var box = $('synth-agents');
+    if (!box) return;
+    if (!laneOrder.length) { box.innerHTML = '<p class="empty">Agents appear here as they start.</p>'; return; }
+    box.innerHTML = laneOrder.map(function (n) {
+      var l = lanes[n];
+      var t = l.state === 'working' ? (Date.now() - l.t0) / 1000 : l.t;
+      return '<div class="agent ' + l.state + (l.winner ? ' winner' : '') + '" title="' + esc(n + ': ' + l.msg) + '"><span class="dot"></span><span class="nm">' + esc(n) +
+        '</span><span class="msg">' + esc(l.msg) + '</span><span class="sc">' + (l.score != null ? l.score.toFixed(1) + ' · ' : '') + t.toFixed(1) + 's</span></div>';
+    }).join('');
+  }
+  function renderStats() {
+    var dl = $('synth-stats');
+    if (!dl || !stats) return;
+    var working = laneOrder.filter(function (n) { return lanes[n].state === 'working'; }).length;
+    var rows = [
+      ['Elapsed', fmt(t0 ? (Date.now() - t0) / 1000 : 0)],
+      ['Agents', laneOrder.length + (working ? ' · ' + working + ' busy' : '')],
+      ['AI calls', stats.calls],
+      ['Candidates checked', stats.candidates],
+      ['Physics runs', stats.physics],
+      ['Tuner tries', stats.tried],
+      ['Kept / rejected', stats.kept + ' / ' + stats.rejected],
+      ['Score', stats.start == null ? '\u2014' : stats.start.toFixed(1) + ' \u2192 ' + stats.best.toFixed(1)],
+      ['Events', stats.events]
+    ];
+    dl.innerHTML = rows.map(function (r) { return '<dt>' + r[0] + '</dt><dd>' + esc(r[1]) + '</dd>'; }).join('');
+  }
+  function count(ev) {
+    if (!stats) resetStats();
+    stats.events++;
+    stats.calls += ev.calls || 0;
+    stats.physics += ev.physics || 0;
+    if (ev.agent && /^Designer/.test(ev.agent) && ev.state === 'done') stats.candidates++;
+    if (ev.agent === 'Physics' && ev.state === 'done') stats.physics++;
+    if (ev.tune) { stats.tried++; stats.physics++; stats[ev.tune === 'kept' ? 'kept' : 'rejected']++; }
+    if (typeof ev.score === 'number') {
+      if (stats.start == null) stats.start = ev.score;
+      stats.best = stats.best == null ? ev.score : Math.max(stats.best, ev.score);
+    }
+    if (ev.agent === 'Judge') {
+      var m = /Designer (\w+)/.exec(ev.message || '');
+      if (m && lanes['Designer ' + m[1]]) lanes['Designer ' + m[1]].winner = true;
+    }
+    renderStats();
+  }
 
   function h3d() { return window.__netproof3d; }
   function fmt(s) { var m = Math.floor(s / 60), r = Math.floor(s % 60); return m + ':' + (r < 10 ? '0' : '') + r; }
@@ -68,6 +133,7 @@
       $('synth').classList.remove('min');
       $('synth-title').textContent = opts.title || 'Synthesizing';
       $('synth-log').innerHTML = '';
+      resetStats();
       scores = [];
       spark();
       $('synth-steps').innerHTML = STEPS.map(function (s) {
@@ -75,7 +141,7 @@
       }).join('');
       t0 = Date.now();
       clearInterval(timer);
-      timer = setInterval(function () { $('synth-timer').textContent = fmt((Date.now() - t0) / 1000); }, 250);
+      timer = setInterval(function () { $('synth-timer').textContent = fmt((Date.now() - t0) / 1000); renderStats(); renderAgents(); }, 250);
       if (opts.image) {
         if (imageUrl) URL.revokeObjectURL(imageUrl);
         imageUrl = URL.createObjectURL(opts.image);
@@ -89,17 +155,21 @@
       var step = STAGE_TO_STEP[ev.stage];
       if (step) setStep(step, 'running');
       if (typeof ev.score === 'number') { scores.push(ev.score); spark(); }
-      if (ev.message) log(ev.agent || ev.stage, ev.message, ev.tick ? 'tick' : (ev.stage === 'error' ? 'err' : (ev.agent === 'Judge' ? 'ok' : '')));
+      count(ev);
+      if (ev.agent) lane(ev.agent, ev);
+      if (ev.message) log(ev.agent || ev.stage, ev.message, ev.tick ? 'tick' : (ev.stage === 'error' || ev.state === 'failed' ? 'err' : (ev.agent === 'Judge' ? 'ok' : (ev.tune === 'kept' ? 'kept' : ''))));
     },
     step: setStep,
     log: function (stage, message) {
       // The circuit console also logs raw SSE bookkeeping ("event: progress"); skip it here.
-      if (active && !/^event: /.test(String(message))) log(stage, message);
+      if (active && !/^event: /.test(String(message))) { log(stage, message); count({}); lane(String(stage), { message: String(message) }); }
     },
     finish: function (ok, message) {
       clearInterval(timer);
       active = false;
       if (message) log(ok ? 'done' : 'error', message, ok ? 'ok' : 'err');
+      laneOrder.forEach(function (n) { var l = lanes[n]; if (l.state === 'working') { l.state = ok ? 'done' : 'failed'; l.t = (Date.now() - l.t0) / 1000; } });
+      renderAgents(); renderStats();
       document.querySelectorAll('#synth-steps li').forEach(function (li) {
         if (li.className === 'running') li.className = ok ? 'done' : 'failed';
       });

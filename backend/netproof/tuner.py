@@ -73,11 +73,13 @@ def tune_circuit(netlist: dict, prefs: dict, check: Callable[[dict], dict], emit
             rep = check(cand)
             tried += 1
             s = _circuit_score(rep, target_a)
+            label = f"{c['id']} = {format_si(value, chr(0x3a9))}"
             if s > best_score + 1e-9:
                 best, best_report, best_score = cand, rep, s
-                emit({"stage": "tune", "message": f"{c['id']} = {format_si(value, chr(0x3a9))}: score {s:.1f}", "score": s, "step": tried})
-            elif tried % 12 == 0:
-                emit({"stage": "tune", "message": f"Tried {tried} values…", "score": best_score, "step": tried, "tick": True})
+                emit({"stage": "tune", "tune": "kept", "message": f"{label}: score {s:.1f}, kept", "score": s, "step": tried})
+            else:
+                emit({"stage": "tune", "tune": "rejected", "tick": True, "step": tried,
+                      "message": f"Try {label}: score {s:.1f} (best {best_score:.1f}), rejected"})
     # Rating: smallest standard rating that keeps each resistor under 50 % load.
     power = {k.lower(): v for k, v in (best_report.get("power") or {}).items()}
     for comp in best["components"]:
@@ -152,7 +154,8 @@ def tune_fiber(link: dict, prefs: dict, emit: Emit) -> dict:
             cand["elements"].insert(len(cand["elements"]) - 1, {"id": aid, "type": "attenuator", "loss_db": db})
         rep = fiber_mod.check_link(cand)
         s = _fiber_score(rep, target, 1 if db else 0, objective)
-        emit({"stage": "tune", "message": f"{db:g} dB attenuation → {rep['received_dbm']:.1f} dBm, score {s:.1f}", "score": max(s, best_score), "tick": s <= best_score})
+        emit({"stage": "tune", "tune": "rejected" if s <= best_score else "kept", "tick": s <= best_score, "score": max(s, best_score),
+              "message": f"{db:g} dB attenuation → {rep['received_dbm']:.1f} dBm, score {s:.1f}" + (", rejected" if s <= best_score else ", kept")})
         if s > best_score + 1e-9:
             best, best_report, best_score = cand, rep, s
     before_att = sum(e.get("loss_db") or 10 for e in link["elements"] if e["type"] == "attenuator")
@@ -264,10 +267,13 @@ def tune_optics(bench: dict, prefs: dict, emit: Emit) -> dict:
                     rep = optics_mod.trace_bench(cand)
                     s = _optics_score(rep, cand, objective)
                     steps += 1
+                    label = f"{eid} angle {cand['elements'][idx]['angle_deg']:g}°"
                     if s > best_score + 1e-9:
                         best, best_report, best_score, improved = cand, rep, s, True
-                        emit({"stage": "tune", "message": f"{eid} angle {cand['elements'][idx]['angle_deg']:g}°: score {s:.1f}", "score": s, "step": steps})
+                        emit({"stage": "tune", "tune": "kept", "message": f"{label}: score {s:.1f}, kept", "score": s, "step": steps})
                         break
+                    emit({"stage": "tune", "tune": "rejected", "tick": True, "step": steps,
+                          "message": f"Try {label}: score {s:.1f} (best {best_score:.1f}), rejected"})
         e = next(x for x in best["elements"] if x["id"] == eid)
         if e["type"] == "beamsplitter" and objective == "balanced_arms":
             idx = best["elements"].index(e)
@@ -279,7 +285,10 @@ def tune_optics(bench: dict, prefs: dict, emit: Emit) -> dict:
                 steps += 1
                 if s > best_score + 1e-9:
                     best, best_report, best_score = cand, rep, s
-                    emit({"stage": "tune", "message": f"{eid} split {split:g}: score {s:.1f}", "score": s, "step": steps})
+                    emit({"stage": "tune", "tune": "kept", "message": f"{eid} split {split:g}: score {s:.1f}, kept", "score": s, "step": steps})
+                else:
+                    emit({"stage": "tune", "tune": "rejected", "tick": True, "step": steps,
+                          "message": f"Try {eid} split {split:g}: score {s:.1f} (best {best_score:.1f}), rejected"})
     before = {e["id"]: e for e in bench["elements"]}
     for e in best["elements"]:
         b = before.get(e["id"])

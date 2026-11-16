@@ -203,8 +203,12 @@
         <button type="button" class="icon-btn" id="synth-close" aria-label="Close the log">&times;</button>
       </div>
       <ol class="synth-steps" id="synth-steps"></ol>
-      <svg class="synth-spark" id="synth-spark" viewBox="0 0 300 36" preserveAspectRatio="none" aria-hidden="true"></svg>
-      <div class="synth-log mono" id="synth-log"></div>
+      <div class="synth-body">
+        <section class="synth-col"><p class="synth-h">Agents</p><div class="synth-agents" id="synth-agents"></div></section>
+        <section class="synth-col"><p class="synth-h">Stats</p><dl class="synth-stats mono" id="synth-stats"></dl>
+          <svg class="synth-spark" id="synth-spark" viewBox="0 0 300 36" preserveAspectRatio="none" aria-hidden="true"></svg></section>
+        <section class="synth-col"><p class="synth-h">Full log</p><div class="synth-log mono" id="synth-log"></div></section>
+      </div>
     </div>
     <div id="empty-state">
       <p class="eyebrow">Bench empty</p>

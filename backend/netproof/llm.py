@@ -23,6 +23,28 @@ set. Only a real call with ``client=None`` needs the SDK and the key
 for the selected provider. ``google-genai`` is an optional
 dependency (``uv sync --extra gemini``).
 
+Missing API key / client build failure
+--------------------------------------
+When the real client cannot be built, :func:`_get_client` raises a
+``ValueError`` that says so in plain language instead of leaking
+whatever cryptic error the SDK raised. If no key is configured for
+the selected provider the error is "No API key configured ..." and
+names the env var to set (``ANTHROPIC_API_KEY`` for Anthropic;
+``GEMINI_API_KEY`` or ``GOOGLE_API_KEY`` for Gemini) — this is the
+error that replaces the Anthropic SDK's
+``httpx2.InvalidURL: Invalid port: ':1]'``, which is what its client
+construction fails with from its proxy mounts when no key is set.
+If a key IS set and construction still fails, the error is "Could
+not build the LLM client ..." and keeps the original error (type and
+message) as the cause. An injected fake client never needs a key.
+
+Defaults
+--------
+Anthropic model ``claude-haiku-5-5`` (``MODEL``), ``MAX_TOKENS``
+16000, no temperature / top_p / top_k / budget_tokens. Gemini model
+``gemini-4-argon`` (``GEMINI_MODEL``). ``VISION_MODEL`` is an
+optional Anthropic-only override for image reads (default Haiku).
+
 Injectable client (for tests)
 -----------------------------
 Every public function takes ``client=None`` plus ``provider=None``.
@@ -454,6 +476,26 @@ def _get_gemini_client() -> Any:
     return _GeminiClientAdapter(genai.Client(), types_module=types)
 
 
+# Env vars holding the API key for each provider. Anthropic needs
+# ANTHROPIC_API_KEY; Gemini takes GEMINI_API_KEY, falling back to
+# GOOGLE_API_KEY (the SDK prefers GOOGLE_API_KEY when both are set).
+_KEY_ENV_VARS: dict[str, tuple[str, ...]] = {
+    "anthropic": ("ANTHROPIC_API_KEY",),
+    "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+}
+
+
+def _has_api_key(provider: str) -> bool:
+    """True when a non-blank key env var is set for `provider`.
+
+    Only whether a non-blank value is present is checked; the key
+    value itself is never printed or logged.
+    """
+    return any(
+        (os.environ.get(name) or "").strip() for name in _KEY_ENV_VARS[provider]
+    )
+
+
 def _get_client(client: Any = None, provider: str | None = None) -> Any:
     """Return the given client, or build a real client for the provider.
 
@@ -470,17 +512,46 @@ def _get_client(client: Any = None, provider: str | None = None) -> Any:
     around ``genai.Client()`` (reads ``GEMINI_API_KEY`` /
     ``GOOGLE_API_KEY`` itself). Both SDK imports are lazy, so
     importing this module needs neither SDK nor any key.
+
+    A failure while building the client never leaks the SDK's own
+    error: when no key is configured for the provider the error is
+    ``ValueError("No API key configured ...")`` naming the env var to
+    set; when a key is set and construction still fails (proxy or
+    network setup can break the SDK's HTTP client build, e.g. the
+    Anthropic SDK failing with ``InvalidURL: Invalid port: ':1]'``)
+    the error is ``ValueError("Could not build the LLM client ...")``
+    with the original error kept as the cause. A missing google-genai
+    SDK still raises its own clear ImportError unchanged.
     """
     if client is not None:
         if hasattr(client, "models") and not hasattr(client, "messages"):
             return _GeminiClientAdapter(client)
         return client
     resolved = get_provider(provider)
-    if resolved == "anthropic":
-        import anthropic
+    try:
+        if resolved == "anthropic":
+            import anthropic
 
-        return anthropic.Anthropic()
-    return _get_gemini_client()
+            return anthropic.Anthropic()
+        return _get_gemini_client()
+    except ImportError:
+        # _get_gemini_client already raises a clear ImportError when
+        # the google-genai SDK is missing; keep that error (and its
+        # install hint) as-is.
+        raise
+    except Exception as exc:
+        if not _has_api_key(resolved):
+            raise ValueError(
+                f"No API key configured for LLM provider {resolved!r}: "
+                f"set {' or '.join(_KEY_ENV_VARS[resolved])} in the "
+                "environment"
+            ) from exc
+        raise ValueError(
+            f"Could not build the LLM client for provider {resolved!r}: "
+            f"{type(exc).__name__}: {exc}. Check that the API key is set "
+            "correctly and that proxy/network settings let the LLM SDK "
+            "build its HTTP client."
+        ) from exc
 
 
 def _response_text(response: Any) -> str:

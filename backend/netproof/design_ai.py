@@ -208,7 +208,7 @@ def propose_team(domain: Domain, goal: str | None = None, image_bytes: bytes | N
             emit({"stage": "agent", "agent": f"Analyst {name}", "state": "working", "message": task.split(":")[0].split(".")[0]})
             text = llm._call_model(client, [{"role": "user", "content": [
                 _image_block(image_bytes),
-                {"type": "text", "text": f"You are the {name} analyst for a {'fiber-optic link' if domain == 'fiber' else 'free-space optics bench'}. {task} Plain text, under 150 words." + (f" Goal: {goal}" if goal else "")}]}])
+                {"type": "text", "text": f"You are the {name} analyst for a {'fiber-optic link' if domain == 'fiber' else 'free-space optics bench'}. {task} Plain text, under 150 words." + (f" Goal: {goal}" if goal else "")}]}], model=llm._resolve_vision_model())
             emit({"stage": "parse", "agent": f"Analyst {name}", "state": "done", "calls": 1, "message": " ".join(text.split())[:180]})
             return f"{name} analyst notes:\n{text.strip()}"
 

@@ -54,6 +54,20 @@ Gemini's documented image formats are PNG, JPEG, WEBP, HEIC and HEIF;
 400. The reply comes back through ``response.text`` and is wrapped as
 ``.content[0].text``.
 
+Vision model (Anthropic only)
+------------------------------
+``VISION_MODEL`` env names the model used ONLY for image reads
+(``read_schematic``; the analysts in ``design_ai.propose_team`` pass
+it as the ``model=`` argument to :func:`_call_model`). Unset or blank
+means ``MODEL`` (Haiku). It is threaded per call — the global
+``MODEL`` is never swapped — so text-only calls (``design``,
+``repair``, and the designers in ``propose_team``, which re-attach
+the image) stay on Haiku, and a retry always uses the same model as
+the first attempt. On ``LLM_PROVIDER=gemini`` the Gemini adapter
+ignores the ``model=`` argument and always uses ``GEMINI_MODEL``, so
+``VISION_MODEL`` has no effect there; no second Gemini adapter is
+built.
+
 Failure policy
 --------------
 Invalid JSON or a reply that fails Pydantic validation gets exactly
@@ -78,6 +92,7 @@ from .ir import ComponentType, Finding, Netlist
 __all__ = [
     "MODEL",
     "GEMINI_MODEL",
+    "VISION_MODEL",
     "MAX_TOKENS",
     "UnmodeledPart",
     "SchematicNetlist",
@@ -90,6 +105,12 @@ __all__ = [
 MODEL = "claude-haiku-5-5"
 # Default Gemini model; override per call with the GEMINI_MODEL env var.
 GEMINI_MODEL = "gemini-4-argon"
+# Default vision model for image reads; override with the VISION_MODEL
+# env var (e.g. "claude-sonnet-5-5"). Unset means Haiku, same as MODEL.
+# Anthropic-only: the Gemini adapter ignores the model= argument (see
+# _GeminiClientAdapter), so on LLM_PROVIDER=gemini image reads keep
+# using GEMINI_MODEL as today.
+VISION_MODEL = "claude-haiku-5-5"
 # Haiku 5.5 thinks by default and thinking counts toward max_tokens: leave
 # room so a large design is never cut off mid-JSON.
 MAX_TOKENS = 16000
@@ -225,6 +246,16 @@ def get_provider(provider: str | None = None) -> str:
 def _resolve_gemini_model() -> str:
     """Gemini model name: ``GEMINI_MODEL`` env, else ``GEMINI_MODEL``."""
     return (os.environ.get("GEMINI_MODEL") or GEMINI_MODEL).strip() or GEMINI_MODEL
+
+
+def _resolve_vision_model() -> str:
+    """Vision model name for image reads: ``VISION_MODEL`` env, else
+    ``VISION_MODEL`` (Haiku). Blank env falls back to the default, so
+    an unset or empty ``VISION_MODEL`` means Haiku. Anthropic-only:
+    the Gemini adapter ignores the ``model=`` argument, so this has
+    no effect on ``LLM_PROVIDER=gemini``.
+    """
+    return (os.environ.get("VISION_MODEL") or VISION_MODEL).strip() or VISION_MODEL
 
 
 class _AdapterTextBlock:
@@ -471,10 +502,26 @@ def _response_text(response: Any) -> str:
     raise ValueError(f"cannot extract text from LLM response: {response!r}")
 
 
-def _call_model(client: Any, messages: list[dict[str, Any]]) -> str:
-    """One messages.create call; returns the reply text."""
+def _call_model(
+    client: Any,
+    messages: list[dict[str, Any]],
+    model: str | None = None,
+) -> str:
+    """One messages.create call; returns the reply text.
+
+    ``model`` selects the model for this call only — the module global
+    ``MODEL`` is never mutated. Default is ``MODEL`` (Haiku). Image-read
+    call sites pass ``_resolve_vision_model()``; every text-only call
+    site (``design``, ``repair``) passes nothing, so ``VISION_MODEL``
+    can never leak into a non-image call. A caller that retries must
+    pass the same ``model`` on the retry as on the first attempt. On
+    Gemini the adapter ignores ``model`` (it always uses its own
+    ``GEMINI_MODEL``), so ``VISION_MODEL`` only takes effect on the
+    Anthropic path.
+    """
+    resolved = (model or "").strip() or MODEL
     response = client.messages.create(
-        model=MODEL,
+        model=resolved,
         max_tokens=MAX_TOKENS,
         messages=messages,
     )
@@ -577,16 +624,20 @@ def _parse_schematic_reply(obj: Any) -> SchematicNetlist:
 
 
 def _request_schematic(
-    client: Any, messages: list[dict[str, Any]]
+    client: Any,
+    messages: list[dict[str, Any]],
+    model: str | None = None,
 ) -> SchematicNetlist:
     """Call the model, validate the reply as a schematic read (netlist
     + unmodeled parts), one retry max. On the second failure a
     ``ValueError`` is raised — never a fallback netlist, and never a
-    silently dropped part list.
+    silently dropped part list. ``model`` is threaded unchanged into
+    both the first attempt and the retry, so a vision read never
+    drops back to Haiku mid-retry.
     """
     first_error: str | None = None
     try:
-        return _parse_schematic_reply(_extract_json(_call_model(client, messages)))
+        return _parse_schematic_reply(_extract_json(_call_model(client, messages, model=model)))
     except ValueError as exc:
         first_error = str(exc)
     retry_messages = messages + [
@@ -594,7 +645,7 @@ def _request_schematic(
     ]
     try:
         return _parse_schematic_reply(
-            _extract_json(_call_model(client, retry_messages))
+            _extract_json(_call_model(client, retry_messages, model=model))
         )
     except ValueError as exc:
         raise ValueError(
@@ -657,6 +708,12 @@ def read_schematic(
     instead of silently dropped. ``unmodeled`` is empty when every
     part was modeled. Invalid JSON (or an invalid unmodeled entry)
     gets one retry, then a loud ValueError — never a silent fallback.
+
+    This is an image read, so it runs on the vision model
+    (``VISION_MODEL`` env, else Haiku — see :func:`_resolve_vision_model`);
+    the retry uses the same model as the first attempt. On
+    ``LLM_PROVIDER=gemini`` the Gemini adapter ignores the model and
+    always uses ``GEMINI_MODEL``.
     """
     if not isinstance(image_bytes, (bytes, bytearray)) or not image_bytes:
         raise ValueError("read_schematic requires non-empty image bytes")
@@ -692,7 +749,9 @@ def read_schematic(
             ],
         }
     ]
-    return _request_schematic(client, messages)
+    # Vision model, resolved once so the retry uses the same model as
+    # the first attempt even if the environment changes mid-call.
+    return _request_schematic(client, messages, model=_resolve_vision_model())
 
 
 # ---------------------------------------------------------------------------

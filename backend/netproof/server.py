@@ -346,6 +346,12 @@ else:  # pragma: no cover - ir.py is present in the repo
 
 class GoalIn(BaseModel):
     goal: str = Field(..., min_length=1)
+    # Optional goal-mode prefs, threaded to pipeline.run_goal /
+    # design_team: objective in balanced / bright / battery / cheap,
+    # and/or an explicit LED target current in mA (wins over the
+    # objective's target). Both default off: behaviour is balanced.
+    objective: str | None = None
+    target_ma: float | None = Field(default=None, gt=0)
 
 
 class RepairIn(BaseModel):
@@ -851,6 +857,7 @@ async def _run_stream(
     filename: Optional[str] = None,
     goal: Optional[str] = None,
     owner: str | None = None,
+    prefs: Optional[dict] = None,
 ) -> AsyncIterator[dict]:
     """Yield SSE-ready event dicts for /run-image or /run-goal.
 
@@ -907,7 +914,7 @@ async def _run_stream(
                 # propose in parallel and the dock shows one lane per
                 # designer plus Judge / Physics.
                 gen = pipeline.run_goal(
-                    goal, simulator=_SIMULATOR_OVERRIDE, team=True
+                    goal, simulator=_SIMULATOR_OVERRIDE, team=True, prefs=prefs
                 )
             while True:
                 try:
@@ -939,6 +946,9 @@ async def _run_stream(
             report_data["unmodeled"] = list(getattr(result, "unmodeled", []) or [])
             report_data["leaderboard"] = list(
                 getattr(result, "leaderboard", []) or []
+            )
+            report_data["objective"] = getattr(
+                result, "objective", "balanced"
             )
             report_data["done"] = True
             yield _sse_event({"event": "result", "data": report_data})
@@ -1600,13 +1610,31 @@ async def run_image(
 async def run_goal(
     request: Request, body: GoalIn, mock: bool = Query(False)
 ) -> EventSourceResponse:
-    """JSON {"goal": str} -> SSE stream of pipeline events, then Report."""
+    """JSON {"goal": str, "objective"?: str, "target_ma"?: float} ->
+    SSE stream of pipeline events, then Report. ``objective`` is one
+    of balanced / bright / battery / cheap; ``target_ma`` is an
+    explicit LED target in mA and wins over the objective's target.
+    Both are optional: omitted means balanced / 12 mA, exactly the
+    previous behaviour. An unknown objective is a 400 error event."""
     if not mock:
         _require_module("pipeline")
 
+    prefs = {
+        key: value
+        for key, value in (
+            ("objective", body.objective),
+            ("target_ma", body.target_ma),
+        )
+        if value is not None
+    }
+
     async def _events() -> AsyncIterator[dict]:
         async for event in _run_stream(
-            "goal", mock=mock, goal=body.goal, owner=_owner_key(request)
+            "goal",
+            mock=mock,
+            goal=body.goal,
+            owner=_owner_key(request),
+            prefs=prefs or None,
         ):
             yield event
 

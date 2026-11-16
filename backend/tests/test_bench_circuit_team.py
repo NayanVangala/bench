@@ -464,3 +464,122 @@ def test_run_goal_default_is_unchanged_best_of_three():
     assert result.report.verdict == "PASS"
     assert result.netlist.components[1].value == GOOD_R
     assert result.leaderboard == []
+
+
+# ---------------------------------------------------------------------------
+# Goal-mode prefs (swarm/goal-prefs): optional objective / target_ma,
+# threaded run_goal -> design_team, honoured by the tuner score and
+# the designer prompts. Default (no prefs) is exactly the old
+# behaviour: balanced / 12 mA, no prompt note.
+# ---------------------------------------------------------------------------
+
+def test_design_team_prefs_battery_retargets_tuner_score():
+    """``prefs={"objective": "battery"}`` (5 mA target): the dim
+    5 mA PASS candidate now scores 95.0 (on target) while the
+    12 mA WARN candidate drops to ~33.95. The winner is still
+    Faithful: prefs retarget the score, they never pick the winner
+    (verdict rank still rules)."""
+    result = design_team(
+        "9V red LED circuit",
+        llm=_mismatch_team(),
+        simulator=AnalyticSim(),
+        prefs={"objective": "battery"},
+    )
+    assert result.netlist.components[1].value == DIM_R
+    assert result.report.verdict == "PASS"
+    by_name = {row["name"]: row for row in result.leaderboard}
+    assert by_name["Faithful"]["score"] == pytest.approx(95.0, abs=0.01)
+    assert by_name["Simple"]["score"] == pytest.approx(33.95, abs=0.05)
+    assert by_name["Safe"]["score"] == pytest.approx(15.85, abs=0.05)
+    assert by_name["Simple"]["score"] < by_name["Faithful"]["score"]
+    assert [row["name"] for row in result.leaderboard] == [
+        "Faithful",
+        "Safe",
+        "Simple",
+        "Efficient",
+    ]
+
+
+def test_design_team_prefs_target_ma_overrides_objective():
+    """An explicit ``target_ma`` wins over the objective's target:
+    battery + 12 mA scores exactly like the balanced default."""
+    result = design_team(
+        "9V red LED circuit",
+        llm=_mismatch_team(),
+        simulator=AnalyticSim(),
+        prefs={"objective": "battery", "target_ma": 12.0},
+    )
+    by_name = {row["name"]: row for row in result.leaderboard}
+    assert by_name["Faithful"]["score"] == pytest.approx(71.67, abs=0.01)
+    assert by_name["Simple"]["score"] == pytest.approx(89.98, abs=0.01)
+
+
+def test_design_team_prefs_unknown_objective_raises():
+    """An unknown objective is a caller error, not a silent
+    fallback to balanced."""
+    with pytest.raises(ValueError, match="unknown objective"):
+        design_team(
+            "9V red LED circuit",
+            llm=_mismatch_team(),
+            simulator=AnalyticSim(),
+            prefs={"objective": "dim"},
+        )
+    with pytest.raises(ValueError, match="target_ma must be positive"):
+        design_team(
+            "9V red LED circuit",
+            llm=_mismatch_team(),
+            simulator=AnalyticSim(),
+            prefs={"target_ma": 0},
+        )
+
+
+def test_design_team_prefs_reaches_designer_prompt():
+    """With prefs, every designer prompt carries the preference
+    note (objective + resolved mA target); without prefs the prompt
+    is exactly goal + strategy, no note."""
+    llm = _mismatch_team()
+    design_team(
+        "9V red LED circuit",
+        llm=llm,
+        simulator=AnalyticSim(),
+        prefs={"objective": "battery"},
+    )
+    assert len(llm.design_calls) == 4
+    for call in llm.design_calls:
+        assert "Preference: battery objective" in call
+        assert "near 5 mA" in call
+
+    plain = _mismatch_team()
+    design_team("9V red LED circuit", llm=plain, simulator=AnalyticSim())
+    assert len(plain.design_calls) == 4
+    assert all("Preference:" not in call for call in plain.design_calls)
+
+
+def test_run_goal_prefs_threaded_to_team_and_terminal():
+    """``run_goal(team=True, prefs=...)`` threads prefs to the team
+    (battery scores on the terminal frame) and reports the resolved
+    objective on the terminal event and the PipelineResult; the
+    default run still reports ``balanced`` with the old scores."""
+    events, result = _drive_goal(
+        "9V red LED circuit",
+        llm=_mismatch_team(),
+        simulator=AnalyticSim(),
+        team=True,
+        prefs={"objective": "battery"},
+    )
+    terminal = events[-1]
+    assert terminal.get("event") == "result"
+    assert terminal["data"]["objective"] == "battery"
+    assert result.objective == "battery"
+    by_name = {row["name"]: row for row in terminal["data"]["leaderboard"]}
+    assert by_name["Faithful"]["score"] == pytest.approx(95.0, abs=0.01)
+
+    _, default = _drive_goal(
+        "9V red LED circuit",
+        llm=_mismatch_team(),
+        simulator=AnalyticSim(),
+        team=True,
+    )
+    assert default.objective == "balanced"
+    by_name = {row["name"]: row for row in default.leaderboard}
+    assert by_name["Faithful"]["score"] == pytest.approx(71.67, abs=0.01)

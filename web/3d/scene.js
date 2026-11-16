@@ -464,6 +464,29 @@ export function createScene(container, options = {}) {
   controls.maxPolarAngle = Math.PI / 2 - 0.02; // stay above the slab
   controls.screenSpacePanning = false; // pan moves in the ground plane
   controls.target.set(0, 0.5, 0);
+  // Pan mode: hold Space, or toggle the Pan button, and a left-drag moves the
+  // view instead of orbiting (trackpads have no easy right-drag).
+  // Shift/Ctrl/Cmd + left-drag also pans (built into OrbitControls).
+  let panLocked = false;
+  const setLeft = (pan) => {
+    controls.mouseButtons.LEFT = pan ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE;
+    renderer.domElement.style.cursor = pan ? 'grab' : '';
+  };
+  const typing = (e) => /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable;
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'Space' && !typing(e)) { e.preventDefault(); setLeft(true); }
+  });
+  window.addEventListener('keyup', (e) => {
+    if (e.code === 'Space') setLeft(panLocked);
+  });
+  const panBtn = document.getElementById('pan-mode');
+  if (panBtn) {
+    panBtn.addEventListener('click', () => {
+      panLocked = !panLocked;
+      panBtn.setAttribute('aria-pressed', String(panLocked));
+      setLeft(panLocked);
+    });
+  }
 
   const components = new Map();
   const raycaster = new THREE.Raycaster();

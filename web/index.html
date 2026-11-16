@@ -179,11 +179,12 @@
       <div id="scene3d" tabindex="0" role="img" aria-label="3D circuit view. Focus and use arrow keys to move between components, Enter to edit the selected component, Escape to deselect."><div class="fallback">Loading 3D bench&hellip;</div></div>
       <p id="selected-announcer" class="visually-hidden" role="status" aria-live="polite"></p>
       <div class="scene-tools" role="toolbar" aria-label="3D view tools">
+        <button id="pan-mode" type="button" class="pill-btn" aria-pressed="false" title="Drag to move around (or hold Space)">Pan</button>
         <button id="reset-view" type="button" class="pill-btn" disabled>Reset view</button>
         <button id="inspect-explode" type="button" class="pill-btn" aria-pressed="false" disabled>Inspect</button>
         <span class="help-wrap">
           <button type="button" class="pill-btn help-btn" aria-describedby="controls-hint" aria-label="3D controls">?</button>
-          <span class="controls-hint" id="controls-hint" role="tooltip">Drag to orbit &middot; right-drag to pan &middot; scroll to zoom &middot; click a part to select &middot; arrows cycle parts, Enter edits, Esc deselects</span>
+          <span class="controls-hint" id="controls-hint" role="tooltip">Drag to orbit &middot; Space + drag, Shift + drag, right-drag or the Pan button to move around &middot; scroll to zoom &middot; click a part to select &middot; arrows cycle parts, Enter edits, Esc deselects</span>
         </span>
       </div>
       <p id="scene3d-status" class="hud mono">3D status: loading&hellip;</p>

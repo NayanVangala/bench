@@ -71,6 +71,20 @@ _RETRY = ("Your previous reply was not valid: {error}. Return ONLY strict JSON m
           "the schema above, with no prose, markdown or code fences.")
 
 
+_BBOX_NOTE = ('\n\nFor EVERY element also include "bbox": [x0, y0, x1, y1], where that part appears '
+              'in the image, as fractions of the image width/height (0-1, left, top, right, bottom).')
+
+
+def _bboxes(obj: Any) -> dict:
+    """id -> [x0, y0, x1, y1] (0-1) from the raw reply, before validation drops it."""
+    out = {}
+    for e in (obj.get("elements") or []) if isinstance(obj, dict) else []:
+        b = e.get("bbox") if isinstance(e, dict) else None
+        if isinstance(b, list) and len(b) == 4 and all(isinstance(v, (int, float)) for v in b):
+            out[str(e.get("id"))] = [max(0.0, min(1.0, float(v))) for v in b]
+    return out
+
+
 def _validate(domain: Domain, obj: Any) -> dict:
     model = FiberLink if domain == "fiber" else OpticsBench
     if not isinstance(obj, dict):
@@ -81,9 +95,23 @@ def _validate(domain: Domain, obj: Any) -> dict:
         raise ValueError(f"design failed validation: {exc}") from exc
 
 
+def _model_label(provider: str | None) -> str:
+    try:
+        p = llm.get_provider(provider)
+    except Exception:
+        return "the AI model"
+    return llm._resolve_gemini_model() if p == "gemini" else llm.MODEL
+
+
 def propose(domain: Domain, goal: str | None = None, image_bytes: bytes | None = None,
-            client: Any = None, provider: str | None = None) -> dict:
-    """Ask the model for a fiber link / optics bench; return the validated design dict."""
+            client: Any = None, provider: str | None = None,
+            on_event: Any = None, meta: dict | None = None) -> dict:
+    """Ask the model for a fiber link / optics bench; return the validated design dict.
+
+    ``on_event(dict)`` receives progress events; ``meta["bboxes"]`` gets the
+    per-element image locations (image mode) for the fly-in animation.
+    """
+    emit = on_event or (lambda e: None)
     goal = (goal or "").strip()
     if not goal and not image_bytes:
         raise ValueError("describe the design or upload an image")
@@ -93,6 +121,8 @@ def propose(domain: Domain, goal: str | None = None, image_bytes: bytes | None =
            f"Transcribe the {what} shown in this image into a buildable design"
            + (f", following this note: {goal}" if goal else "") + ".\n\n")
     text = ask + "Use real, standard parts and keep it as simple as will meet the goal.\n\n" + schema
+    if image_bytes:
+        text += _BBOX_NOTE
     content: Any = text
     if image_bytes:
         content = [
@@ -102,12 +132,23 @@ def propose(domain: Domain, goal: str | None = None, image_bytes: bytes | None =
         ]
     client = llm._get_client(client, provider)
     messages: list[dict[str, Any]] = [{"role": "user", "content": content}]
+    emit({"stage": "model", "message": f"Asking {_model_label(provider)} to " + ("read the image" if image_bytes else "design it") + "\u2026"})
+
+    def attempt(msgs: list) -> dict:
+        raw = llm._extract_json(llm._call_model(client, msgs))
+        design = _validate(domain, raw)
+        if meta is not None:
+            meta["bboxes"] = _bboxes(raw)
+        emit({"stage": "parse", "message": f"Got {len(design['elements'])} elements; the design matches the schema"})
+        return design
+
     try:
-        return _validate(domain, llm._extract_json(llm._call_model(client, messages)))
+        return attempt(messages)
     except ValueError as exc:
         first = str(exc)
+    emit({"stage": "retry", "message": "The first reply was not a valid design; asking once more with the error"})
     retry = messages + [{"role": "user", "content": _RETRY.format(error=first[:800])}]
     try:
-        return _validate(domain, llm._extract_json(llm._call_model(client, retry)))
+        return attempt(retry)
     except ValueError as exc:
         raise ValueError(f"The AI did not return a valid {what} after one retry: {exc}") from exc

@@ -188,6 +188,17 @@
       </div>
       <p id="scene3d-status" class="hud mono">3D status: loading&hellip;</p>
     </section>
+    <div id="synth" class="synth" hidden aria-live="polite">
+      <div class="synth-head">
+        <span class="eyebrow" id="synth-title">Synthesizing</span>
+        <span class="mono synth-timer" id="synth-timer">0:00</span>
+        <button type="button" class="icon-btn" id="synth-min" aria-label="Collapse the log">&#8211;</button>
+        <button type="button" class="icon-btn" id="synth-close" aria-label="Close the log">&times;</button>
+      </div>
+      <ol class="synth-steps" id="synth-steps"></ol>
+      <svg class="synth-spark" id="synth-spark" viewBox="0 0 300 36" preserveAspectRatio="none" aria-hidden="true"></svg>
+      <div class="synth-log mono" id="synth-log"></div>
+    </div>
     <div id="empty-state">
       <p class="eyebrow">Bench empty</p>
       <p class="empty-title">Start on the left</p>
@@ -343,6 +354,14 @@
             <div class="reading"><dt>Margin</dt><dd id="fiber-margin">&mdash;</dd></div>
           </dl>
         </section>
+        <section class="card tuner" data-tuner="fiber">
+          <div class="card-head"><span class="eyebrow">Tuner</span><span class="mono tune-score" data-tune-score>&mdash;</span></div>
+          <label class="tune-row">Optimize for <select data-tune-objective><option value="balanced">Middle of the safe window</option><option value="max_margin">Maximum margin</option><option value="cheap">Fewest parts</option></select></label>
+          <label class="tune-row">Target <input type="number" step="any" data-tune-target placeholder="auto"> <span class="mono">dBm</span></label>
+          <label class="tune-check"><input type="checkbox" data-tune-auto checked> Tune automatically after a design</label>
+          <button type="button" class="dark-btn" data-tune-go>Tune it &rarr;</button>
+          <ul class="tune-changes" data-tune-changes></ul>
+        </section>
         <section class="card">
           <div class="card-head"><span class="eyebrow"><span class="step">04</span> Findings</span></div>
           <ul id="fiber-findings" class="findings-list"><li class="empty">No findings yet. Run a check first.</li></ul>
@@ -414,6 +433,14 @@
             <div class="reading"><dt>Stray beams</dt><dd id="optics-stray">&mdash;</dd></div>
             <div class="reading"><dt>Beam segments</dt><dd id="optics-segs">&mdash;</dd></div>
           </dl>
+        </section>
+        <section class="card tuner" data-tuner="optics">
+          <div class="card-head"><span class="eyebrow">Tuner</span><span class="mono tune-score" data-tune-score>&mdash;</span></div>
+          <label class="tune-row">Optimize for <select data-tune-objective><option value="max_power">Maximum power at detectors</option><option value="balanced_arms">Balanced arms</option><option value="fewest_parts">Fewest parts</option></select></label>
+          
+          <label class="tune-check"><input type="checkbox" data-tune-auto checked> Tune automatically after a design</label>
+          <button type="button" class="dark-btn" data-tune-go>Tune it &rarr;</button>
+          <ul class="tune-changes" data-tune-changes></ul>
         </section>
         <section class="card">
           <div class="card-head"><span class="eyebrow"><span class="step">04</span> Findings</span></div>
@@ -495,6 +522,14 @@
           </dl>
         </section>
 
+        <section class="card tuner" data-tuner="circuit">
+          <div class="card-head"><span class="eyebrow">Tuner</span><span class="mono tune-score" data-tune-score>&mdash;</span></div>
+          <label class="tune-row">Optimize for <select data-tune-objective><option value="balanced">Balanced (about 12 mA)</option><option value="bright">Brightness (about 18 mA)</option><option value="battery">Battery life (about 5 mA)</option><option value="cheap">Lowest cost</option></select></label>
+          <label class="tune-row">Target <input type="number" step="any" data-tune-target placeholder="auto"> <span class="mono">mA</span></label>
+          <label class="tune-check"><input type="checkbox" data-tune-auto checked> Tune automatically after a design</label>
+          <button type="button" class="dark-btn" data-tune-go>Tune it &rarr;</button>
+          <ul class="tune-changes" data-tune-changes></ul>
+        </section>
         <section class="card" id="callout-sheet" aria-label="Findings">
           <div class="card-head"><span class="eyebrow"><span class="step">04</span> Findings</span>
             <button type="button" id="sheet-peek" class="visually-hidden" aria-expanded="true" aria-controls="sheet-body" tabindex="-1">
@@ -766,6 +801,7 @@
       escapeHtml(message || '');
     consoleEl.appendChild(div);
     consoleEl.scrollTop = consoleEl.scrollHeight;
+    if (window.BenchSynth) window.BenchSynth.log(agent || 'system', message || '');
   }
 
   function setVerdict(verdict, mock, note) {
@@ -1300,6 +1336,17 @@
     toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
   }
 
+  // After an image/goal run: fly the parts in, then auto-tune if enabled.
+  function afterSynth() {
+    if (!window.BenchSynth) return;
+    window.BenchSynth.step('check', 'done');
+    setTimeout(function () {
+      window.BenchSynth.flyIn({});
+      if (window.BenchTuner && window.BenchTuner.auto('circuit')) setTimeout(function () { window.BenchTuner.run('circuit', { continueRun: true }); }, 1600);
+      else window.BenchSynth.finish(true, 'Design ready.');
+    }, 300);
+  }
+
   async function runImage() {
     if (busy) return;
     if (!selectedFile) { showError('No image selected', 'Drop or choose a schematic image first, or type a goal and press Check.'); return; }
@@ -1308,6 +1355,7 @@
     pipelineReset();
     setBusy(true, 'Running agents on image...');
     setConsoleOpen(true);
+    if (window.BenchSynth) { window.BenchSynth.start({ title: 'Synthesizing', image: selectedFile }); window.BenchSynth.step('ai', 'running'); }
     logLine('system', 'Uploading ' + selectedFile.name + ' and starting run...', 'info');
     try {
       var form = new FormData();
@@ -1315,7 +1363,8 @@
       form.append('goal', $('goal').value.trim());
       var res = await fetch('/run-image', { method: 'POST', body: form });
       var finalData = await streamResponse(res);
-      if (finalData) { applyResult(finalData); logLine('system', 'Run finished.', 'info'); }
+      if (finalData) { applyResult(finalData); logLine('system', 'Run finished.', 'info'); afterSynth(); }
+      else if (window.BenchSynth) window.BenchSynth.finish(false, 'No result.');
       // No result AND no error already shown: only then is this a
       // "finished with nothing" failure. An SSE error event already
       // put its own banner up via handleErrorPayload; overwriting it
@@ -1335,6 +1384,7 @@
     pipelineReset();
     setBusy(true, 'Running agents on goal...');
     setConsoleOpen(true);
+    if (window.BenchSynth) { window.BenchSynth.start({ title: 'Synthesizing', skip: ['read'] }); window.BenchSynth.step('ai', 'running'); }
     logLine('system', 'Starting run for goal: ' + goal, 'info');
     try {
       var res = await fetch('/run-goal', {
@@ -1342,7 +1392,8 @@
         body: JSON.stringify({ goal: goal })
       });
       var finalData = await streamResponse(res);
-      if (finalData) { applyResult(finalData); logLine('system', 'Run finished.', 'info'); }
+      if (finalData) { applyResult(finalData); logLine('system', 'Run finished.', 'info'); afterSynth(); }
+      else if (window.BenchSynth) window.BenchSynth.finish(false, 'No result.');
       // See runImage: do not overwrite an SSE error banner that is
       // already showing the real cause.
       else if (res.ok && !errorBanner.classList.contains('show')) { showError('Run finished with no result', 'The server returned no verdict, findings, or netlist.'); }
@@ -2687,6 +2738,7 @@
 <script src="optics.js" defer></script>
 <script src="start.js" defer></script>
 <script src="account.js" defer></script>
+<script src="synth.js" defer></script>
 <dialog id="builds-dialog" class="builds-dialog" aria-labelledby="builds-title">
   <div class="card-head"><h2 id="builds-title">My builds</h2><button type="button" class="icon-btn" id="builds-close" aria-label="Close">&times;</button></div>
   <ul id="builds-list" class="builds-list"><li class="empty">Loading&hellip;</li></ul>

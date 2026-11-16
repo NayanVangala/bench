@@ -580,6 +580,8 @@ export function init3D(container, callbacks = {}, options = {}) {
 
   // -- Circuit (./components.js). ------------------------------------------
   let circuit = null; // { group, nodePositions, meshesById: Map } | null
+  let refMesh = null; // floating source image during synthesis (showReference)
+  const REF_HEIGHT = 7;
   let interactionHandle = null;
 
   function meshesObject() {
@@ -1449,6 +1451,84 @@ export function init3D(container, callbacks = {}, options = {}) {
     resetView() {
       if (disposed) return handle;
       resetViewInternal();
+      return handle;
+    },
+
+    /**
+     * Synthesis view (BEAMTEAM-style): float the user's source image above
+     * the bench while the AI reads it. Visual only; never part of a design.
+     */
+    showReference(url) {
+      if (disposed) return handle;
+      handle.clearReference();
+      new THREE.TextureLoader().load(url, (tex) => {
+        if (disposed) return;
+        const aspect = tex.image && tex.image.height ? tex.image.width / tex.image.height : 1.5;
+        const w = 16;
+        const mesh = new THREE.Mesh(
+          new THREE.PlaneGeometry(w, w / aspect),
+          new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0.92, side: THREE.DoubleSide, depthWrite: false }),
+        );
+        mesh.rotation.x = -Math.PI / 2;
+        mesh.position.y = REF_HEIGHT;
+        mesh.raycast = () => {};
+        mesh.userData = { kind: 'reference', w, h: w / aspect };
+        refMesh = mesh;
+        scene.add(mesh);
+        view.components.set('__reference', mesh);
+        try { view.resetToIso(); } catch (error) { onError(error); }
+      });
+      return handle;
+    },
+
+    /** Fade the floating source image (opacity 0-1). */
+    fadeReference(opacity) {
+      if (refMesh) refMesh.material.opacity = opacity;
+      return handle;
+    },
+
+    clearReference() {
+      if (!refMesh) return handle;
+      scene.remove(refMesh);
+      refMesh.geometry.dispose();
+      if (refMesh.material.map) refMesh.material.map.dispose();
+      refMesh.material.dispose();
+      view.components.delete('__reference');
+      refMesh = null;
+      return handle;
+    },
+
+    /**
+     * Parts "fly in": each part starts where it was found in the floating
+     * image (bbox fractions 0-1, or above its spot when unknown) and glides
+     * down to its place on the bench, staggered in build order.
+     */
+    flyIn(bboxes) {
+      if (disposed || !circuit) return handle;
+      const groups = [...circuit.meshesById.entries()];
+      const anims = groups.map(([id, group], i) => {
+        const end = group.position.clone();
+        const b = bboxes && bboxes[id];
+        const start = (b && refMesh)
+          ? new THREE.Vector3(((b[0] + b[2]) / 2 - 0.5) * refMesh.userData.w, REF_HEIGHT, ((b[1] + b[3]) / 2 - 0.5) * refMesh.userData.h)
+          : end.clone().add(new THREE.Vector3(0, REF_HEIGHT, 0));
+        group.position.copy(start);
+        return { group, start, end, delay: i * 140 };
+      });
+      const t0 = performance.now();
+      const dur = 900;
+      const ease = (t) => 1 - Math.pow(1 - t, 3);
+      const step = (now) => {
+        let running = false;
+        for (const a of anims) {
+          const t = Math.min(1, Math.max(0, (now - t0 - a.delay) / dur));
+          a.group.position.lerpVectors(a.start, a.end, ease(t));
+          if (t < 1) running = true;
+        }
+        if (running && !disposed) requestAnimationFrame(step);
+        else updateCalloutsNow();
+      };
+      requestAnimationFrame(step);
       return handle;
     },
 

@@ -26,15 +26,19 @@ window.NetproofDesign = function (dom, onResult, onBlank) {
     if (file) form.append('image', file);
     btn.disabled = true;
     btn.textContent = 'Designing\u2026';
+    var synth = window.BenchSynth;
+    synth.start({ title: 'Synthesizing', image: file, skip: file ? [] : ['read'] });
     try {
-      var res = await fetch('/' + dom + '/design', { method: 'POST', body: form });
-      var data = {};
-      try { data = await res.json(); } catch (e) { /* non-JSON error */ }
-      if (!res.ok) { banner.textContent = data.message || ('Design failed (' + res.status + ')'); banner.classList.add('show'); return; }
+      var data = await synth.stream('/' + dom + '/design/stream', { method: 'POST', body: form }, synth.event);
       banner.classList.remove('show');
       onResult(data.design, data.report);
+      synth.step('check', 'done');
+      synth.flyIn(data.bboxes);
+      if (window.BenchTuner && window.BenchTuner.auto(dom)) setTimeout(function () { window.BenchTuner.run(dom, { continueRun: true }); }, 1600);
+      else synth.finish(true, 'Design ready.');
     } catch (e) {
-      banner.textContent = 'Network error: ' + e.message;
+      synth.finish(false, e.message);
+      banner.textContent = e.message;
       banner.classList.add('show');
     } finally {
       btn.disabled = false;
@@ -449,6 +453,7 @@ window.NetproofDesign = function (dom, onResult, onBlank) {
   // Saved builds (account.js): read the current link / load a saved one.
   window.NetproofFiber = {
     get: function () { return link; },
-    load: function (l) { link = JSON.parse(JSON.stringify(l)); report = null; check(); }
+    load: function (l) { link = JSON.parse(JSON.stringify(l)); report = null; check(); },
+    apply: function (l, r) { link = l; report = r; renderAll(); show3d(); }
   };
 })();

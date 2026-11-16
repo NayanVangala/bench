@@ -928,7 +928,8 @@ app = FastAPI(title="bench.", version="0.1.0", lifespan=_lifespan)
 # ponytail: in-memory, per instance, resets on restart; move to Redis if the
 # app ever runs on more than one instance.
 # ---------------------------------------------------------------------------
-_AI_PATHS = {"/run-goal", "/run-image", "/repair", "/fiber/design", "/optics/design"}
+_AI_PATHS = {"/run-goal", "/run-image", "/repair", "/fiber/design", "/optics/design",
+             "/fiber/design/stream", "/optics/design/stream"}
 _AI_HITS: dict[str, deque] = defaultdict(deque)
 _AI_DAY: deque = deque()
 
@@ -1767,6 +1768,118 @@ async def _design_with_ai(domain: str, goal: str | None, image: UploadFile | Non
         raise HTTPException(status_code=502, detail={"error": "llm_error", "message": f"AI design failed: {exc}"})
     report = fiber.check_link(design) if domain == "fiber" else optics.trace_bench(design)
     return JSONResponse(content={"design": design, "report": report})
+
+
+def _sse(event: dict) -> dict:
+    return {"data": json.dumps(event)}
+
+
+async def _run_streamed(work, first_events: list[dict], wait_label: str) -> AsyncIterator[dict]:
+    """Run ``work(emit)`` on a worker thread; stream its events as SSE.
+
+    While the thread is busy and quiet (e.g. waiting on the AI), a heartbeat
+    event shows the elapsed time, so the UI log never looks frozen. The
+    return value of ``work`` is sent as the final ``done`` event.
+    """
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+    t0 = time.monotonic()
+
+    def emit(ev: dict) -> None:
+        loop.call_soon_threadsafe(queue.put_nowait, {**ev, "t": round(time.monotonic() - t0, 1)})
+
+    for ev in first_events:
+        yield _sse({**ev, "t": 0.0})
+    task = loop.run_in_executor(None, work, emit)
+    while True:
+        try:
+            ev = await asyncio.wait_for(queue.get(), timeout=2.0)
+            yield _sse(ev)
+            continue
+        except asyncio.TimeoutError:
+            pass
+        if task.done():
+            break
+        yield _sse({"stage": "wait", "message": f"{wait_label} {time.monotonic() - t0:.0f}s", "tick": True,
+                    "t": round(time.monotonic() - t0, 1)})
+    while not queue.empty():
+        yield _sse(queue.get_nowait())
+    try:
+        result = task.result()
+    except Exception as exc:  # visible error event, never a guessed result
+        yield _sse({"stage": "error", "message": str(exc)[:600], "t": round(time.monotonic() - t0, 1)})
+        return
+    yield _sse({"stage": "done", **result, "t": round(time.monotonic() - t0, 1)})
+
+
+@app.post("/{domain}/design/stream")
+async def design_stream(domain: str, goal: str | None = Form(None), image: UploadFile | None = File(None)) -> EventSourceResponse:
+    """Live version of /fiber/design and /optics/design: streams each step
+    (image received, AI reading, schema validated, physics check) and ends
+    with {design, report, bboxes}. The AI proposes; the check decides."""
+    from . import design_ai, fiber, optics
+
+    if domain not in ("fiber", "optics"):
+        raise HTTPException(status_code=404, detail={"error": "not_found", "message": "Unknown design domain."})
+    image_bytes = await image.read() if image is not None else None
+    if image_bytes is not None and len(image_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail={"error": "upload_too_large", "message": f"image is over {MAX_UPLOAD_BYTES} bytes."})
+    if not (goal or "").strip() and not image_bytes:
+        raise HTTPException(status_code=400, detail={"error": "empty_input", "message": "Describe the design or upload an image."})
+    first = []
+    if image_bytes:
+        first.append({"stage": "input", "message": f"Received {image.filename or 'image'} ({len(image_bytes) // 1024} KB)"})
+    if (goal or "").strip():
+        first.append({"stage": "input", "message": f"Goal: {goal.strip()[:160]}"})
+
+    def work(emit):
+        meta: dict = {}
+        design = design_ai.propose(domain, goal, image_bytes or None, on_event=emit, meta=meta)
+        emit({"stage": "verify", "message": "Running the " + ("optical power budget" if domain == "fiber" else "ray trace") + "\u2026"})
+        report = fiber.check_link(design) if domain == "fiber" else optics.trace_bench(design)
+        emit({"stage": "verify", "message": f"Verdict {report['verdict']}: " + (", ".join(f["rule_id"] for f in report["findings"]) or "no rules fired")})
+        return {"design": design, "report": report, "bboxes": meta.get("bboxes") or {}}
+
+    return EventSourceResponse(_run_streamed(work, first, "Waiting for the AI\u2026"))
+
+
+class TuneIn(BaseModel):
+    design: dict
+    prefs: dict = Field(default_factory=dict)
+
+
+@app.post("/tune/{domain}")
+async def tune(domain: str, body: TuneIn) -> EventSourceResponse:
+    """Deterministic tuner (no AI): streams each step and ends with
+    {design, report, changes, score_before, score_after}."""
+    from . import tuner
+
+    if domain not in ("circuit", "fiber", "optics"):
+        raise HTTPException(status_code=404, detail={"error": "not_found", "message": "Unknown tuning domain."})
+    try:
+        if domain == "fiber":
+            from .fiber import FiberLink
+            design = FiberLink.model_validate(body.design).model_dump(mode="json", exclude_none=True)
+        elif domain == "optics":
+            from .optics import OpticsBench
+            design = OpticsBench.model_validate(body.design).model_dump(mode="json", exclude_none=True)
+        else:
+            design = IRNetlist.model_validate(body.design).model_dump(mode="json")
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail={"error": "validation_error", "message": str(exc).splitlines()[0]})
+
+    def check_circuit(nl: dict) -> dict:
+        model = IRNetlist.model_validate(nl)
+        return _report_response(_verify_netlist(model, record=False), model)
+
+    def work(emit):
+        if domain == "circuit":
+            return tuner.tune_circuit(design, body.prefs, check_circuit, emit)
+        if domain == "fiber":
+            return tuner.tune_fiber(design, body.prefs, emit)
+        return tuner.tune_optics(design, body.prefs, emit)
+
+    return EventSourceResponse(_run_streamed(work, [{"stage": "tune", "message": f"Tuning for: {body.prefs.get('objective') or 'default'}"}], "Tuning\u2026"))
 
 
 @app.post("/fiber/design")

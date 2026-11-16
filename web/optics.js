@@ -380,6 +380,7 @@
     onMove: onMove,
     get: function () { return bench; },
     load: function (b) { bench = JSON.parse(JSON.stringify(b)); report = null; check(); },
+    apply: function (b, r) { bench = b; report = r; renderAll(); show3d(); },
     activate: function () { if (!bench) loadExample('good'); else { renderAll(); show3d(); } }
   };
 })();

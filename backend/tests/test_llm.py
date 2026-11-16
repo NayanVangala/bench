@@ -23,7 +23,18 @@ from pathlib import Path
 import pytest
 
 from netproof.ir import Finding, Netlist, Severity
-from netproof.llm import MAX_TOKENS, MODEL, design, read_schematic, repair
+from netproof.llm import (
+    GEMINI_MODEL,
+    MAX_TOKENS,
+    MODEL,
+    VISION_MODEL,
+    _GeminiClientAdapter,
+    _call_model,
+    _resolve_vision_model,
+    design,
+    read_schematic,
+    repair,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -362,3 +373,215 @@ def test_repair_invalid_input_netlist_raises_without_calling_model():
     with pytest.raises(ValueError, match="failed validation"):
         repair(bad, [_finding()], client=client)
     assert client.calls == []
+
+# ---------------------------------------------------------------------------
+# VISION_MODEL: optional vision model for image reads only (Anthropic-only)
+# ---------------------------------------------------------------------------
+# Rules under test (see llm.py module docstring):
+# - read_schematic runs on VISION_MODEL env (e.g. claude-sonnet-5-5);
+#   unset/blank means Haiku (MODEL). The retry uses the same model as
+#   the first attempt.
+# - design and repair NEVER use VISION_MODEL, even when it is set.
+# - The module global MODEL is never mutated by a vision read.
+# - On the Gemini adapter the model= argument is ignored: image reads
+#   keep using GEMINI_MODEL (no second adapter is built).
+# - _call_model(..., model=...) is the per-call hook the analysts in
+#   design_ai.propose_team use to request the vision model.
+
+SONNET = "claude-sonnet-5-5"
+
+
+def test_resolve_vision_model_defaults_to_haiku(monkeypatch):
+    monkeypatch.delenv("VISION_MODEL", raising=False)
+    assert _resolve_vision_model() == MODEL
+    assert _resolve_vision_model() == "claude-haiku-5-5"
+    assert VISION_MODEL == "claude-haiku-5-5"
+
+
+def test_resolve_vision_model_reads_env_and_strips(monkeypatch):
+    monkeypatch.setenv("VISION_MODEL", f"  {SONNET}  ")
+    assert _resolve_vision_model() == SONNET
+
+
+def test_resolve_vision_model_blank_env_falls_back_to_haiku(monkeypatch):
+    monkeypatch.setenv("VISION_MODEL", "   ")
+    assert _resolve_vision_model() == MODEL
+
+
+def test_read_schematic_uses_vision_model_when_set(monkeypatch):
+    monkeypatch.setenv("VISION_MODEL", SONNET)
+    client = FakeClient([json.dumps(VALID_NETLIST)])
+    result = read_schematic(PNG_BYTES, client=client)
+
+    assert isinstance(result, Netlist)
+    assert client.calls[0]["model"] == SONNET
+    assert client.calls[0]["max_tokens"] == MAX_TOKENS
+
+
+def test_read_schematic_defaults_to_haiku_when_vision_unset(monkeypatch):
+    monkeypatch.delenv("VISION_MODEL", raising=False)
+    client = FakeClient([json.dumps(VALID_NETLIST)])
+    read_schematic(PNG_BYTES, client=client)
+
+    assert client.calls[0]["model"] == MODEL
+    assert client.calls[0]["model"] == "claude-haiku-5-5"
+
+
+def test_read_schematic_retry_keeps_vision_model(monkeypatch):
+    monkeypatch.setenv("VISION_MODEL", SONNET)
+    client = FakeClient(["not json", json.dumps(VALID_NETLIST)])
+    result = read_schematic(PNG_BYTES, client=client)
+
+    assert isinstance(result, Netlist)
+    assert len(client.calls) == 2
+    assert [c["model"] for c in client.calls] == [SONNET, SONNET]
+
+
+def test_read_schematic_retry_failure_keeps_vision_model(monkeypatch):
+    monkeypatch.setenv("VISION_MODEL", SONNET)
+    client = FakeClient(["garbage", "more garbage"])
+    with pytest.raises(ValueError, match="after one retry"):
+        read_schematic(PNG_BYTES, client=client)
+    assert len(client.calls) == 2
+    assert [c["model"] for c in client.calls] == [SONNET, SONNET]
+
+
+def test_design_never_uses_vision_model(monkeypatch):
+    monkeypatch.setenv("VISION_MODEL", SONNET)
+    client = FakeClient([json.dumps(VALID_NETLIST)])
+    design("light a red LED from a 9V battery", client=client)
+
+    assert client.calls[0]["model"] == MODEL
+    assert client.calls[0]["model"] != SONNET
+
+
+def test_repair_never_uses_vision_model(monkeypatch):
+    monkeypatch.setenv("VISION_MODEL", SONNET)
+    reply = _repair_reply(
+        REPAIRED_NETLIST,
+        ["R1 changed from 10 ohms to 470 ohms to keep LED current under 20 mA."],
+    )
+    client = FakeClient([reply])
+    repair(BROKEN_NETLIST, [_finding()], client=client)
+
+    assert client.calls[0]["model"] == MODEL
+    assert client.calls[0]["model"] != SONNET
+
+
+def test_read_schematic_does_not_mutate_module_global_model(monkeypatch):
+    monkeypatch.setenv("VISION_MODEL", SONNET)
+    client = FakeClient([json.dumps(VALID_NETLIST)])
+    read_schematic(PNG_BYTES, client=client)
+
+    # The global is untouched, so a later text-only call still gets Haiku.
+    assert MODEL == "claude-haiku-5-5"
+    assert VISION_MODEL == "claude-haiku-5-5"
+    client2 = FakeClient([json.dumps(VALID_NETLIST)])
+    design("light a red LED", client=client2)
+    assert client2.calls[0]["model"] == "claude-haiku-5-5"
+
+
+def test_call_model_explicit_model_wins_and_default_is_haiku():
+    # The per-call hook image-read call sites (e.g. the analysts in
+    # design_ai.propose_team) use to request the vision model.
+    image_messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}},
+                {"type": "text", "text": "You are the Parts analyst. List every component."},
+            ],
+        }
+    ]
+    client = FakeClient(["analyst notes"])
+    text = _call_model(client, image_messages, model=SONNET)
+    assert text == "analyst notes"
+    assert client.calls[0]["model"] == SONNET
+
+    # No model arg: Haiku, even for an image-shaped message — routing
+    # is explicit per call site, never inferred from the message.
+    client = FakeClient(["analyst notes"])
+    _call_model(client, image_messages)
+    assert client.calls[0]["model"] == MODEL
+
+
+# --- Gemini: VISION_MODEL is ignored (adapter always uses GEMINI_MODEL) ---
+
+
+class _FakeInlineData:
+    def __init__(self, data: bytes, mime_type: str) -> None:
+        self.data = data
+        self.mime_type = mime_type
+
+
+class _FakePart:
+    def __init__(self, text: str | None = None, inline_data=None) -> None:
+        self.text = text
+        self.inline_data = inline_data
+
+    @classmethod
+    def from_text(cls, *, text: str) -> "_FakePart":
+        return cls(text=text)
+
+    @classmethod
+    def from_bytes(cls, *, data: bytes, mime_type: str) -> "_FakePart":
+        return cls(inline_data=_FakeInlineData(data, mime_type))
+
+
+class _FakeContent:
+    def __init__(self, role: str, parts: list) -> None:
+        self.role = role
+        self.parts = list(parts)
+
+
+class _FakeConfig:
+    def __init__(
+        self, max_output_tokens: int | None = None, response_mime_type: str | None = None
+    ) -> None:
+        self.max_output_tokens = max_output_tokens
+        self.response_mime_type = response_mime_type
+
+
+class _FakeTypes:
+    Part = _FakePart
+    Content = _FakeContent
+    GenerateContentConfig = _FakeConfig
+
+
+class _FakeGenaiResponse:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+class _FakeGeminiModels:
+    def __init__(self, fake: "FakeGeminiClient") -> None:
+        self._fake = fake
+
+    def generate_content(self, **kwargs):
+        self._fake.calls.append(kwargs)
+        return _FakeGenaiResponse(self._fake.replies.pop(0))
+
+
+class FakeGeminiClient:
+    """Stands in for google.genai.Client: .models.generate_content only."""
+
+    def __init__(self, replies: list[str]) -> None:
+        self.replies = list(replies)
+        self.calls: list[dict] = []
+        self.models = _FakeGeminiModels(self)
+
+
+def test_vision_model_ignored_on_gemini_adapter(monkeypatch):
+    monkeypatch.setenv("VISION_MODEL", SONNET)
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)
+    genai_client = FakeGeminiClient([json.dumps(VALID_NETLIST)])
+    adapter = _GeminiClientAdapter(genai_client, types_module=_FakeTypes)
+
+    result = read_schematic(PNG_BYTES, client=adapter)
+
+    assert isinstance(result, Netlist)
+    # The adapter ignores _call_model's model= (the vision model) and
+    # always generates with GEMINI_MODEL — Anthropic-only feature.
+    assert genai_client.calls[0]["model"] == GEMINI_MODEL
+    assert genai_client.calls[0]["model"] == "gemini-4-argon"
+    assert genai_client.calls[0]["model"] != SONNET

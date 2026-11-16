@@ -1,7 +1,42 @@
 # bench.
 
+**Design a circuit, a fiber link, or a free-space optics bench. An AI team proposes it, real physics verdicts it, and you download a build pack to build it.**
+
 _(formerly Netproof; the Python package keeps the `netproof` name.)_
 
+**Live:** <https://netproof-quyv.onrender.com> (Render free plan, auto-deploys on push to `main`; first load after idle takes ~50 s because free instances sleep.)
+
+**No sign-up needed, once #3 merges:** a **"Try it as guest"** button on `/login` will create a throwaway account (random email, no password) so judges can try the app without signing up. Guest login is not in the app yet; until #3 lands, use email + password sign-up on `/login`.
+
+## Try it in 60 seconds
+
+1. Open the live link above and pick the **optics bench** mode.
+2. Describe this setup: **"532 nm 4 mW laser, two steering mirrors, 50:50 beamsplitter, two detectors"**.
+3. Watch the stats dock: the AI team proposes designs in parallel, the Judge scores them, and the best one wins. Expect **PASS**: the 50:50 split sends ~2 mW to each detector, inside the default 10 mW detector maximum, and the beams reach both detectors.
+4. Now try the overload case: **"20 mW laser aimed directly at a detector"**. Expect **STOP `DETECTOR_OVERLOAD`**: 20 mW is over the detector's 10 mW maximum. The tuner autofix adds an ND filter to bring it back inside range.
+5. Download the build pack PDF: parts, prices, where to buy, and assembly steps.
+
+## Screenshot
+
+![bench. circuit mode: a 9 V LED circuit STOPs on LED_OVERCURRENT and RESISTOR_POWER](docs/screenshots/bench-1440-stop.png)
+
+Circuit mode: a 9 V LED circuit with a 100 Ω series resistor STOPs, with `LED_OVERCURRENT` (66.6 mA over the 30 mA limit) and `RESISTOR_POWER` (0.444 W over the 0.25 W rating).
+
+> Stats dock screenshot: `docs/screenshots/stats-dock.png` is a placeholder path. No screenshot of the stats dock exists in the repo yet, so no image is linked here. Capture one of the live agent lanes during an optics run, save it to that path, and replace this note with the image.
+
+## Demo video
+
+> Demo video link goes here. The owner records it: optics prompt, team lanes, Judge, photons, tuner, PDF, about 60 seconds.
+
+## Architecture
+
+- **AI team proposes.** For fiber and optics, three analysts (Parts, Path, Values) read the input in parallel, then up to four designers (Faithful, Simple, Safe, Performance) propose candidates in parallel (`backend/netproof/design_ai.py`). Circuit mode runs parallel readers with majority consensus (`backend/netproof/pipeline.py`). The model only ever proposes.
+- **Physics decides the verdict.** Circuits run a real ngspice DC operating-point simulation checked against fixed rules (`backend/netproof/rules.py`); fiber links get an optical power budget (`backend/netproof/fiber.py`); optics benches get a 2D ray trace (`backend/netproof/optics.py`). Verdicts are PASS, WARN, or STOP, computed by deterministic code, never by the model.
+- **Judge scores and picks the best.** Every candidate is verified against the physics engine and scored 0-100; the highest score wins (`design_ai.py`, `tuner.py`).
+- **Deterministic tuner improves the winner.** A coordinate search keeps a step only if the score strictly improves; autofix ends stray beams on beam dumps and adds ND filters for overloaded detectors (`backend/netproof/tuner.py`).
+- **Build pack to build it.** A PDF with parts, estimated prices, buy links, hole positions, and assembly and test steps (`backend/netproof/buildpack.py`). Build packs are only issued for designs that pass; a STOP design must be fixed first.
+
+---
 Netproof is a circuit-checking tool for hobby electronics. You describe a
 circuit (or paste a netlist), and Netproof tells you whether it is safe to
 build — before you wire anything up.

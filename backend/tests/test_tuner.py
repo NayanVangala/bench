@@ -62,3 +62,78 @@ def test_tune_endpoint_streams_circuit():
     r1 = next(c for c in done["design"]["components"] if c["id"] == "R1")
     assert 470 <= r1["value"] <= 820  # ~12 mA from 9 V with a ~2 V LED
     assert any(e["stage"] == "tune" for e in events[:-1])
+
+
+# ---------------------------------------------------------------------------
+# Bounded cost guard (swarm/tuner-guard): caps stop the search cleanly
+# ---------------------------------------------------------------------------
+
+def _fake_circuit_check(calls):
+    """Deterministic check that never needs ngspice: LED pinned at 12 mA."""
+    def check(netlist):
+        calls["n"] += 1
+        return {"findings": [], "netlist": [{"type": "led", "current": 0.012}], "power": {}}
+    return check
+
+
+def _cap_events(events):
+    return [e for e in events if e.get("capped")]
+
+
+def test_tuner_eval_cap_stops_circuit_search(monkeypatch):
+    monkeypatch.setenv("NETPROOF_TUNER_MAX_EVALS", "3")
+    calls = {"n": 0}
+    netlist = {"components": [
+        {"id": "LED1", "type": "led", "nodes": ["n1", "gnd"]},
+        {"id": "R1", "type": "resistor", "nodes": ["n1", "vcc"], "value": 1000},
+    ]}
+    events = []
+    out = tuner.tune_circuit(netlist, {"objective": "balanced"}, _fake_circuit_check(calls), events.append)
+    assert out["capped"] is True and out["evals"] == 4  # 1 start + 2 candidates + mandatory final check
+    assert calls["n"] == 4  # start check + 2 candidates + mandatory final check
+    assert out["design"] and out["report"]  # still returns the best design so far
+    assert _cap_events(events) and "evaluation cap (3 evaluations)" in _cap_events(events)[0]["message"]
+
+
+def test_tuner_eval_cap_stops_fiber_search(monkeypatch):
+    monkeypatch.setenv("NETPROOF_TUNER_MAX_EVALS", "2")
+    events = []
+    out = tuner.tune_fiber(_load("fiber_overload"), {"objective": "balanced"}, events.append)
+    assert out["capped"] is True and out["evals"] == 2
+    assert out["design"] and out["report"]
+    assert _cap_events(events) and "evaluation cap" in _cap_events(events)[0]["message"]
+
+
+def test_tuner_time_cap_stops_optics_search():
+    events = []
+    out = tuner.tune_optics(_load("optics_good"), {"objective": "max_power", "max_seconds": 0}, events.append)
+    assert out["capped"] is True
+    assert out["design"] and out["report"]
+    assert _cap_events(events) and "time cap (0 s)" in _cap_events(events)[0]["message"]
+
+
+def test_tuner_autofix_path_respects_eval_cap():
+    events = []
+    out = tuner.tune_optics(_load("optics_stray"), {"objective": "max_power", "max_evals": 1}, events.append)
+    assert out["capped"] is True  # cap hit inside autofix, before any dump/trace loop
+    assert out["design"] and out["report"]
+    assert _cap_events(events)
+
+
+def test_tuner_default_run_is_not_capped():
+    out = tuner.tune_fiber(_load("fiber_overload"), {"objective": "balanced"}, lambda e: None)
+    assert out["capped"] is False
+    assert out["evals"] == 12  # 1 start check + 11 attenuation candidates
+
+
+def test_tuner_prefs_override_env_cap(monkeypatch):
+    monkeypatch.setenv("NETPROOF_TUNER_MAX_EVALS", "2")
+    out = tuner.tune_fiber(_load("fiber_overload"), {"objective": "balanced", "max_evals": 500}, lambda e: None)
+    assert out["capped"] is False and out["evals"] == 12
+
+
+def test_tuner_invalid_env_cap_falls_back_to_default(monkeypatch):
+    monkeypatch.setenv("NETPROOF_TUNER_MAX_EVALS", "banana")
+    monkeypatch.setenv("NETPROOF_TUNER_MAX_SECONDS", "not-a-time")
+    out = tuner.tune_fiber(_load("fiber_overload"), {"objective": "balanced"}, lambda e: None)
+    assert out["capped"] is False and out["evals"] == 12

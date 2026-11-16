@@ -22,7 +22,11 @@ model calls of its own. It wires together the real sibling modules:
   ``spice.SimResult`` or a plain dict with ``node_voltages`` /
   ``branch_currents`` / ``power`` keys.
 * ``llm.py``    -- the ONLY module that talks to the LLM:
-  ``read_schematic(image_bytes, client=None) -> Netlist``,
+  ``read_schematic(image_bytes, client=None) ->
+  SchematicNetlist`` (a ``Netlist`` plus an ``unmodeled`` list of
+  ``{id, type, note}`` dicts for parts on the schematic the circuit
+  model cannot simulate — ICs, transistors, crystals, connectors —
+  listed instead of silently dropped),
   ``design(goal, client=None) -> Netlist`` (ONE netlist per call),
   ``repair(netlist, findings, client=None) ->
   (netlist, reasons)``. There is NO ``llm.propose_repair``. Failures
@@ -51,6 +55,25 @@ run_pipeline``.
   netlists, simulate every candidate, return the one with the best
   verdict (PASS beats WARN beats STOP; ties: fewest STOP, then
   fewest WARN, then earliest). Never just return the first.
+* ``design_team(prompt, *, llm, simulator, designers=4,
+  on_event=None) -> DesignResult`` (bench #8). Like ``design`` but
+  as a real team: each of the first ``designers`` strategists in
+  ``CIRCUIT_DESIGNERS`` (Faithful / Simple / Safe / Efficient —
+  single-word names, so the dock's ``/Designer (\\w+)/`` winner
+  regex matches) gets the goal plus its strategy, proposes one
+  candidate in parallel, and every candidate is simulated +
+  verified. The winner is picked by the same verdict rank as
+  ``design`` (the tuner score is emitted per designer for the dock
+  but never picks the winner — the two scores can disagree, e.g. a
+  PASS-but-dim candidate scores 71.7 while a WARN on-target one
+  scores ~90.0; no tuning runs inside the pipeline). ``on_event``
+  receives the ``propose_team``-dialect events (``Designer <Name>``
+  working/done with ``state`` / ``score`` / ``calls`` /
+  ``physics``, ``Judge`` with ``"Winner: Designer <Name> ..."``,
+  ``Physics`` with the winner's verdict). ``run_goal(..., team=True)``
+  runs this team instead of ``design`` and drops the aggregate
+  lowercase ``designer`` / ``verifier`` events, so the dock shows
+  one lane per designer.
 * ``run_pipeline(netlist, *, simulator, llm=None) ->
   Iterator[event]``. A generator yielding progress events. Every
   event is a dict with exactly ``stage``, ``agent``, ``message`` and
@@ -95,6 +118,10 @@ Other entry points (original brief)
   schematic 3 times in parallel (``ThreadPoolExecutor``) and merges
   with ``consensus_netlists``; a read failure never produces a
   guessed netlist, and fewer than 2 successful reads raises.
+  Unmodeled parts reported by any read are merged (deduped by id,
+  first note wins, ids that land in the consensus netlist dropped)
+  into ``PipelineResult.unmodeled`` (``[{id, type, note}]``) and the
+  terminal event's ``data``.
   ``run_goal`` designs best-of-3, then repairs while STOP. Both
   return a ``PipelineResult`` as the generator's return value
   (``StopIteration.value``).
@@ -157,11 +184,15 @@ __all__ = [
     "ConsensusResult",
     "DesignResult",
     "RepairResult",
+    "CIRCUIT_DESIGNERS",
+    "DESIGNERS",
     "analyze",
     "verify_netlist",
     "check_netlist",
+    "circuit_score",
     "design",
     "design_best_of_3",
+    "design_team",
     "repair_loop",
     "repair_netlist",
     "run_pipeline",
@@ -207,7 +238,12 @@ class PipelineResult:
     are the ``{stage, agent, message, elapsed_s}`` dicts yielded
     along the way; ``repairs`` collects every reason string the
     repair stage returned; ``rounds`` is the number of repair rounds
-    actually run.
+    actually run; ``unmodeled`` (``run_image`` only) lists the parts
+    seen on the schematic that the circuit model cannot simulate,
+    as ``[{id, type, note}]`` dicts, merged across the parallel
+    reads — empty for ``run_pipeline`` / ``run_goal``; ``leaderboard``
+    (``run_goal`` with ``team=True`` only) is the design-team ranking,
+    a list of ``{"name", "score", "verdict"}`` dicts, winner first.
     """
 
     netlist: Netlist
@@ -215,6 +251,8 @@ class PipelineResult:
     events: list[dict] = field(default_factory=list)
     repairs: list[str] = field(default_factory=list)
     rounds: int = 0
+    unmodeled: list[dict] = field(default_factory=list)
+    leaderboard: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -238,16 +276,24 @@ class ConsensusResult:
 
 @dataclass
 class DesignResult:
-    """Result of :func:`design` / :func:`design_best_of_3`.
+    """Result of :func:`design` / :func:`design_best_of_3` /
+    :func:`design_team`.
 
     Unpacks as ``(netlist, report)``. ``candidates`` and ``reports``
     are parallel lists in the order the designs were made/simulated.
+    For :func:`design_team` only: ``scores`` is the tuner score per
+    candidate (parallel to ``candidates``, informational — see
+    :func:`design_team`); ``leaderboard`` is the pick-order ranking,
+    a list of ``{"name", "score", "verdict"}`` dicts with the winner
+    first. Both are empty for plain :func:`design`.
     """
 
     netlist: Netlist
     report: Report
     candidates: list[Netlist] = field(default_factory=list)
     reports: list[Report] = field(default_factory=list)
+    scores: list[float] = field(default_factory=list)
+    leaderboard: list[dict] = field(default_factory=list)
 
     def __iter__(self) -> Iterable[Any]:
         return iter((self.netlist, self.report))
@@ -707,30 +753,92 @@ def _call_design(
         raise _llm_error(exc) from exc
 
 
+def _normalize_unmodeled(entry: Any) -> dict | None:
+    """Normalize one unmodeled part (dict, ``llm.UnmodeledPart``, or
+    any object with ``id`` / ``type`` / ``note`` attributes) to a
+    plain ``{"id", "type", "note"}`` dict. Returns ``None`` when the
+    entry carries no usable id (it is dropped, never invented)."""
+    if isinstance(entry, dict):
+        part_id = str(entry.get("id", "") or "").strip()
+        part_type = str(entry.get("type", "") or "").strip()
+        note = str(entry.get("note", "") or "")
+    else:
+        part_id = str(getattr(entry, "id", "") or "").strip()
+        part_type = str(getattr(entry, "type", "") or "").strip()
+        note = str(getattr(entry, "note", "") or "")
+    if not part_id:
+        return None
+    return {"id": part_id, "type": part_type, "note": note}
+
+
+def _split_read_result(raw: Any) -> tuple[Netlist, list[dict]]:
+    """Split one schematic-read result into ``(netlist, unmodeled)``.
+
+    Accepts every shape a read can return: a ``(netlist, unmodeled)``
+    tuple, a netlist dict carrying an ``"unmodeled"`` key, or a plain
+    ``Netlist`` (including ``llm.SchematicNetlist``, whose
+    ``.unmodeled`` attribute is read). A plain ``Netlist`` with no
+    unmodeled information yields ``[]`` — reads from older fakes keep
+    working unchanged.
+    """
+    if isinstance(raw, tuple) and len(raw) == 2:
+        netlist, unmodeled = raw
+        parts = [
+            p
+            for p in (
+                _normalize_unmodeled(e) for e in (unmodeled or [])
+            )
+            if p is not None
+        ]
+        return _coerce_netlist(netlist), parts
+    if isinstance(raw, dict) and "unmodeled" in raw:
+        parts = [
+            p
+            for p in (
+                _normalize_unmodeled(e) for e in (raw.get("unmodeled") or [])
+            )
+            if p is not None
+        ]
+        return _coerce_netlist(raw), parts
+    netlist = _coerce_netlist(raw)
+    parts = [
+        p
+        for p in (
+            _normalize_unmodeled(e)
+            for e in (getattr(netlist, "unmodeled", None) or [])
+        )
+        if p is not None
+    ]
+    return netlist, parts
+
+
 def _call_read(
     llm_obj: Any,
     read_fn: Any,
     image_bytes: bytes,
     client: Any = None,
-) -> Netlist:
+) -> tuple[Netlist, list[dict]]:
     """Transcribe one schematic image with the LLM. ``read_fn`` (a
     plain callable) wins, then ``llm.read_schematic``, then the real
-    ``llm.read_schematic``. Failures propagate to the caller, which
-    wraps them as ``LLM call failed``."""
+    ``llm.read_schematic``. Returns ``(netlist, unmodeled)`` where
+    ``unmodeled`` is the list of ``{id, type, note}`` dicts for parts
+    the circuit model cannot simulate (``[]`` when every part was
+    modeled). Failures propagate to the caller, which wraps them as
+    ``LLM call failed``."""
     if read_fn is not None:
-        return _coerce_netlist(
+        return _split_read_result(
             _call_with_optional_client(read_fn, image_bytes, client=client)
         )
     if llm_obj is not None:
         method = getattr(llm_obj, "read_schematic", None)
         if callable(method):
-            return _coerce_netlist(
+            return _split_read_result(
                 _call_with_optional_client(method, image_bytes, client=client)
             )
         raise RuntimeError(
             "LLM call failed: injected llm has no read_schematic method"
         )
-    return _coerce_netlist(
+    return _split_read_result(
         _call_with_optional_client(
             _llm_module.read_schematic, image_bytes, client=client
         )
@@ -965,6 +1073,367 @@ def design_best_of_3(
         simulator=simulator,
         run_sim=run_sim,
         n=n,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Design team: one strategist per designer (bench #8)
+# ---------------------------------------------------------------------------
+#
+# Circuit goal mode as a real team, mirroring
+# ``design_ai.propose_team`` (fiber/optics): each designer gets the
+# same goal plus a different strategy, proposes ONE candidate, and
+# every candidate is simulated + verified by deterministic code; the
+# simulator + rules decide, the model never does. Per-designer
+# ``agent`` / ``state`` / ``score`` events (``Designer <Name>``,
+# ``Judge``, ``Physics``) give the dock one lane per designer.
+#
+# Strategy names are single ``\\w+`` words on purpose: the dock's
+# Judge-winner regex is ``/Designer (\\w+)/``, so ``Low-power`` would
+# capture only ``Low`` and never match a lane. The low-power
+# strategist is therefore named ``Efficient``, not ``Low-power``.
+#
+# TUNER-SCORE MISMATCH (documented, not fixed here): the winner is
+# picked by verdict rank (``_verdict_rank``: PASS beats WARN beats
+# STOP; ties: fewest STOP, then fewest WARN, then earliest) — exactly
+# like :func:`design`. The per-designer ``score`` is the tuner score
+# (``tuner._circuit_score``: ``95 - 25*STOP - 5*WARN - 40*LED-miss``,
+# default target balanced / 12 mA, because goal mode carries no prefs
+# to choose another target). The two scores can and do disagree: a
+# PASS-but-dim candidate (5 mA LED) scores 71.7 while a WARN candidate
+# whose LED sits exactly on target scores ~90.0 — yet the picker still
+# takes the PASS candidate, and the tuner score is shown, not hidden.
+# The tuner score is informational only: it never picks the winner,
+# and NO tuning runs inside the pipeline (tuning stays the separate
+# manual ``POST /tune/circuit`` step on the final netlist, so a tuned
+# STOP can never slip out of ``run_goal`` unverified and a repair can
+# never silently undo tuned values).
+
+
+#: Circuit designer strategies, mirroring ``design_ai.DESIGNERS``.
+#: ``(name, strategy prompt)``; the name is a single word (see above).
+CIRCUIT_DESIGNERS: list[tuple[str, str]] = [
+    (
+        "Faithful",
+        "Strategy: match the goal as faithfully as possible, "
+        "using standard real component values.",
+    ),
+    (
+        "Simple",
+        "Strategy: use the fewest parts that still meet the goal.",
+    ),
+    (
+        "Safe",
+        "Strategy: safety first - keep every part well inside its "
+        "ratings, with margin on resistor power and LED current.",
+    ),
+    (
+        "Efficient",
+        "Strategy: use as little power as safely possible while "
+        "still meeting the goal; keep currents low.",
+    ),
+]
+#: Alias, so callers can write ``pipeline.DESIGNERS`` exactly like
+#: ``design_ai.DESIGNERS``.
+DESIGNERS = CIRCUIT_DESIGNERS
+
+
+def _tuner_report_dict(report: Report, netlist: Netlist) -> dict:
+    """Shape an ``ir.Report`` + netlist into the dict
+    ``tuner._circuit_score`` reads: ``findings`` as ``{"severity"}``
+    dicts and ``netlist`` rows carrying each component's branch
+    current (``_led_currents`` reads the LED rows). Branch-current
+    keys are matched case-insensitively (ngspice lowercases them).
+    """
+    currents = {
+        str(k).lower(): v for k, v in (report.branch_currents or {}).items()
+    }
+    rows = [
+        {
+            "id": comp.id,
+            "type": str(
+                getattr(comp.type, "value", comp.type)
+            ),
+            "current": currents.get(comp.id.lower()),
+        }
+        for comp in netlist.components
+    ]
+    findings = [
+        {
+            "severity": str(
+                getattr(f.severity, "value", f.severity)
+            ).upper(),
+            "rule_id": f.rule_id,
+        }
+        for f in report.findings
+    ]
+    return {"findings": findings, "netlist": rows}
+
+
+def circuit_score(
+    report: Report, netlist: Netlist, target_ma: float | None = None
+) -> float:
+    """Tuner score for one verified candidate (informational only).
+
+    ``tuner._circuit_score`` on the ``(report, netlist)`` pair:
+    ``95 - 25*STOP - 5*WARN - 40 * mean(|I_LED - target| / target)``.
+    ``target_ma`` defaults to the tuner's ``balanced`` target
+    (12 mA); goal mode has no prefs, so no other target is implied.
+    With no LEDs the miss term is 0. The score is NOT clamped and is
+    NOT the team picker — see the mismatch note above
+    :data:`CIRCUIT_DESIGNERS`.
+    """
+    from . import tuner as _tuner
+
+    target_a = (
+        float(target_ma) / 1000.0
+        if target_ma is not None
+        else _tuner.CIRCUIT_TARGET_MA["balanced"] / 1000.0
+    )
+    return _tuner._circuit_score(
+        _tuner_report_dict(report, netlist), target_a
+    )
+
+
+def _call_design_single(
+    llm_obj: Any, prompt: str, client: Any = None
+) -> Netlist:
+    """Ask the LLM for ONE candidate netlist for ``prompt`` (one
+    designer in :func:`design_team`).
+
+    Test seam: ``llm.design(prompt, n=1) -> list[Netlist]`` (or a
+    single ``Netlist``) — the first element is the designer's
+    candidate. Real ``llm.py`` seam: ``design(goal, client=None) ->
+    Netlist`` (one netlist per call). Any failure raises
+    ``RuntimeError("LLM call failed: ...")``.
+    """
+    try:
+        if llm_obj is None:
+            return _coerce_netlist(
+                _call_with_optional_client(
+                    _llm_module.design, prompt, client=client
+                )
+            )
+        method = None
+        for name in ("design", "generate", "generate_candidates"):
+            candidate = getattr(llm_obj, name, None)
+            if callable(candidate):
+                method = candidate
+                break
+        if method is None:
+            if callable(llm_obj):
+                method = llm_obj
+            else:
+                raise RuntimeError(
+                    "LLM call failed: injected llm has no design method"
+                )
+        if _accepts_kw(method, "n"):
+            result = _call_with_optional_client(
+                method, prompt, n=1, client=client
+            )
+        else:
+            result = _call_with_optional_client(
+                method, prompt, client=client
+            )
+        if isinstance(result, (list, tuple)):
+            if not result:
+                raise RuntimeError(
+                    "LLM call failed: design returned no candidates"
+                )
+            return _coerce_netlist(result[0])
+        return _coerce_netlist(result)
+    except RuntimeError as exc:
+        if str(exc).startswith("LLM call failed"):
+            raise
+        raise _llm_error(exc) from exc
+    except Exception as exc:  # noqa: BLE001 - any LLM failure is visible
+        raise _llm_error(exc) from exc
+
+
+def _safe_team_call(fn: Any, arg: Any, emit: Any, agent: str) -> Any:
+    """Run one designer; on failure emit a ``failed`` event and
+    return the exception (mirrors ``design_ai._safe``). One designer
+    failing never sinks the team."""
+    try:
+        return fn(arg)
+    except Exception as exc:  # noqa: BLE001 - reported, not raised
+        emit(
+            {
+                "stage": "agent",
+                "agent": agent,
+                "state": "failed",
+                "message": str(exc)[:160],
+            }
+        )
+        return exc
+
+
+def design_team(
+    prompt: str,
+    *,
+    llm: Any = None,
+    simulator: Any = None,
+    run_sim: Any = None,
+    client: Any = None,
+    designers: int = 4,
+    on_event: Any = None,
+    target_ma: float | None = None,
+) -> DesignResult:
+    """Design a circuit as a team of strategists.
+
+    Runs the first ``designers`` entries of
+    :data:`CIRCUIT_DESIGNERS` in parallel (``ThreadPoolExecutor``,
+    like ``design_ai.propose_team``): each designer gets the goal
+    plus its strategy text, proposes one candidate, and every
+    candidate is simulated + verified by deterministic code. The
+    winner is picked by verdict rank (``_verdict_rank``; ties:
+    earliest designer) — the tuner score is emitted per designer
+    for the dock but never picks the winner (see the mismatch note
+    above :data:`CIRCUIT_DESIGNERS`). No tuning runs here.
+
+    ``on_event(dict)`` receives the team events in the
+    ``propose_team`` dialect, each with ``elapsed_s`` added:
+    ``team`` announcement, per-designer ``Designer <Name>`` working
+    (``stage: "agent"``) then done (``stage: "verify"``,
+    ``state: "done"``, ``calls``, ``physics: 1``, numeric ``score``)
+    or failed, ``Judge`` (``state: "done"``, winner's score,
+    ``"Winner: Designer <Name> (...)"``) and ``Physics`` (``state:
+    "done"``, ``"Verdict <V>: ..."``). A failing designer is
+    reported, not fatal; if every designer fails, raises
+    ``RuntimeError("LLM call failed: ...")``.
+    """
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("design requires a non-empty goal string")
+    timer = _Timer()
+    raw_emit = on_event or (lambda e: None)
+
+    def emit(event: dict) -> None:
+        raw_emit({**event, "elapsed_s": round(timer.elapsed(), 3)})
+
+    picked = CIRCUIT_DESIGNERS[
+        : max(1, min(int(designers), len(CIRCUIT_DESIGNERS)))
+    ]
+    emit(
+        {
+            "stage": "model",
+            "agent": "team",
+            "message": f"{len(picked)} designers proposing in parallel: "
+            + ", ".join(name for name, _ in picked),
+        }
+    )
+    emit(
+        {
+            "stage": "verify",
+            "agent": "Physics",
+            "state": "working",
+            "message": "Simulating each candidate\u2026",
+        }
+    )
+
+    def _run_designer(spec: tuple[str, str]) -> dict:
+        name, strategy = spec
+        agent = f"Designer {name}"
+        emit(
+            {
+                "stage": "agent",
+                "agent": agent,
+                "state": "working",
+                "message": strategy.replace("Strategy: ", ""),
+            }
+        )
+        candidate = _call_design_single(
+            llm, f"{prompt}\n\n{strategy}", client
+        )
+        report = analyze(candidate, simulator=simulator, run_sim=run_sim)
+        score = circuit_score(report, candidate, target_ma=target_ma)
+        emit(
+            {
+                "stage": "verify",
+                "agent": agent,
+                "state": "done",
+                "calls": 1,
+                "physics": 1,
+                "score": score,
+                "message": f"{len(candidate.components)} components "
+                f"\u2192 {_verdict_str(report)}, score {score:.1f}",
+            }
+        )
+        return {
+            "name": name,
+            "netlist": candidate,
+            "report": report,
+            "score": score,
+        }
+
+    with ThreadPoolExecutor(max_workers=len(picked)) as pool:
+        results = [
+            r
+            for r in pool.map(
+                lambda s: _safe_team_call(
+                    _run_designer, s, emit, f"Designer {s[0]}"
+                ),
+                picked,
+            )
+            if isinstance(r, dict)
+        ]
+    if not results:
+        raise RuntimeError(
+            "LLM call failed: every designer failed to return a "
+            "valid design."
+        )
+    # Winner by verdict rank, ties to the earliest designer (same
+    # rule as design()); the tuner score never reorders the pick.
+    order = {name: i for i, (name, _) in enumerate(picked)}
+    ranked = sorted(
+        results,
+        key=lambda r: (_verdict_rank(r["report"]), order[r["name"]]),
+    )
+    best = ranked[0]
+    board = ", ".join(
+        f"{r['name']} {r['score']:.1f}" for r in ranked
+    )
+    emit(
+        {
+            "stage": "verify",
+            "agent": "Judge",
+            "state": "done",
+            "score": best["score"],
+            "message": f"Winner: Designer {best['name']} ({board})",
+        }
+    )
+    emit(
+        {
+            "stage": "verify",
+            "agent": "Physics",
+            "state": "done",
+            "message": f"Verdict {_verdict_str(best['report'])}: "
+            + (
+                ", ".join(f.rule_id for f in best["report"].findings)
+                or "no rules fired"
+            ),
+        }
+    )
+    # Candidates/reports/scores stay in picked (designer) order, but a
+    # failed designer has no candidate at all — it is simply absent.
+    in_order = sorted(results, key=lambda r: order[r["name"]])
+    candidates = [r["netlist"] for r in in_order]
+    reports = [r["report"] for r in in_order]
+    scores = [r["score"] for r in in_order]
+    leaderboard = [
+        {
+            "name": r["name"],
+            "score": r["score"],
+            "verdict": _verdict_str(r["report"]),
+        }
+        for r in ranked
+    ]
+    return DesignResult(
+        netlist=best["netlist"],
+        report=best["report"],
+        candidates=candidates,
+        reports=reports,
+        scores=scores,
+        leaderboard=leaderboard,
     )
 
 
@@ -1245,19 +1714,22 @@ def run_image(
     yield emit("start", "pipeline", "pipeline started")
     yield emit("read", "reader", f"{N_CANDIDATES} readers transcribing the schematic in parallel")
 
-    def _read_once() -> Netlist:
+    def _read_once() -> tuple[Netlist, list[dict]]:
         try:
             return _call_read(llm, read_fn, image_bytes, client)
         except Exception as exc:  # noqa: BLE001 - wrapped below
             raise RuntimeError(f"LLM call failed: {exc}") from exc
 
     runs: list[Netlist] = []
+    unmodeled_runs: list[list[dict]] = []
     failures: list[str] = []
     with ThreadPoolExecutor(max_workers=N_CANDIDATES) as pool:
         futures = [pool.submit(_read_once) for _ in range(N_CANDIDATES)]
         for future in futures:
             try:
-                runs.append(future.result())
+                netlist, unmodeled = future.result()
+                runs.append(netlist)
+                unmodeled_runs.append(unmodeled)
             except Exception as exc:  # noqa: BLE001 - collected, raised below
                 failures.append(str(exc))
     if len(runs) < 2:
@@ -1273,6 +1745,20 @@ def run_image(
         yield emit("read", f"Reader {i}", f"failed: {msg[:120]}")
     consensus = consensus_netlists(runs)
     netlist = consensus.netlist
+    # Merge unmodeled parts across the parallel reads: dedupe by id
+    # (first note wins), drop any id that landed in the consensus
+    # netlist after all (a part modeled by the majority is modeled),
+    # sort by id so the order is deterministic.
+    consensus_ids = {c.id for c in netlist.components}
+    seen_unmodeled: set[str] = set()
+    unmodeled: list[dict] = []
+    for run_unmodeled in unmodeled_runs:
+        for part in run_unmodeled:
+            if part["id"] in consensus_ids or part["id"] in seen_unmodeled:
+                continue
+            seen_unmodeled.add(part["id"])
+            unmodeled.append(part)
+    unmodeled.sort(key=lambda p: p["id"])
     yield emit(
         "consensus",
         "reader",
@@ -1280,6 +1766,12 @@ def run_image(
         + (
             f"; {len(consensus.uncertain)} seen-once component(s) excluded"
             if consensus.uncertain
+            else ""
+        )
+        + (
+            f"; {len(unmodeled)} unmodeled part(s) noted: "
+            + ", ".join(p["id"] for p in unmodeled)
+            if unmodeled
             else ""
         ),
     )
@@ -1340,6 +1832,7 @@ def run_image(
         "netlist": netlist.model_dump(mode="json"),
         "repairs": repairs,
         "rounds": rounds,
+        "unmodeled": unmodeled,
     }
     yield done_event
     return PipelineResult(
@@ -1348,6 +1841,7 @@ def run_image(
         events=events,
         repairs=repairs,
         rounds=rounds,
+        unmodeled=unmodeled,
     )
 
 
@@ -1361,12 +1855,26 @@ def run_goal(
     run_sim: Any = None,
     max_rounds: int = MAX_REPAIR_ROUNDS,
     deadline_s: float = REPAIR_BUDGET_S,
+    team: bool = False,
+    designers: int = 4,
     **_ignored: Any,
 ) -> Any:
     """Design a circuit for ``goal`` (best-of-3, each verified),
     then repair while STOP. Generator yielding ``{stage, agent,
     message, elapsed_s}`` events; returns a ``PipelineResult`` as
     the generator's return value. Any LLM failure raises.
+
+    With ``team=True`` the design step runs :func:`design_team`
+    instead of :func:`design`: one strategist per
+    :data:`CIRCUIT_DESIGNERS` entry, each emitting its own
+    ``Designer <Name>`` working/done events plus ``Judge`` and
+    ``Physics``, so the dock shows one lane per designer. In team
+    mode the aggregate lowercase ``designer`` / ``verifier`` events
+    are dropped (they would duplicate the per-designer / ``Physics``
+    lanes) and the terminal ``data`` plus the returned
+    ``PipelineResult`` carry the ``leaderboard``. The terminal frame
+    itself is unchanged: ``event: "result"`` with the flat report
+    and ``done: true`` (dialect A, Option 1).
     """
     timer = _Timer()
     events: list[dict] = []
@@ -1377,28 +1885,53 @@ def run_goal(
         return event
 
     yield emit("start", "pipeline", "pipeline started")
-    yield emit("design", "designer", "designing circuit (best of 3)")
-    designed = design(
-        goal,
-        llm=design_fn if design_fn is not None else llm,
-        client=client,
-        simulator=simulator,
-        run_sim=run_sim,
-        n=N_CANDIDATES,
-    )
-    netlist, report = designed.netlist, designed.report
-    yield emit(
-        "design",
-        "designer",
-        f"best-of-{len(designed.candidates)}: verdict "
-        f"{_verdict_str(report)} ({len(report.findings)} finding(s))",
-    )
-    yield emit(
-        "verify",
-        "verifier",
-        f"verdict {_verdict_str(report)} "
-        f"({len(report.findings)} finding(s)): {_findings_text(report)}",
-    )
+    leaderboard: list[dict] = []
+    if team:
+        # Team events carry their own elapsed_s (design_team's
+        # clock); re-stamp them on this run's clock so the stream's
+        # elapsed_s stays non-decreasing.
+        team_events: list[dict] = []
+        designed = design_team(
+            goal,
+            llm=design_fn if design_fn is not None else llm,
+            client=client,
+            simulator=simulator,
+            run_sim=run_sim,
+            designers=designers,
+            on_event=team_events.append,
+        )
+        for team_event in team_events:
+            stamped = {
+                **team_event,
+                "elapsed_s": round(timer.elapsed(), 3),
+            }
+            events.append(stamped)
+            yield stamped
+        netlist, report = designed.netlist, designed.report
+        leaderboard = list(designed.leaderboard)
+    else:
+        yield emit("design", "designer", "designing circuit (best of 3)")
+        designed = design(
+            goal,
+            llm=design_fn if design_fn is not None else llm,
+            client=client,
+            simulator=simulator,
+            run_sim=run_sim,
+            n=N_CANDIDATES,
+        )
+        netlist, report = designed.netlist, designed.report
+        yield emit(
+            "design",
+            "designer",
+            f"best-of-{len(designed.candidates)}: verdict "
+            f"{_verdict_str(report)} ({len(report.findings)} finding(s))",
+        )
+        yield emit(
+            "verify",
+            "verifier",
+            f"verdict {_verdict_str(report)} "
+            f"({len(report.findings)} finding(s)): {_findings_text(report)}",
+        )
     repairs: list[str] = []
     rounds = 0
     if not _is_pass(report) and (llm is not None or design_fn is None):
@@ -1436,6 +1969,7 @@ def run_goal(
         "netlist": netlist.model_dump(mode="json"),
         "repairs": repairs,
         "rounds": rounds,
+        "leaderboard": leaderboard,
     }
     yield done_event
     return PipelineResult(
@@ -1444,4 +1978,5 @@ def run_goal(
         events=events,
         repairs=repairs,
         rounds=rounds,
+        leaderboard=leaderboard,
     )

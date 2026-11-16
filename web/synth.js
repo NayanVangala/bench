@@ -30,17 +30,26 @@
     l.state = ev.state || 'working';
     if (ev.message) l.msg = ev.message;
     if (typeof ev.score === 'number' && name !== 'Tuner') l.score = ev.score;
-    if (l.state !== 'working') l.t = (Date.now() - l.t0) / 1000;
+    if (l.state !== 'working') { l.t = (Date.now() - l.t0) / 1000; l.doneAt = Date.now(); }
     renderAgents();
   }
+  // Display name: the circuit pipeline sends lower-case agent names
+  // (reader, verifier); capitalise the first letter for the dock only,
+  // the lane key stays as-is so lookups keep working.
+  function dispName(n) { return n.charAt(0).toUpperCase() + n.slice(1); }
   function renderAgents() {
     var box = $('synth-agents');
     if (!box) return;
     if (!laneOrder.length) { box.innerHTML = '<p class="empty">Agents appear here as they start.</p>'; return; }
     box.innerHTML = laneOrder.map(function (n) {
       var l = lanes[n];
-      var t = l.state === 'working' ? (Date.now() - l.t0) / 1000 : l.t;
-      return '<div class="agent ' + l.state + (l.winner ? ' winner' : '') + '" title="' + esc(n + ': ' + l.msg) + '"><span class="dot"></span><span class="nm">' + esc(n) +
+      // Working lanes tick live from their own start. Finished lanes are
+      // often instant (Judge/Physics report 0.0s of their own time), so
+      // show when they finished relative to the run start instead.
+      var t = l.state === 'working' ? (Date.now() - l.t0) / 1000
+        : (t0 && l.doneAt ? (l.doneAt - t0) / 1000 : l.t);
+      var dn = dispName(n);
+      return '<div class="agent ' + l.state + (l.winner ? ' winner' : '') + '" title="' + esc(dn + ': ' + l.msg) + '"><span class="dot"></span><span class="nm">' + esc(dn) +
         '</span><span class="msg">' + esc(l.msg) + '</span><span class="sc">' + (l.score != null ? l.score.toFixed(1) + ' · ' : '') + t.toFixed(1) + 's</span></div>';
     }).join('');
   }
@@ -168,7 +177,7 @@
       clearInterval(timer);
       active = false;
       if (message) log(ok ? 'done' : 'error', message, ok ? 'ok' : 'err');
-      laneOrder.forEach(function (n) { var l = lanes[n]; if (l.state === 'working') { l.state = ok ? 'done' : 'failed'; l.t = (Date.now() - l.t0) / 1000; } });
+      laneOrder.forEach(function (n) { var l = lanes[n]; if (l.state === 'working') { l.state = ok ? 'done' : 'failed'; l.t = (Date.now() - l.t0) / 1000; l.doneAt = Date.now(); } });
       renderAgents(); renderStats();
       document.querySelectorAll('#synth-steps li').forEach(function (li) {
         if (li.className === 'running') li.className = ok ? 'done' : 'failed';

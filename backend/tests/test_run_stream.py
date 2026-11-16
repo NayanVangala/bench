@@ -11,8 +11,12 @@ streams cannot prove:
   parallel reads), the >= 2/3 consensus excludes a component seen
   in only 1 run (it lands in ``uncertain``, not in the netlist),
   and the terminal ``result`` event carries ``done: true``.
-* goal: ``llm.design`` is called 3 times (best-of-3) and the
-  returned netlist is the PASS candidate, not the first one.
+* goal: ``llm.design`` is called 4 times (one per strategist in
+  the design team, bench #8), the returned netlist is the PASS
+  candidate, not the first one, the Designer / Judge / Physics
+  progress events carry the dock dialect (``state`` / ``score`` /
+  ``calls`` / ``physics``), and the terminal ``result`` event
+  carries the ``leaderboard`` (winner first).
 
 No network, no LLM key, no ngspice: ``llm.read_schematic`` /
 ``llm.design`` are monkeypatched stubs and the simulator is the
@@ -175,14 +179,44 @@ def test_run_stream_image_three_reads_consensus_excludes_seen_once(
     assert any("C1" in u for u in result["uncertain"])
 
 
-def test_run_stream_goal_best_of_three_picks_pass_candidate(
+def test_run_stream_image_result_carries_unmodeled(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """3 design calls; the returned netlist is the PASS candidate,
-    not the first (STOP) one."""
+    """The server's final ``result`` event must carry ``unmodeled``:
+    the pipeline's terminal event is skipped by ``_run_stream``, so
+    only the ``done`` branch can forward it (regression: it was
+    silently dropped, and the UI read a field that never arrived)."""
+    unmodeled = [{"id": "U1", "type": "IC", "note": "nRF52"}]
+    good = _good_netlist()
+
+    def fake_read(image_bytes, client=None):
+        return (good, unmodeled)
+
+    monkeypatch.setattr(llm_module, "read_schematic", fake_read)
+    frames = _collect(
+        "image", image_bytes=b"\x89PNG fake schematic", filename="s.png"
+    )
+    result = _result(frames)
+    assert result["done"] is True
+    assert result["verdict"] == "PASS"
+    assert result["unmodeled"] == unmodeled
+
+
+def test_run_stream_goal_team_picks_pass_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """4 design calls (one per team strategist); the returned
+    netlist is the PASS candidate, not the first (STOP) one; the
+    Designer / Judge / Physics progress events carry the dock
+    dialect and the terminal result carries the leaderboard."""
     designs: list[str] = []
     script = iter(
-        [_overcurrent_netlist(), _overcurrent_netlist(), _good_netlist()]
+        [
+            _overcurrent_netlist(),
+            _overcurrent_netlist(),
+            _good_netlist(),
+            _good_netlist(),
+        ]
     )
 
     def fake_design(goal, client=None):
@@ -193,10 +227,36 @@ def test_run_stream_goal_best_of_three_picks_pass_candidate(
 
     frames = _collect("goal", goal="9V LED circuit, red LED, 15 mA")
 
-    # Best-of-3: llm.design called once per candidate.
-    assert len(designs) == 3
-    assert all(g == "9V LED circuit, red LED, 15 mA" for g in designs)
+    # Team of 4: llm.design called once per strategist, each with the
+    # goal plus its strategy text.
+    assert len(designs) == 4
+    assert all(g.startswith("9V LED circuit, red LED, 15 mA") for g in designs)
     assert [f for f in frames if f["event"] == "error"] == []
+    progress = [f["data"] for f in frames if f["event"] == "progress"]
+    # Dock dialect: per-designer done events carry state/score/calls.
+    designer_done = [
+        d
+        for d in progress
+        if d["agent"].startswith("Designer ")
+        and d.get("state") == "done"
+    ]
+    assert len(designer_done) == 4
+    assert all(
+        isinstance(d.get("score"), (int, float))
+        and d.get("calls") == 1
+        and d.get("physics") == 1
+        for d in designer_done
+    )
+    judge = [d for d in progress if d["agent"] == "Judge"]
+    assert len(judge) == 1 and judge[0].get("state") == "done"
+    assert "Winner: Designer" in judge[0]["message"]
+    physics_done = [
+        d
+        for d in progress
+        if d["agent"] == "Physics" and d.get("state") == "done"
+    ]
+    assert len(physics_done) == 1
+    assert physics_done[0]["message"].startswith("Verdict PASS")
     result = _result(frames)
     assert result["done"] is True
     assert result["mock"] is False
@@ -205,3 +265,13 @@ def test_run_stream_goal_best_of_three_picks_pass_candidate(
     used = {c["id"]: c for c in result["netlist_used"]["components"]}
     assert used["R1"]["value"] == 470.0
     assert result["findings"] == []
+    # Leaderboard: winner first, one entry per designer.
+    board = result["leaderboard"]
+    assert len(board) == 4
+    assert board[0]["verdict"] == "PASS"
+    assert {b["name"] for b in board} == {
+        "Faithful",
+        "Simple",
+        "Safe",
+        "Efficient",
+    }

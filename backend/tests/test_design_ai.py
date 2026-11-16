@@ -84,3 +84,29 @@ def test_team_survives_failing_designers():
     client = SeqClient({"safety first": good})  # the other three return junk twice
     d = design_ai.propose_team("fiber", "lab link", client=client)
     assert d["elements"][0]["type"] == "laser"
+
+
+def test_team_analysts_use_vision_model(monkeypatch):
+    """Analyst image reads run on VISION_MODEL; designers stay on Haiku.
+
+    The fake records the ``model`` kwarg of every messages.create call,
+    so the analyst calls (prompt contains "analyst for a") must carry
+    the vision model while the designer calls carry Haiku.
+    """
+    monkeypatch.setenv("VISION_MODEL", "claude-sonnet-5-5")
+    good = (FIX / "optics_good.json").read_text()
+    client = SeqClient({"faithful": good, "fewest parts": good, "safety first": good, "as much power": good})
+    # SeqClient.create records only prompt text, not kwargs; wrap it.
+    seen = []
+    orig_create = client.create
+
+    def recording_create(**kw):
+        seen.append(kw)
+        return orig_create(**kw)
+
+    client.messages.create = recording_create
+    design_ai.propose_team("optics", "periscope", b"\x89PNG\r\n\x1a\n" + b"0" * 32, client=client)
+    analyst_models = {kw.get("model") for kw in seen if "analyst for a" in str(kw.get("messages", ""))}
+    designer_models = {kw.get("model") for kw in seen if "analyst for a" not in str(kw.get("messages", ""))}
+    assert analyst_models == {"claude-sonnet-5-5"}
+    assert designer_models == {"claude-haiku-5-5"}

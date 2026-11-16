@@ -198,7 +198,9 @@ def test_run_stream_image_result_carries_unmodeled(
     )
     result = _result(frames)
     assert result["done"] is True
-    assert result["verdict"] == "PASS"
+    # Unmodeled parts cap the verdict at WARN (PASS would be a lie
+    # about a circuit the model could not fully simulate).
+    assert result["verdict"] == "WARN"
     assert result["unmodeled"] == unmodeled
 
 

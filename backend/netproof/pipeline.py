@@ -84,7 +84,8 @@ Pipeline contract (``backend/tests/test_consensus.py``)
 -------------------------------------------------------
 ``consensus_netlists(runs)`` (aliases: ``consensus``,
 ``build_consensus``, ``run_consensus``, ``merge_candidates``) merges
-a list of ``Netlist`` runs (normally 3 transcriptions) into
+a list of ``Netlist`` runs (``N_CANDIDATES`` transcriptions: 3 by
+default, 5 in production via ``NETPROOF_AGENTS``) into
 ``(netlist, uncertain)``. Semantics, pinned by that file's reference
 implementation:
 
@@ -95,11 +96,13 @@ implementation:
   cannot break the relabelling). Ground ``"0"`` is never renamed.
   The accepted netlist reports nodes in the first run's original
   labels, so an all-agree input comes back literally unchanged.
-* A component id seen in >= 2 runs is included; seen in exactly 1
-  run it is ``uncertain`` (a sorted list of plain component ids)
-  and excluded from the netlist.
-* Type: majority type among the runs containing the id wins (2 vs 1).
-  A 1-1-1 type tie (no majority) is uncertain and excluded.
+* A component id seen by a majority of the runs is included (2 of 3,
+  3 of 5; never fewer than 2); seen by fewer than a majority it is
+  ``uncertain`` (a sorted list of plain component ids) and excluded
+  from the netlist.
+* Type: majority type among the runs containing the id wins.
+  A tie with no majority (e.g. 1-1-1 in 3 runs) is uncertain and
+  excluded.
 * Value: voted on among the runs carrying the winning type only, so
   a minority type's value can never leak in. A value held by
   strictly more runs than any other value (and by >= 2 runs) wins;
@@ -115,16 +118,20 @@ Other entry points (original brief)
 * ``run_image(image_bytes, ...)`` / ``run_goal(goal, ...)`` --
   generators yielding ``{stage, agent, message, elapsed_s}`` events
   (same shape as ``run_pipeline``). ``run_image`` transcribes the
-  schematic 3 times in parallel (``ThreadPoolExecutor``) and merges
-  with ``consensus_netlists``; a read failure never produces a
-  guessed netlist, and fewer than 2 successful reads raises.
+  schematic ``N_CANDIDATES`` times in parallel
+  (``ThreadPoolExecutor``; 3 by default, 5 in production via
+  ``NETPROOF_AGENTS``) and merges with ``consensus_netlists``; a
+  read failure never produces a guessed netlist, and fewer than 2
+  successful reads raises.
   Unmodeled parts reported by any read are merged (deduped by id,
   first note wins, ids that land in the consensus netlist dropped)
   into ``PipelineResult.unmodeled`` (``[{id, type, note}]``) and the
-  terminal event's ``data``.
-  ``run_goal`` designs best-of-3, then repairs while STOP. Both
-  return a ``PipelineResult`` as the generator's return value
-  (``StopIteration.value``).
+  terminal event's ``data``. When >= 1 unmodeled part is present the
+  final verdict is capped at WARN (PASS becomes WARN; STOP stays
+  STOP; see ``_cap_verdict_for_unmodeled``).
+  ``run_goal`` designs best-of-``N_CANDIDATES``, then repairs while
+  STOP. Both return a ``PipelineResult`` as the generator's return
+  value (``StopIteration.value``).
 * ``check_netlist(netlist, ...) -> Report`` -- verify with no LLM
   call (server docstring shape; ``mock=True`` returns the ERC-only
   report with no simulation).
@@ -212,7 +219,7 @@ __all__ = [
 # Constants
 # ---------------------------------------------------------------------------
 
-#: Transcriptions / designs per consensus / best-of-3 round.
+#: Transcriptions / designs per consensus / best-of-N round.
 # Readers / designers per round. 3 locally and in tests; production can run a
 # bigger team cheaply (Haiku), e.g. NETPROOF_AGENTS=5 in render.yaml.
 N_CANDIDATES = max(1, int(os.environ.get("NETPROOF_AGENTS", "3") or 3))
@@ -220,7 +227,7 @@ N_CANDIDATES = max(1, int(os.environ.get("NETPROOF_AGENTS", "3") or 3))
 MAX_REPAIR_ROUNDS = 3
 REPAIR_BUDGET_S = 90.0
 
-#: Verdict rank for best-of-3: lower is better.
+#: Verdict rank for best-of-N: lower is better.
 _VERDICT_RANK = {"PASS": 0, "WARN": 1, "STOP": 2}
 
 
@@ -260,8 +267,9 @@ class ConsensusResult:
     """Result of :func:`consensus_netlists`.
 
     Unpacks as ``(netlist, uncertain)``. ``uncertain`` is a sorted
-    list of plain component ids seen in only 1 run (or with no type
-    majority). ``runs`` holds the coerced input runs.
+    list of plain component ids seen in fewer than a majority of the
+    runs (or with no type majority). ``runs`` holds the coerced input
+    runs.
     """
 
     netlist: Netlist
@@ -464,6 +472,45 @@ def _with_uncertain(report: Report, extra: Any) -> Report:
         power=dict(report.power),
         netlist_used=report.netlist_used,
         uncertain=[*report.uncertain, *[str(n) for n in extra]],
+    )
+
+
+def _cap_verdict_for_unmodeled(report: Report, unmodeled: list[dict]) -> Report:
+    """Cap a ``run_image`` verdict at WARN when parts were unmodeled.
+
+    ``ir.Report`` derives its verdict from its findings, so the cap
+    is a WARN finding, not a verdict override: with >= 1 unmodeled
+    part a PASS becomes WARN (the finding names every part), a WARN
+    stays WARN, and a STOP stays STOP (a STOP finding still outranks
+    the WARN). The finding is only added when it changes the verdict,
+    so a STOP / WARN report keeps exactly the findings the rules
+    produced. Applied at the end of :func:`run_image`, after the
+    repair loop, so no repair round is ever spent on a verdict the
+    repairer cannot fix (unmodeled parts are not in the netlist).
+    """
+    if not unmodeled or _verdict_str(report) != "PASS":
+        return report
+    parts = ", ".join(
+        f"{p['id']} ({p['type']})" if p.get("type") else p["id"]
+        for p in unmodeled
+    )
+    capped = Finding(
+        severity=Severity.WARN,
+        rule_id="UNMODELED_PART",
+        component_ids=[p["id"] for p in unmodeled],
+        message=(
+            f"{parts} seen on the schematic but the circuit model "
+            "cannot simulate them; verdict capped at WARN"
+        ),
+    )
+    return Report(
+        verdict=report.verdict,
+        findings=[*report.findings, capped],
+        node_voltages=dict(report.node_voltages),
+        branch_currents=dict(report.branch_currents),
+        power=dict(report.power),
+        netlist_used=report.netlist_used,
+        uncertain=list(report.uncertain),
     )
 
 
@@ -916,14 +963,16 @@ def _majority_or_median(values: list[float]) -> float:
 
 
 def consensus_netlists(runs: list[Netlist] | Netlist) -> ConsensusResult:
-    """Merge ``runs`` (normally 3 transcriptions) into one netlist.
+    """Merge ``runs`` (``N_CANDIDATES`` transcriptions: 3 by default,
+    5 in production via ``NETPROOF_AGENTS``) into one netlist.
 
     Returns a ``ConsensusResult`` (unpacks as ``(netlist,
-    uncertain)``). Per component id: seen in >= 2 runs it is
-    included with the majority type and the majority/median value
-    voted among the winning-type runs only; seen in exactly 1 run,
-    or with no type majority (e.g. 1-1-1), it is ``uncertain`` and
-    excluded. Output nodes use the first run's original labels.
+    uncertain)``). Per component id: seen by a majority of the runs
+    it is included with the majority type and the majority/median
+    value voted among the winning-type runs only; seen by fewer than
+    a majority, or with no type majority (e.g. 1-1-1), it is
+    ``uncertain`` and excluded. Output nodes use the first run's
+    original labels.
     """
     if isinstance(runs, Netlist):
         runs = [runs]
@@ -1014,7 +1063,7 @@ merge_candidates = consensus_netlists
 
 
 # ---------------------------------------------------------------------------
-# Design: best-of-3
+# Design: best-of-N
 # ---------------------------------------------------------------------------
 
 
@@ -1693,12 +1742,13 @@ def run_image(
     deadline_s: float = REPAIR_BUDGET_S,
     **_ignored: Any,
 ) -> Any:
-    """Transcribe a schematic image (3 parallel reads, >= 2/3
-    consensus), verify by simulation, repair while STOP. Generator
-    yielding ``{stage, agent, message, elapsed_s}`` events; returns
-    a ``PipelineResult`` as the generator's return value. Fewer than
-    2 successful reads raises; an LLM failure raises, never a
-    guessed netlist.
+    """Transcribe a schematic image (``N_CANDIDATES`` parallel reads,
+    majority consensus), verify by simulation, repair while STOP.
+    Generator yielding ``{stage, agent, message, elapsed_s}`` events;
+    returns a ``PipelineResult`` as the generator's return value.
+    Fewer than 2 successful reads raises; an LLM failure raises,
+    never a guessed netlist. With >= 1 unmodeled part the final
+    verdict is capped at WARN (PASS becomes WARN; STOP stays STOP).
     """
     timer = _Timer()
     events: list[dict] = []
@@ -1764,7 +1814,7 @@ def run_image(
         "reader",
         f"consensus netlist: {len(netlist.components)} component(s)"
         + (
-            f"; {len(consensus.uncertain)} seen-once component(s) excluded"
+            f"; {len(consensus.uncertain)} below-majority component(s) excluded"
             if consensus.uncertain
             else ""
         )
@@ -1777,8 +1827,8 @@ def run_image(
     )
     yield emit("simulate", "verifier", "simulating and checking rules")
     uncertain_notes = [
-        f"{cid}: seen in only 1 of {len(runs)} schematic reads; "
-        "excluded from the consensus netlist"
+        f"{cid}: seen in fewer than a majority of the {len(runs)} "
+        "schematic reads; excluded from the consensus netlist"
         for cid in consensus.uncertain
     ]
     report = analyze(
@@ -1815,6 +1865,11 @@ def run_image(
         netlist, report = result.netlist, result.report
         rounds = result.rounds
         repairs = [r for rs in result.reasons for r in rs]
+    # Unmodeled parts cap the verdict at WARN: a PASS becomes WARN
+    # (a WARN finding names the parts), STOP / WARN are unchanged.
+    # Capped here, after repair, so no round is spent chasing a
+    # verdict the repairer cannot fix.
+    report = _cap_verdict_for_unmodeled(report, unmodeled)
     done_event = emit(
         "done",
         "pipeline",
@@ -1859,10 +1914,10 @@ def run_goal(
     designers: int = 4,
     **_ignored: Any,
 ) -> Any:
-    """Design a circuit for ``goal`` (best-of-3, each verified),
-    then repair while STOP. Generator yielding ``{stage, agent,
-    message, elapsed_s}`` events; returns a ``PipelineResult`` as
-    the generator's return value. Any LLM failure raises.
+    """Design a circuit for ``goal`` (best-of-``N_CANDIDATES``, each
+    verified), then repair while STOP. Generator yielding ``{stage,
+    agent, message, elapsed_s}`` events; returns a ``PipelineResult``
+    as the generator's return value. Any LLM failure raises.
 
     With ``team=True`` the design step runs :func:`design_team`
     instead of :func:`design`: one strategist per
@@ -1910,7 +1965,7 @@ def run_goal(
         netlist, report = designed.netlist, designed.report
         leaderboard = list(designed.leaderboard)
     else:
-        yield emit("design", "designer", "designing circuit (best of 3)")
+        yield emit("design", "designer", f"designing circuit (best of {N_CANDIDATES})")
         designed = design(
             goal,
             llm=design_fn if design_fn is not None else llm,

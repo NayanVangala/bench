@@ -568,6 +568,7 @@
           </ol>
           <p class="empty mono" id="pipeline-note">Idle.</p>
           <p id="uncertain" class="empty"></p>
+          <p id="unmodeled" class="empty"></p>
         </section>
       </div>
 
@@ -904,6 +905,20 @@
     $('uncertain').textContent = unc.length ? 'Uncertain (from Report): ' + unc.join('; ') : '';
   }
 
+  // Parts the reader saw but the circuit model cannot simulate (ICs,
+  // transistors, crystals, connectors). Set by applyResult() from the
+  // run_image terminal event's data.unmodeled ([{id, type, note}]).
+  var lastUnmodeled = [];
+  function updateUnmodeled() {
+    var el = $('unmodeled');
+    if (!el) return;
+    if (!lastUnmodeled.length) { el.textContent = ''; return; }
+    el.textContent = 'Not simulated: ' + lastUnmodeled.map(function (p) {
+      var s = (p.id || '?') + ' ' + (p.type || 'part');
+      return p.note ? s + ' (' + p.note + ')' : s;
+    }).join(', ');
+  }
+
   // Key measured numbers for the verdict panel, pulled from the Report
   // only: LED current (branch current, else the LED finding's message),
   // first resistor power, supply-rail node voltage.
@@ -1186,6 +1201,10 @@
     var incoming = data.netlist || data.netlist_used || report.netlist_used || report.netlist;
     if (incoming) { netlist = normNetlist(incoming); }
     if (data.findings || report.findings) { findings = data.findings || report.findings; updateUncertain(); }
+    if (Array.isArray(data.unmodeled) || Array.isArray(report.unmodeled)) {
+      lastUnmodeled = (data.unmodeled || report.unmodeled).filter(function (p) { return p && p.id; });
+      updateUnmodeled();
+    }
     if (data.verdict || report.verdict) {
       setVerdict(data.verdict || report.verdict, !!(data.mock || report.mock), data.verdict_note || data.note || report.verdict_note || '');
       checkCount++;
@@ -2017,7 +2036,7 @@
     var hash = m[1].replace(/[\s\r\n]+/g, ''); // tolerate line-wrapped pastes
     try { hash = decodeURIComponent(hash); } catch (e) { /* keep raw hash */ }
     clearError();
-    lastReport = null; findings = []; repairHistory = []; repairRound = 0;
+    lastReport = null; findings = []; repairHistory = []; repairRound = 0; lastUnmodeled = []; updateUnmodeled();
     // Hide any verdict: nothing is shown until the fresh /check
     // returns. #verdict is display:none without the .show class
     // (web/styles.css), and setVerdict() is the only thing that adds it.
@@ -2112,6 +2131,7 @@
     netlist = normNetlist(ex);
     findings = [];
     lastReport = null;
+    lastUnmodeled = []; updateUnmodeled();
     selectedId = null;
     renderNetlist();
     updateUncertain();

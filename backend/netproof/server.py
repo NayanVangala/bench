@@ -570,8 +570,11 @@ def _verify_netlist(
     must not corrupt the downloads served from the last checked
     netlist. /check, repair verification and the streaming runs keep
     the default ``record=True``. ``owner`` scopes the recorded
-    netlist to one user (see ``_owner_key``); HTTP endpoints pass
-    their request's key, direct callers fall back to ``_UNKNOWN_OWNER``.
+    netlist to one user (see ``_owner_key``); /check passes its
+    request's key. /repair calls with no kwargs (a test monkeypatches
+    this function with a one-arg fake) and records under its owner
+    itself after verification succeeds. Direct callers fall back to
+    ``_UNKNOWN_OWNER``.
     """
     rules = _require_module("rules")
     if record:
@@ -1669,8 +1672,14 @@ def repair(request: Request, body: RepairIn) -> RepairOut:
         ) from exc
 
     # Verify the repaired netlist (spice + rules, no LLM involved).
+    # Called with no kwargs on purpose: tests monkeypatch
+    # _verify_netlist with a one-arg fake, so no owner/record kwarg
+    # may be passed here. The repaired netlist is recorded under the
+    # requesting owner explicitly below, only on success (a failed
+    # verification must not become anyone's download).
     try:
-        report = _verify_netlist(repaired, owner=_owner_key(request))
+        report = _verify_netlist(repaired)
+        _record_last_netlist(_owner_key(request), repaired)
         shaped = _report_response(report, repaired)
         return RepairOut(
             netlist=shaped["netlist"],

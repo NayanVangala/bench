@@ -1201,10 +1201,10 @@
     var incoming = data.netlist || data.netlist_used || report.netlist_used || report.netlist;
     if (incoming) { netlist = normNetlist(incoming); }
     if (data.findings || report.findings) { findings = data.findings || report.findings; updateUncertain(); }
-    if (Array.isArray(data.unmodeled) || Array.isArray(report.unmodeled)) {
-      lastUnmodeled = (data.unmodeled || report.unmodeled).filter(function (p) { return p && p.id; });
-      updateUnmodeled();
-    }
+    // Unmodeled parts: a result without the field (e.g. /check, /repair,
+    // run_goal) clears the line, so a stale "Not simulated" never lingers.
+    lastUnmodeled = ((data.unmodeled || report.unmodeled) || []).filter(function (p) { return p && p.id; });
+    updateUnmodeled();
     if (data.verdict || report.verdict) {
       setVerdict(data.verdict || report.verdict, !!(data.mock || report.mock), data.verdict_note || data.note || report.verdict_note || '');
       checkCount++;

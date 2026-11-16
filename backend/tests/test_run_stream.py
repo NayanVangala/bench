@@ -175,6 +175,29 @@ def test_run_stream_image_three_reads_consensus_excludes_seen_once(
     assert any("C1" in u for u in result["uncertain"])
 
 
+def test_run_stream_image_result_carries_unmodeled(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The server's final ``result`` event must carry ``unmodeled``:
+    the pipeline's terminal event is skipped by ``_run_stream``, so
+    only the ``done`` branch can forward it (regression: it was
+    silently dropped, and the UI read a field that never arrived)."""
+    unmodeled = [{"id": "U1", "type": "IC", "note": "nRF52"}]
+    good = _good_netlist()
+
+    def fake_read(image_bytes, client=None):
+        return (good, unmodeled)
+
+    monkeypatch.setattr(llm_module, "read_schematic", fake_read)
+    frames = _collect(
+        "image", image_bytes=b"\x89PNG fake schematic", filename="s.png"
+    )
+    result = _result(frames)
+    assert result["done"] is True
+    assert result["verdict"] == "PASS"
+    assert result["unmodeled"] == unmodeled
+
+
 def test_run_stream_goal_best_of_three_picks_pass_candidate(
     monkeypatch: pytest.MonkeyPatch,
 ):

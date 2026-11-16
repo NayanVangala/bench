@@ -855,6 +855,7 @@ async def _run_stream(
             report_data["repairs"] = list(result.repairs)
             report_data["rounds"] = result.rounds
             report_data["round"] = result.rounds
+            report_data["unmodeled"] = list(getattr(result, "unmodeled", []) or [])
             report_data["done"] = True
             yield _sse_event({"event": "result", "data": report_data})
             return

@@ -525,11 +525,22 @@ def test_run_image_returns_unmodeled_parts(sim):
     assert result.unmodeled == sorted(UNMODELED_PARTS, key=lambda p: p["id"])
     assert {c.id for c in result.netlist.components} == {"V1", "R1", "D1"}
     assert "U1" not in {c.id for c in result.netlist.components}
-    assert result.report.verdict is Verdict.PASS
+    # Unmodeled parts cap the verdict at WARN: the simulated circuit
+    # is clean, but the run must not report a PASS it cannot stand
+    # behind (bench: unmodeled-parts verdict cap).
+    assert result.report.verdict is Verdict.WARN
+    capped = [
+        f for f in result.report.findings if f.rule_id == "UNMODELED_PART"
+    ]
+    assert len(capped) == 1
+    assert capped[0].severity is Severity.WARN
+    assert capped[0].component_ids == ["J1", "Q1", "U1", "Y1"]
+    assert "U1" in capped[0].message and "capped at WARN" in capped[0].message
     # The terminal event carries the same list for the UI.
     done = [e for e in events if e.get("event") == "result"]
     assert len(done) == 1
     assert done[0]["data"]["unmodeled"] == result.unmodeled
+    assert done[0]["data"]["verdict"] == "WARN"
     # ... and the consensus event names them.
     assert any(
         "U1" in e["message"] and "unmodeled" in e["message"]
@@ -545,6 +556,70 @@ def test_run_image_unmodeled_empty_when_everything_modeled(sim):
     )
     assert result.unmodeled == []
     assert result.report.verdict is Verdict.PASS
+
+
+def test_run_image_unmodeled_stop_stays_stop(sim):
+    """STOP + unmodeled parts stays STOP: the cap only ever lowers a
+    PASS to WARN, and repair still runs its rounds against the real
+    STOP instead of being short-circuited by the cap."""
+
+    def read_fn(image_bytes, client=None):
+        return led_circuit(BAD_R), UNMODELED_PARTS
+
+    events, result = _drive_image(
+        run_image(
+            PNG_BYTES, read_fn=read_fn, llm=StubbornLLM(), simulator=sim
+        )
+    )
+    assert result.unmodeled == sorted(UNMODELED_PARTS, key=lambda p: p["id"])
+    assert result.report.verdict is Verdict.STOP
+    assert result.rounds == 3, "repair must still run against the real STOP"
+    assert not [
+        f for f in result.report.findings if f.rule_id == "UNMODELED_PART"
+    ], "cap must not add a finding when it does not change the verdict"
+    done = [e for e in events if e.get("event") == "result"]
+    assert len(done) == 1
+    assert done[0]["data"]["verdict"] == "STOP"
+
+
+class _WarnSimulator:
+    """Fake simulator returning a WARN report as-is (the simulator
+    seam accepts an ``ir.Report`` standing in for spice + rules)."""
+
+    def simulate(self, netlist: Netlist) -> Report:
+        return Report(
+            findings=[
+                Finding(
+                    severity=Severity.WARN,
+                    rule_id="LED_DIM",
+                    component_ids=["D1"],
+                    message=(
+                        "D1 current 0.005 A is below the "
+                        "0.010 A comfort level"
+                    ),
+                )
+            ],
+            netlist_used=netlist,
+        )
+
+
+def test_run_image_unmodeled_warn_stays_warn():
+    """WARN + unmodeled parts stays WARN with the rules findings
+    untouched: the cap adds its finding only when it turns a PASS
+    into a WARN."""
+
+    def read_fn(image_bytes, client=None):
+        return led_circuit(GOOD_R), UNMODELED_PARTS
+
+    events, result = _drive_image(
+        run_image(PNG_BYTES, read_fn=read_fn, simulator=_WarnSimulator())
+    )
+    assert result.unmodeled == sorted(UNMODELED_PARTS, key=lambda p: p["id"])
+    assert result.report.verdict is Verdict.WARN
+    assert [f.rule_id for f in result.report.findings] == ["LED_DIM"]
+    done = [e for e in events if e.get("event") == "result"]
+    assert len(done) == 1
+    assert done[0]["data"]["verdict"] == "WARN"
 
 
 # ---------------------------------------------------------------------------

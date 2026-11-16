@@ -1,0 +1,15 @@
+name: keep-warm
+
+# Ping the Render deployment every 10 minutes so the free instance stays warm.
+# Only during judging week; delete this workflow after judging ends.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping health endpoint
+        run: curl -fsS https://netproof-quyv.onrender.com/health

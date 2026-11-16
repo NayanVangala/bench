@@ -24,6 +24,8 @@
   function commit(dom) {
     document.body.setAttribute('data-committed', dom);
     $('mode-name').textContent = NAMES[dom];
+    var t = $('build-title');
+    if (t) t.placeholder = 'Untitled ' + NAMES[dom].toLowerCase();
     if (window.NetproofSetDomain) window.NetproofSetDomain(dom);
     if (dom === 'circuit') {
       var tab = $('tab-check');
@@ -33,6 +35,7 @@
 
   function newBuild() {
     document.body.removeAttribute('data-committed');
+    window.dispatchEvent(new CustomEvent('bench:new-build'));
     bubbles.forEach(function (b) {
       b.querySelector('[data-start-goal]').value = '';
       b.querySelector('[data-start-input]').value = '';
@@ -85,4 +88,5 @@
   });
 
   $('new-build-btn').addEventListener('click', newBuild);
+  window.NetproofStart = { commit: commit, newBuild: newBuild };
 })();

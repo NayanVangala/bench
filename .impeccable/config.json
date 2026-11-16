@@ -11,6 +11,15 @@
         ],
         "createdAt": "2026-11-15T20:11:06.578Z",
         "reason": "Claude: #preview is display:none until an upload sets its src (renderPreview); never shown empty"
+      },
+      {
+        "rule": "dark-glow",
+        "value": "*",
+        "files": [
+          "web/login.html"
+        ],
+        "createdAt": "2026-11-16T02:57:03.941Z",
+        "reason": "Claude: the only colored ring in login.html is the input :focus indicator (keyboard accessibility), not decoration"
       }
     ]
   }

@@ -378,6 +378,8 @@
 
   window.NetproofOptics = {
     onMove: onMove,
+    get: function () { return bench; },
+    load: function (b) { bench = JSON.parse(JSON.stringify(b)); report = null; check(); },
     activate: function () { if (!bench) loadExample('good'); else { renderAll(); show3d(); } }
   };
 })();

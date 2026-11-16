@@ -446,4 +446,9 @@ window.NetproofDesign = function (dom, onResult, onBlank) {
   $('fiber-pack-cta').addEventListener('click', buildPack);
   document.body.setAttribute('data-domain', 'circuit');
   window.NetproofSetDomain = setDomain;
+  // Saved builds (account.js): read the current link / load a saved one.
+  window.NetproofFiber = {
+    get: function () { return link; },
+    load: function (l) { link = JSON.parse(JSON.stringify(l)); report = null; check(); }
+  };
 })();

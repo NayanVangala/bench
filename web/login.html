@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Log in · bench.</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="styles.css">
+<style>
+  body { overflow: auto; display: grid; place-items: center; min-height: 100vh; padding: 24px 16px;
+         background-color: var(--stage);
+         background-image: linear-gradient(rgba(255,255,255,0.04) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.04) 1px, transparent 1px);
+         background-size: 25px 25px; }
+  .login-card { width: 100%; max-width: 400px; background: var(--panel); border-radius: 18px; padding: 28px; box-shadow: var(--shadow); }
+  .login-card h1 { margin: 0 0 4px; font-size: 30px; letter-spacing: -0.03em; }
+  .login-card .lede { margin: 0 0 20px; color: var(--muted); font-size: 14px; }
+  .tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; background: var(--card-2); border-radius: 12px; margin-bottom: 16px; }
+  .tabs button { border: 0; background: transparent; border-radius: 9px; padding: 8px; font-weight: 600; color: var(--muted); }
+  .tabs button[aria-selected="true"] { background: var(--card); color: var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,0.12); }
+  form { display: grid; gap: 10px; }
+  label { display: grid; gap: 4px; font-size: 12.5px; color: var(--muted); }
+  input { border: 1px solid var(--line-strong); border-radius: 10px; padding: 10px 12px; font-size: 14px; background: var(--input-bg); }
+  input:focus { outline: none; border-color: var(--focus); box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 20%, transparent); }
+  .or { display: flex; align-items: center; gap: 10px; color: var(--faint); font-size: 12px; margin: 16px 0; }
+  .or::before, .or::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
+  .oauth { display: grid; gap: 8px; }
+  .oauth a { display: flex; align-items: center; justify-content: center; gap: 8px; border: 1px solid var(--line-strong);
+             border-radius: 10px; padding: 10px; color: var(--ink); text-decoration: none; font-weight: 600; font-size: 14px; }
+  .oauth a:hover { background: var(--card-2); }
+  .msg { min-height: 20px; margin: 10px 0 0; font-size: 13px; color: var(--stop); }
+  .fine { margin: 16px 0 0; color: var(--faint); font-size: 12px; text-align: center; }
+</style>
+</head>
+<body>
+  <main class="login-card">
+    <h1>bench<span class="wordmark-dot">.</span></h1>
+    <p class="lede">Design circuits, fiber links and optics benches. Check them before you build.</p>
+    <div class="tabs" role="tablist">
+      <button type="button" role="tab" id="tab-login" aria-selected="true">Log in</button>
+      <button type="button" role="tab" id="tab-signup" aria-selected="false">Sign up</button>
+    </div>
+    <form id="auth-form" novalidate>
+      <label id="name-row" hidden>Name (optional)<input id="name" autocomplete="name" maxlength="200"></label>
+      <label>Email<input id="email" type="email" autocomplete="email" required></label>
+      <label>Password<input id="password" type="password" autocomplete="current-password" required minlength="8"></label>
+      <button type="submit" class="cta" id="submit">Log in</button>
+      <p class="msg" id="msg" role="alert"></p>
+    </form>
+    <div id="oauth-block" hidden>
+      <div class="or">or</div>
+      <div class="oauth">
+        <a id="google" href="/auth/google/start" hidden>Continue with Google</a>
+        <a id="github" href="/auth/github/start" hidden>Continue with GitHub</a>
+      </div>
+    </div>
+    <p class="fine">Your saved builds are private to your account.</p>
+  </main>
+<script>
+(function () {
+  'use strict';
+  function $(id) { return document.getElementById(id); }
+  var mode = 'login';
+  var ERRORS = {
+    oauth_state: 'Sign-in expired or was interrupted. Try again.',
+    oauth_failed: 'Sign-in was cancelled or failed.',
+    oauth_no_email: 'That account has no verified email address.'
+  };
+  var q = new URLSearchParams(location.search).get('error');
+  if (q) $('msg').textContent = ERRORS[q] || 'Sign-in failed.';
+  try {
+    var t = localStorage.getItem('netproof-theme');
+    if (t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches)) document.documentElement.setAttribute('data-theme', 'dark');
+  } catch (e) { /* no storage */ }
+
+  fetch('/auth/me').then(function (r) { if (r.ok) location.replace('/'); });
+  fetch('/auth/config').then(function (r) { return r.json(); }).then(function (c) {
+    $('google').hidden = !c.google;
+    $('github').hidden = !c.github;
+    $('oauth-block').hidden = !(c.google || c.github);
+  }).catch(function () {});
+
+  function setMode(m) {
+    mode = m;
+    $('tab-login').setAttribute('aria-selected', m === 'login' ? 'true' : 'false');
+    $('tab-signup').setAttribute('aria-selected', m === 'signup' ? 'true' : 'false');
+    $('name-row').hidden = m !== 'signup';
+    $('submit').textContent = m === 'login' ? 'Log in' : 'Create account';
+    $('password').autocomplete = m === 'login' ? 'current-password' : 'new-password';
+    $('msg').textContent = '';
+  }
+  $('tab-login').addEventListener('click', function () { setMode('login'); });
+  $('tab-signup').addEventListener('click', function () { setMode('signup'); });
+
+  $('auth-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    var email = $('email').value.trim(), password = $('password').value;
+    if (!email || !password) { $('msg').textContent = 'Enter your email and password.'; return; }
+    if (mode === 'signup' && password.length < 8) { $('msg').textContent = 'Use at least 8 characters for your password.'; return; }
+    $('submit').disabled = true;
+    try {
+      var body = { email: email, password: password };
+      if (mode === 'signup' && $('name').value.trim()) body.name = $('name').value.trim();
+      var res = await fetch(mode === 'login' ? '/auth/login' : '/auth/signup', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+      });
+      if (res.ok) { location.replace('/'); return; }
+      var data = {};
+      try { data = await res.json(); } catch (e2) { /* non-JSON */ }
+      $('msg').textContent = data.message || 'Something went wrong (' + res.status + ').';
+    } catch (err) {
+      $('msg').textContent = 'Network error: ' + err.message;
+    } finally {
+      $('submit').disabled = false;
+    }
+  });
+})();
+</script>
+</body>
+</html>

@@ -1861,6 +1861,23 @@ async def download_bom_csv() -> PlainTextResponse:
 # /health or GET "/". Serves web/index.html's dynamic import
 # ./3d/main3d.js (and the rest of web/3d/) as same-origin files.
 # ---------------------------------------------------------------------------
+# Accounts + saved builds (accounts.py). Routes go before the static mount
+# below, which would otherwise catch every path; the login gate only acts
+# when AUTH_REQUIRED=1.
+from . import accounts as _accounts  # noqa: E402
+
+app.include_router(_accounts.router)
+app.middleware("http")(_accounts.auth_gate)
+
+
+@app.get("/login", include_in_schema=False)
+async def login_page() -> Any:
+    page = _PROJECT_ROOT / "web" / "login.html"
+    if not page.is_file():
+        page = Path.cwd() / "web" / "login.html"
+    return FileResponse(page, media_type="text/html")
+
+
 _WEB_DIR = next(
     (c for c in _WEB_DIR_CANDIDATES if c.is_dir()),
     _PROJECT_ROOT / "web",

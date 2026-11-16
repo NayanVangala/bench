@@ -1,5 +1,12 @@
-# Render Blueprint: one free Docker web service (FastAPI + ngspice, serves web/).
+# Render Blueprint: the bench. web service (FastAPI + ngspice, serves web/)
+# plus a Postgres database for accounts and saved builds.
 # Render injects PORT at runtime; the Dockerfile CMD binds to it.
+databases:
+  - name: bench-db
+    plan: free
+    databaseName: bench
+    user: bench
+
 services:
   - type: web
     name: netproof
@@ -10,11 +17,28 @@ services:
     healthCheckPath: /health
     autoDeploy: true
     envVars:
-      # Set in the Render dashboard on first deploy (never committed).
+      - key: DATABASE_URL
+        fromDatabase:
+          name: bench-db
+          property: connectionString
+      - key: SECRET_KEY          # signs login cookies
+        generateValue: true
+      - key: AUTH_REQUIRED       # every page/API needs a login
+        value: "1"
+      # Set in the Render dashboard (never committed).
       # LLM_PROVIDER: "anthropic" or "gemini"; fill in the matching key.
       - key: LLM_PROVIDER
         sync: false
       - key: ANTHROPIC_API_KEY
         sync: false
       - key: GEMINI_API_KEY
+        sync: false
+      # Optional sign-in providers; leave empty to hide the button.
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GITHUB_CLIENT_ID
+        sync: false
+      - key: GITHUB_CLIENT_SECRET
         sync: false

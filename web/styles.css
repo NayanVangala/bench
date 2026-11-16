@@ -290,6 +290,31 @@ body:not([data-committed]) .status-chip { display: none !important; }
 .bubble.active .bubble-body { display: flex; }
 .bubble-body .btn-row { margin-top: 0; justify-content: space-between; }
 .bubble-or { margin-top: 6px; }
+/* Account: avatar menu, login link, saved-builds dialog */
+.user-menu { position: relative; }
+.avatar { width: 32px; height: 32px; border-radius: 50%; border: 0; background: var(--accent); color: var(--accent-ink); font-weight: 700; }
+.menu { position: absolute; top: calc(100% + 8px); left: 0; z-index: 40; min-width: 200px; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); padding: 6px; display: grid; }
+.menu[hidden] { display: none; }
+.menu button { border: 0; background: transparent; text-align: left; padding: 8px 10px; border-radius: 8px; font-size: 13.5px; }
+.menu button:hover, .menu button:focus-visible { background: var(--card-2); }
+.menu-email { margin: 4px 10px 6px; font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+.login-link { text-decoration: none; }
+.title-input { flex: 1; min-width: 0; border: 1px solid transparent; border-radius: 9px; background: transparent;
+  padding: 6px 8px; font-size: 14px; font-weight: 600; color: var(--ink); }
+.title-input:hover { border-color: var(--line); }
+.title-input:focus { outline: none; border-color: var(--focus); background: var(--input-bg); }
+.row-del.armed { color: #fff; background: var(--stop); border-radius: 7px; font-size: 12px; padding: 3px 8px; }
+.builds-dialog { width: min(560px, calc(100vw - 32px)); max-height: 80vh; border: 0; border-radius: 16px; padding: 18px;
+  background: var(--panel); color: var(--ink); box-shadow: var(--shadow); }
+.builds-dialog::backdrop { background: rgba(10, 12, 16, 0.55); }
+.builds-dialog h2 { margin: 0; font-size: 18px; }
+.builds-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 8px; overflow-y: auto; }
+.builds-list li { display: flex; align-items: center; gap: 10px; border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; }
+.builds-list li.empty { border: 0; color: var(--muted); }
+.b-main { flex: 1; min-width: 0; display: grid; }
+.b-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.b-meta { font-size: 11.5px; color: var(--muted); }
 .mode-bar { display: none; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 12px; }
 .mode-name { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
 

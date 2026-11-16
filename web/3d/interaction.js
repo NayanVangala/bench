@@ -392,6 +392,18 @@ export function setupInteraction(scene, camera, renderer, meshesById, callbacks)
     scene.add(outline);
   }
 
+  // Swapping in a new set of parts (rebuild, another mode): keep the
+  // selection outline on the same part if it still exists, else drop it.
+  // A stale outline would stay around a part that is no longer on the bench.
+  function replaceMeshes(next) {
+    setMeshes(next);
+    if (selectedId == null) return;
+    clearHighlight();
+    selectedRoot = meshMap.get(selectedId) || null;
+    if (selectedRoot) applyHighlight(selectedRoot, selectedId);
+    else selectedId = null;
+  }
+
   function clearHighlight() {
     if (outline) {
       scene.remove(outline);
@@ -883,7 +895,7 @@ export function setupInteraction(scene, camera, renderer, meshesById, callbacks)
     select,
     deselect,
     getSelectedId() { return selectedId; },
-    setMeshes,
+    setMeshes: replaceMeshes,
     setControls(next) { controls = next || null; },
     refreshWires,
     focusCallout,

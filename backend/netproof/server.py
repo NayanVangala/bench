@@ -1980,6 +1980,16 @@ async def download_bom_csv() -> PlainTextResponse:
 from . import accounts as _accounts  # noqa: E402
 
 app.include_router(_accounts.router)
+
+
+@app.middleware("http")
+async def _revalidate_static(request: Request, call_next):
+    """Browsers must re-check page code on every visit (ETag makes that a
+    cheap 304), so a deploy is never hidden behind a stale cached module."""
+    response = await call_next(request)
+    if request.method == "GET" and request.url.path.endswith((".js", ".css", ".html", "/")):
+        response.headers.setdefault("Cache-Control", "no-cache")
+    return response
 app.middleware("http")(_accounts.auth_gate)
 
 

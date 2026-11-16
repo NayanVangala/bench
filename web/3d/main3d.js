@@ -205,6 +205,7 @@ import { buildCircuit } from './components.js';
 import { partModelsReady } from './models.js';
 import { buildFiberLink } from './fiber3d.js';
 import { buildOpticsBench } from './optics3d.js';
+import { createLiveFx } from './livefx.js';
 import { setupInteraction } from './interaction.js';
 import {
   initOverlays,
@@ -581,6 +582,8 @@ export function init3D(container, callbacks = {}, options = {}) {
   // -- Circuit (./components.js). ------------------------------------------
   let circuit = null; // { group, nodePositions, meshesById: Map } | null
   let refMesh = null; // floating source image during synthesis (showReference)
+  const liveFx = createLiveFx(scene);
+  let lastTopology = null; // camera resets only when parts/connections change
   const REF_HEIGHT = 7;
   let interactionHandle = null;
 
@@ -595,6 +598,7 @@ export function init3D(container, callbacks = {}, options = {}) {
       const nodesById = {};
       for (const row of displayedNetlist) nodesById[row.id] = row.nodes.slice();
       updateOverlays(displayedReport, meshesObject(), { nodesById });
+      if (!displayedBuilder) liveFx.updateCircuit(circuit, displayedReport, displayedNetlist);
     } catch (error) {
       onError(error);
     }
@@ -875,6 +879,7 @@ export function init3D(container, callbacks = {}, options = {}) {
   }
 
   function clearCircuit() {
+    liveFx.clear();
     if (!circuit) return;
     for (const id of circuit.meshesById.keys()) view.components.delete(id);
     scene.remove(circuit.group);
@@ -932,8 +937,15 @@ export function init3D(container, callbacks = {}, options = {}) {
     // there is nothing to frame. A plain updateReport never comes
     // through here, so it never resets the camera.
     try {
-      if (view && typeof view.resetToIso === 'function') view.resetToIso();
-      else resetViewInternal(); // scene.js predating resetToIso
+      // Same parts and connections as last time (a value tweak, a tune, a
+      // drag): keep the user's camera. A new drawing re-frames.
+      const topology = JSON.stringify([...built.meshesById.keys()]) +
+        (displayedBuilder ? '' : JSON.stringify(displayedNetlist.map((r) => [r.id, r.type, r.nodes])));
+      if (topology !== lastTopology) {
+        lastTopology = topology;
+        if (view && typeof view.resetToIso === 'function') view.resetToIso();
+        else resetViewInternal(); // scene.js predating resetToIso
+      }
     } catch (error) { onError(error); }
     if (selectedId && built.meshesById.has(selectedId)) {
       try { view.setSelected(selectedId); } catch (error) { /* highlight-only */ }
@@ -1200,8 +1212,17 @@ export function init3D(container, callbacks = {}, options = {}) {
     const deltaSeconds = lastFrameTime ? Math.max(0, (now - lastFrameTime) / 1000) : 0;
     lastFrameTime = now;
     try {
-      const currents = displayedReport ? displayedReport.branch_currents : {};
-      animateFlow(deltaSeconds, currents || {});
+      // Flow dots on every part: ngspice only reports source currents, so
+      // the per-row currents from the check (KCL / Ohm's law) fill the rest.
+      const currents = Object.assign({}, displayedReport ? displayedReport.branch_currents : {});
+      if (displayedReport && Array.isArray(displayedReport.netlist)) {
+        for (const row of displayedReport.netlist) {
+          if (row && typeof row.current === 'number' && !(row.id in currents)) currents[row.id] = row.current;
+        }
+      }
+      animateFlow(deltaSeconds, currents);
+      liveFx.animate(deltaSeconds);
+      if (circuit && typeof circuit.animate === 'function') circuit.animate(deltaSeconds);
       updateLabelPositions(camera);
       // Blueprint tick order (spec §10): labels first, then callout
       // recompute (leader lines track rising parts every frame during
@@ -1294,7 +1315,7 @@ export function init3D(container, callbacks = {}, options = {}) {
      * callouts, severity tints and framing). setNetlist returns to circuits.
      */
     setFiberLink(link, report) {
-      return handle.setModel(() => buildFiberLink(link), report);
+      return handle.setModel(() => buildFiberLink(link, report), report);
     },
 
     /** Free-space optics bench (elements on posts + traced beams). */

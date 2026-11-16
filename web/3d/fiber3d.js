@@ -123,7 +123,7 @@ function buildElement(el, link) {
   return tag(g, el);
 }
 
-export function buildFiberLink(link) {
+export function buildFiberLink(link, report) {
   const elements = (link && Array.isArray(link.elements)) ? link.elements : [];
   const group = new THREE.Group();
   group.name = 'netproof-fiber-link';
@@ -150,5 +150,38 @@ export function buildFiberLink(link) {
     const slab = buildSlab(bbox);
     group.add(slab.group);
   }
-  return { group, meshesById, wirePointsById: {}, nodePositions: new Map() };
+  // Light pulses: travel laser -> detector along the chain, dimming with the
+  // power the budget computed after each element (report.trace, dBm).
+  const trace = (report && report.trace) || [];
+  const launch = report ? Math.pow(10, (report.launch_dbm || 0) / 10) : 1;
+  const powerAt = (x) => {
+    const slot = Math.round((x - x0) / SLOT);
+    const row = trace[Math.max(0, Math.min(trace.length - 1, slot))];
+    return row ? row.power_mw / launch : 1;
+  };
+  const laser = elements.find((e) => e.type === 'laser');
+  const color = bandColor((laser && laser.wavelength_nm) || 1550);
+  const pulses = [];
+  const span = Math.max(1, (elements.length - 1) * SLOT);
+  if (elements.length > 1 && report) {
+    for (let k = 0; k < 7; k++) {
+      const p = new THREE.Mesh(new THREE.SphereGeometry(0.09, 10, 8),
+        new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 1, blending: THREE.AdditiveBlending, depthWrite: false }));
+      p.raycast = () => {};
+      p.userData = { kind: 'pulse', u: k / 7 };
+      group.add(p);
+      pulses.push(p);
+    }
+  }
+  function animate(dt) {
+    for (const p of pulses) {
+      p.userData.u = (p.userData.u + dt * 0.18) % 1;
+      const x = x0 + p.userData.u * span;
+      p.position.set(x, AXIS_Y, 0);
+      const f = Math.max(0.04, Math.min(1, powerAt(x)));
+      p.material.opacity = 0.25 + 0.75 * Math.sqrt(f);
+      p.scale.setScalar(0.6 + 0.8 * Math.sqrt(f));
+    }
+  }
+  return { group, meshesById, wirePointsById: {}, nodePositions: new Map(), animate };
 }

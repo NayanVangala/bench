@@ -188,6 +188,13 @@
       </div>
       <p id="scene3d-status" class="hud mono">3D status: loading&hellip;</p>
     </section>
+    <div id="knob" class="knob" hidden role="group" aria-label="Live value">
+      <div class="knob-head"><span class="eyebrow" id="knob-name"></span><span class="mono knob-v" id="knob-verdict"></span>
+        <button type="button" class="icon-btn" id="knob-close" aria-label="Close">&times;</button></div>
+      <div class="knob-row"><input type="range" id="knob-slider" aria-label="Value"><span class="mono knob-value" id="knob-value"></span></div>
+      <dl class="knob-read"><div><dt>Current</dt><dd class="mono" id="knob-i">&mdash;</dd></div><div><dt>Power</dt><dd class="mono" id="knob-p">&mdash;</dd></div></dl>
+      <p class="knob-note">Drag to change it. Every step is re-simulated in ngspice.</p>
+    </div>
     <div id="synth" class="synth" hidden aria-live="polite">
       <div class="synth-head">
         <span class="eyebrow" id="synth-title">Synthesizing</span>
@@ -2678,7 +2685,7 @@
     var hooks = {
       getNetlist: page.getNetlist,
       getReport: page.getReport,
-      onSelect: function (id) { page.selectComponent(id, { from3D: true }); },
+      onSelect: function (id) { page.selectComponent(id, { from3D: true }); window.dispatchEvent(new CustomEvent('bench:select', { detail: { id: id } })); },
       // Edit-panel Save: apply the edit, then re-check (POST /check).
       // Re-check button: same path. Repair button: apply, then /repair.
       // main3d.js only passes onRecheck / onRepair to the panel when
@@ -2739,6 +2746,7 @@
 <script src="start.js" defer></script>
 <script src="account.js" defer></script>
 <script src="synth.js" defer></script>
+<script src="live.js" defer></script>
 <dialog id="builds-dialog" class="builds-dialog" aria-labelledby="builds-title">
   <div class="card-head"><h2 id="builds-title">My builds</h2><button type="button" class="icon-btn" id="builds-close" aria-label="Close">&times;</button></div>
   <ul id="builds-list" class="builds-list"><li class="empty">Loading&hellip;</li></ul>

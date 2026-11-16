@@ -135,13 +135,13 @@ export const SEVERITY_COLORS = {
   UNKNOWN: '#4B5563', // grey, AA text token (was #8b949e)
 };
 
-const DOTS_PER_BRANCH = 3;
+const DOTS_PER_BRANCH = 6;
 const DOT_COLOR = 0xffb020;
 const DOT_RADIUS_DEFAULT = 0.06;
 // Fraction of wire length travelled per second. Scales with log current so
 // a 15 mA LED current is clearly visible without a 2 A source teleporting.
-const FLOW_BASE_RATE = 0.05;
-const FLOW_RATE_PER_DECADE = 0.12;
+const FLOW_BASE_RATE = 0.12;
+const FLOW_RATE_PER_DECADE = 0.22;
 const FLOW_REFERENCE_CURRENT_A = 0.001; // 1 mA
 const MAX_DELTA_TIME_S = 0.25;
 const CLICK_MOVE_THRESHOLD_PX = 6; // mirrors interaction.js

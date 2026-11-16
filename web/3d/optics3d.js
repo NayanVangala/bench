@@ -142,6 +142,7 @@ export function buildOpticsBench(bench, report) {
 
   // Beams: one glowing rod per traced segment; thicker and brighter with power.
   const segs = (report && report.segments) || [];
+  const photons = [];
   const maxP = Math.max(1e-9, ...segs.map((s) => s.power_mw));
   const color = wavelengthColor(wl);
   for (const s of segs) {
@@ -159,6 +160,22 @@ export function buildOpticsBench(bench, report) {
     rod.raycast = () => {};
     rod.userData = { kind: 'beam' };
     group.add(rod);
+    // Photons streaming along the beam (count by length, glow by power).
+    const n = Math.max(1, Math.round(len / 2.5));
+    for (let k = 0; k < n; k++) {
+      const ph = new THREE.Mesh(new THREE.SphereGeometry(0.13 + 0.1 * frac, 10, 8),
+        new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55 + 0.45 * frac, blending: THREE.AdditiveBlending, depthWrite: false }));
+      ph.raycast = () => {};
+      ph.userData = { a, b, u: k / n, speed: 6 / len };
+      group.add(ph);
+      photons.push(ph);
+    }
   }
-  return { group, meshesById, wirePointsById: {}, nodePositions: new Map() };
+  function animate(dt) {
+    for (const ph of photons) {
+      ph.userData.u = (ph.userData.u + dt * ph.userData.speed) % 1;
+      ph.position.lerpVectors(ph.userData.a, ph.userData.b, ph.userData.u);
+    }
+  }
+  return { group, meshesById, wirePointsById: {}, nodePositions: new Map(), animate };
 }

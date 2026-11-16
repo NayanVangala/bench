@@ -1834,11 +1834,12 @@ async def design_stream(domain: str, goal: str | None = Form(None), image: Uploa
 
     def work(emit):
         meta: dict = {}
-        design = design_ai.propose(domain, goal, image_bytes or None, on_event=emit, meta=meta)
+        design = design_ai.propose_team(domain, goal, image_bytes or None, on_event=emit, meta=meta,
+                                        designers=int(os.environ.get("NETPROOF_AGENTS", "4") or 4))
         emit({"stage": "verify", "message": "Running the " + ("optical power budget" if domain == "fiber" else "ray trace") + "\u2026"})
         report = fiber.check_link(design) if domain == "fiber" else optics.trace_bench(design)
         emit({"stage": "verify", "message": f"Verdict {report['verdict']}: " + (", ".join(f["rule_id"] for f in report["findings"]) or "no rules fired")})
-        return {"design": design, "report": report, "bboxes": meta.get("bboxes") or {}}
+        return {"design": design, "report": report, "bboxes": meta.get("bboxes") or {}, "leaderboard": meta.get("leaderboard") or []}
 
     return EventSourceResponse(_run_streamed(work, first, "Waiting for the AI\u2026"))
 

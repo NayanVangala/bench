@@ -89,7 +89,7 @@
       var step = STAGE_TO_STEP[ev.stage];
       if (step) setStep(step, 'running');
       if (typeof ev.score === 'number') { scores.push(ev.score); spark(); }
-      if (ev.message) log(ev.stage, ev.message, ev.tick ? 'tick' : (ev.stage === 'error' ? 'err' : ''));
+      if (ev.message) log(ev.agent || ev.stage, ev.message, ev.tick ? 'tick' : (ev.stage === 'error' ? 'err' : (ev.agent === 'Judge' ? 'ok' : '')));
     },
     step: setStep,
     log: function (stage, message) {

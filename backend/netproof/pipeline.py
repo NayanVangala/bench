@@ -131,6 +131,7 @@ Injectable seams (for tests)
 from __future__ import annotations
 
 import inspect
+import os
 import statistics
 import time
 from collections import Counter
@@ -181,7 +182,9 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 #: Transcriptions / designs per consensus / best-of-3 round.
-N_CANDIDATES = 3
+# Readers / designers per round. 3 locally and in tests; production can run a
+# bigger team cheaply (Haiku), e.g. NETPROOF_AGENTS=5 in render.yaml.
+N_CANDIDATES = max(1, int(os.environ.get("NETPROOF_AGENTS", "3") or 3))
 #: Repair loop limits.
 MAX_REPAIR_ROUNDS = 3
 REPAIR_BUDGET_S = 90.0
@@ -835,7 +838,9 @@ def consensus_netlists(runs: list[Netlist] | Netlist) -> ConsensusResult:
             for canon, _, inverse in canon_runs
             if canon.get(comp_id) is not None
         ]
-        if len(present) < 2:
+        # A part must be seen by a majority of the readers (2 of 3, 3 of 5),
+        # and never fewer than 2.
+        if len(present) < max(2, len(runs) // 2 + 1):
             uncertain.append(comp_id)
             continue
         type_counts = Counter(

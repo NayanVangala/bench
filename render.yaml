@@ -25,6 +25,8 @@ services:
         generateValue: true
       - key: AUTH_REQUIRED       # every page/API needs a login
         value: "1"
+      - key: NETPROOF_AGENTS     # AI team size: circuit readers/designers, optics/fiber designers (max 4)
+        value: "5"
       # Set in the Render dashboard (never committed).
       # LLM_PROVIDER: "anthropic" or "gemini"; fill in the matching key.
       - key: LLM_PROVIDER

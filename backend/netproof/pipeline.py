@@ -251,6 +251,8 @@ class PipelineResult:
     reads — empty for ``run_pipeline`` / ``run_goal``; ``leaderboard``
     (``run_goal`` with ``team=True`` only) is the design-team ranking,
     a list of ``{"name", "score", "verdict"}`` dicts, winner first.
+    ``objective`` (``run_goal`` only) is the resolved goal-mode
+    objective (``"balanced"`` by default).
     """
 
     netlist: Netlist
@@ -260,6 +262,7 @@ class PipelineResult:
     rounds: int = 0
     unmodeled: list[dict] = field(default_factory=list)
     leaderboard: list[dict] = field(default_factory=list)
+    objective: str = "balanced"
 
 
 @dataclass
@@ -1147,11 +1150,12 @@ def design_best_of_3(
 # STOP; ties: fewest STOP, then fewest WARN, then earliest) — exactly
 # like :func:`design`. The per-designer ``score`` is the tuner score
 # (``tuner._circuit_score``: ``95 - 25*STOP - 5*WARN - 40*LED-miss``,
-# default target balanced / 12 mA, because goal mode carries no prefs
-# to choose another target). The two scores can and do disagree: a
-# PASS-but-dim candidate (5 mA LED) scores 71.7 while a WARN candidate
-# whose LED sits exactly on target scores ~90.0 — yet the picker still
-# takes the PASS candidate, and the tuner score is shown, not hidden.
+# default target balanced / 12 mA; goal-mode ``prefs`` choose another
+# target via :func:`_resolve_goal_prefs`). The two scores can and do
+# disagree: a PASS-but-dim candidate (5 mA LED) scores 71.7 while a
+# WARN candidate whose LED sits exactly on target scores ~90.0 — yet
+# the picker still takes the PASS candidate, and the tuner score is
+# shown, not hidden.
 # The tuner score is informational only: it never picks the winner,
 # and NO tuning runs inside the pipeline (tuning stays the separate
 # manual ``POST /tune/circuit`` step on the final netlist, so a tuned
@@ -1227,10 +1231,10 @@ def circuit_score(
     ``tuner._circuit_score`` on the ``(report, netlist)`` pair:
     ``95 - 25*STOP - 5*WARN - 40 * mean(|I_LED - target| / target)``.
     ``target_ma`` defaults to the tuner's ``balanced`` target
-    (12 mA); goal mode has no prefs, so no other target is implied.
-    With no LEDs the miss term is 0. The score is NOT clamped and is
-    NOT the team picker — see the mismatch note above
-    :data:`CIRCUIT_DESIGNERS`.
+    (12 mA); goal mode passes its resolved prefs target here (see
+    :func:`_resolve_goal_prefs`). With no LEDs the miss term is 0.
+    The score is NOT clamped and is NOT the team picker — see the
+    mismatch note above :data:`CIRCUIT_DESIGNERS`.
     """
     from . import tuner as _tuner
 
@@ -1242,6 +1246,45 @@ def circuit_score(
     return _tuner._circuit_score(
         _tuner_report_dict(report, netlist), target_a
     )
+
+
+def _resolve_goal_prefs(
+    prefs: dict | None, target_ma: float | None = None
+) -> tuple[str, float]:
+    """Resolve goal-mode prefs to ``(objective, target_ma)``.
+
+    ``prefs`` may carry ``objective`` (one of
+    ``tuner.CIRCUIT_TARGET_MA``: ``balanced`` / ``bright`` /
+    ``battery`` / ``cheap``) and/or an explicit ``target_ma`` (LED
+    target current in mA), which wins over the objective's target.
+    An explicit ``target_ma`` argument wins over ``prefs``. An
+    unknown objective or a non-positive target raises ``ValueError``
+    (the API surfaces it as HTTP 400). ``None`` prefs resolve to
+    ``("balanced", 12.0)``: the tuner-score default, so goal mode
+    without prefs behaves exactly as before.
+    """
+    from . import tuner as _tuner
+
+    prefs = prefs or {}
+    objective = prefs.get("objective") or "balanced"
+    targets = _tuner.CIRCUIT_TARGET_MA
+    if objective not in targets:
+        raise ValueError(
+            f"unknown objective {objective!r}: expected one of "
+            + ", ".join(sorted(targets))
+        )
+    resolved = target_ma if target_ma is not None else prefs.get("target_ma")
+    if resolved is None:
+        resolved = targets[objective]
+    try:
+        resolved = float(resolved)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"target_ma must be a number, got {resolved!r}"
+        ) from None
+    if resolved <= 0:
+        raise ValueError(f"target_ma must be positive, got {resolved:g}")
+    return objective, resolved
 
 
 def _call_design_single(
@@ -1327,6 +1370,7 @@ def design_team(
     designers: int = 4,
     on_event: Any = None,
     target_ma: float | None = None,
+    prefs: dict | None = None,
 ) -> DesignResult:
     """Design a circuit as a team of strategists.
 
@@ -1339,6 +1383,17 @@ def design_team(
     earliest designer) — the tuner score is emitted per designer
     for the dock but never picks the winner (see the mismatch note
     above :data:`CIRCUIT_DESIGNERS`). No tuning runs here.
+
+    ``prefs`` is an optional goal-mode preferences dict (see
+    :func:`_resolve_goal_prefs`): ``objective`` in
+    ``balanced`` / ``bright`` / ``battery`` / ``cheap`` and/or an
+    explicit ``target_ma`` (LED target in mA). It is honoured two
+    ways: the resolved target feeds the per-designer tuner score,
+    and a one-line preference note is appended to each designer's
+    prompt so the LLM can aim at it. An explicit ``target_ma``
+    argument wins over ``prefs``. With no ``prefs`` the target is
+    the ``balanced`` 12 mA default and no note is added, i.e. the
+    previous behaviour exactly.
 
     ``on_event(dict)`` receives the team events in the
     ``propose_team`` dialect, each with ``elapsed_s`` added:
@@ -1354,6 +1409,15 @@ def design_team(
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("design requires a non-empty goal string")
     timer = _Timer()
+    objective, resolved_target = _resolve_goal_prefs(prefs, target_ma)
+    # Only when prefs were actually given: the note must not change
+    # the default prompt at all.
+    pref_note = (
+        f"\n\nPreference: {objective} objective — aim for an LED "
+        f"current near {resolved_target:g} mA."
+        if prefs
+        else ""
+    )
     raw_emit = on_event or (lambda e: None)
 
     def emit(event: dict) -> None:
@@ -1391,10 +1455,10 @@ def design_team(
             }
         )
         candidate = _call_design_single(
-            llm, f"{prompt}\n\n{strategy}", client
+            llm, f"{prompt}\n\n{strategy}{pref_note}", client
         )
         report = analyze(candidate, simulator=simulator, run_sim=run_sim)
-        score = circuit_score(report, candidate, target_ma=target_ma)
+        score = circuit_score(report, candidate, target_ma=resolved_target)
         emit(
             {
                 "stage": "verify",
@@ -1912,12 +1976,22 @@ def run_goal(
     deadline_s: float = REPAIR_BUDGET_S,
     team: bool = False,
     designers: int = 4,
+    prefs: dict | None = None,
     **_ignored: Any,
 ) -> Any:
     """Design a circuit for ``goal`` (best-of-``N_CANDIDATES``, each
     verified), then repair while STOP. Generator yielding ``{stage,
     agent, message, elapsed_s}`` events; returns a ``PipelineResult``
     as the generator's return value. Any LLM failure raises.
+
+    ``prefs`` is the optional goal-mode preferences dict (see
+    :func:`_resolve_goal_prefs`): ``objective`` and/or
+    ``target_ma``. In team mode it is passed to
+    :func:`design_team`, so the tuner scores and the designer
+    prompts honour it; the resolved ``objective`` is carried on the
+    terminal result event and the returned ``PipelineResult``.
+    Without ``prefs`` the objective is ``"balanced"`` and behaviour
+    is unchanged.
 
     With ``team=True`` the design step runs :func:`design_team`
     instead of :func:`design`: one strategist per
@@ -1932,6 +2006,7 @@ def run_goal(
     and ``done: true`` (dialect A, Option 1).
     """
     timer = _Timer()
+    objective, _ = _resolve_goal_prefs(prefs)
     events: list[dict] = []
 
     def emit(stage: str, agent: str, message: str) -> dict:
@@ -1953,6 +2028,7 @@ def run_goal(
             simulator=simulator,
             run_sim=run_sim,
             designers=designers,
+            prefs=prefs,
             on_event=team_events.append,
         )
         for team_event in team_events:
@@ -2025,6 +2101,7 @@ def run_goal(
         "repairs": repairs,
         "rounds": rounds,
         "leaderboard": leaderboard,
+        "objective": objective,
     }
     yield done_event
     return PipelineResult(
@@ -2034,4 +2111,5 @@ def run_goal(
         repairs=repairs,
         rounds=rounds,
         leaderboard=leaderboard,
+        objective=objective,
     )

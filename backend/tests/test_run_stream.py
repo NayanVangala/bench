@@ -277,3 +277,43 @@ def test_run_stream_goal_team_picks_pass_candidate(
         "Safe",
         "Efficient",
     }
+
+
+def test_run_stream_goal_prefs_threaded_and_unknown_objective_is_400(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Goal-mode prefs thread ``_run_stream -> pipeline.run_goal ->
+    design_team``: the terminal result carries the resolved
+    ``objective`` (and the battery target retargets the tuner
+    scores), while an unknown objective ends the stream with a
+    400 ``invalid_input`` error event, not a silent fallback."""
+    monkeypatch.setattr(
+        llm_module, "design", lambda goal, client=None: _good_netlist()
+    )
+
+    frames = _collect(
+        "goal",
+        goal="9V LED circuit, red LED, 15 mA",
+        prefs={"objective": "battery"},
+    )
+    assert [f for f in frames if f["event"] == "error"] == []
+    result = _result(frames)
+    assert result["done"] is True
+    assert result["verdict"] == "PASS"
+    assert result["objective"] == "battery"
+    # 14.9 mA against the 5 mA battery target: 95 - 40*|14.9-5|/5.
+    assert result["leaderboard"][0]["score"] == pytest.approx(
+        15.85, abs=0.05
+    )
+
+    frames = _collect(
+        "goal",
+        goal="9V LED circuit, red LED, 15 mA",
+        prefs={"objective": "dim"},
+    )
+    errors = [f["data"] for f in frames if f["event"] == "error"]
+    assert len(errors) == 1
+    assert errors[0]["error"] == "invalid_input"
+    assert errors[0]["http_status"] == 400
+    assert "unknown objective" in errors[0]["detail"]
+    assert [f for f in frames if f["event"] == "result"] == []
